@@ -1,0 +1,75 @@
+name: Windows dependencies
+
+# Builds the Windows x64 dependency tree (deps/) with the fork's own
+# build_release_vs.bat and stores the install prefix in the Actions cache.
+# Called by windows-build.yml only when the cache has no entry for the current
+# deps/ contents, or when a rebuild is asked for. It publishes nothing and uses
+# no secrets; the cache is its only output.
+
+on:
+  workflow_call:
+    inputs:
+      cache-key:
+        required: true
+        type: string
+      cache-path:
+        required: true
+        type: string
+      os:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build_deps:
+    name: Build dependencies (x64)
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      # Restores nothing on a first run. The post step saves the install prefix
+      # under the key when the job succeeds, which is what later builds restore.
+      - name: Dependency cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ inputs.cache-path }}
+          key: ${{ inputs.cache-key }}
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+          useCloudCache: true
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      # OpenSSL's configure step needs a Perl that understands Windows paths.
+      - name: Install Strawberry Perl
+        shell: pwsh
+        run: choco install strawberryperl --yes --no-progress
+
+      # build_release_vs.bat does not stop on a failed cmake call, so the
+      # result is checked below instead of trusting the exit code.
+      - name: Build dependencies
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: .\build_release_vs.bat deps
+
+      - name: Check the dependency prefix
+        shell: pwsh
+        run: |
+          $prefix = "${{ inputs.cache-path }}/usr/local"
+          # A cheap guard against caching a half-built tree: Boost and wxWidgets
+          # headers must both be installed. On Windows Boost installs its headers
+          # under include/boost-<version>. The app build is the real check.
+          foreach ($probe in @("include/boost-*/boost/version.hpp", "include/wx")) {
+            if (-not (Test-Path (Join-Path $prefix $probe))) { throw "Dependency build looks incomplete: $probe missing under $prefix" }
+          }
+          Get-ChildItem $prefix | Format-Table Name
