@@ -1283,7 +1283,7 @@ std::set<std::size_t> wizard_touching_assemblies(const std::vector<ModelObject *
                                                  const std::vector<BodySplitEditorRow> &rows)
 {
     // Faces that meet share a coordinate; the tolerance only absorbs float noise.
-    constexpr double tolerance = 1e-3;
+    static constexpr double tolerance = 1e-3;
     const auto boxes_meet = [](const BoundingBoxf3 &lhs, const BoundingBoxf3 &rhs) {
         for (int axis = 0; axis < 3; ++axis)
             if (lhs.min(axis) > rhs.max(axis) + tolerance || rhs.min(axis) > lhs.max(axis) + tolerance)
