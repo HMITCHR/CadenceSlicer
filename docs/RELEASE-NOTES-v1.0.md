@@ -13,7 +13,7 @@ Cadence Slicer is a fork of OrcaSlicer that lets a multi-nozzle printer use two 
 
 With mixed-nozzle slicing off, which is the default for every project, it slices like OrcaSlicer.
 
-The same work is going to OrcaSlicer as pull requests shortly after this release. I'll add the PR numbers here once they're open. Cadence is how you can use it until then.
+The same work is going to OrcaSlicer as pull requests. The first batch is open: seven small fixes to shared code that I found along the way ([#16079](https://github.com/OrcaSlicer/OrcaSlicer/pull/16079), [#16080](https://github.com/OrcaSlicer/OrcaSlicer/pull/16080), [#16081](https://github.com/OrcaSlicer/OrcaSlicer/pull/16081), [#16082](https://github.com/OrcaSlicer/OrcaSlicer/pull/16082), [#16083](https://github.com/OrcaSlicer/OrcaSlicer/pull/16083), [#16084](https://github.com/OrcaSlicer/OrcaSlicer/pull/16084), [#16085](https://github.com/OrcaSlicer/OrcaSlicer/pull/16085)). The mixed-nozzle work itself follows once the maintainers say how they want it split. Cadence is how you can use it until then.
 
 ## New since the last test builds
 
