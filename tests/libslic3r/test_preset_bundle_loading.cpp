@@ -196,7 +196,7 @@ TEST_CASE("Selected printer uses its default or saved bed type", "[Preset][Bundl
     CHECK(app_config.get_printer_setting("Test Printer", "curr_bed_type") == std::to_string(static_cast<int>(expected_bed_type)));
 }
 
-TEST_CASE("Printer without its own default bed type uses its machine model's", "[Preset][Bundle][TestRebuild][B37]")
+TEST_CASE("Printer without its own default bed type uses its machine model's", "[Preset][Bundle][TestRebuild]")
 {
     PresetBundle library;
     library.load_vendor_configs_from_json(PROFILES_DIR, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,

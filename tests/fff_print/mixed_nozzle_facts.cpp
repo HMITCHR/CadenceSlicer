@@ -64,7 +64,7 @@ void validate_region_list(const std::string &value, bool &malformed)
 // Validate every supported record type (GRID, CELL, RENDEZVOUS, TOLERANCE, TOOLCHANGES, SUPPORT,
 // BAND, FEATURE), but store only GRID and SUPPORT in EmittedFacts. This keeps other well-formed
 // records from being flagged malformed merely because they have no corresponding stored type.
-void parse_srl_plan(const std::string &gcode, EmittedFacts &facts)
+void parse_plan_records(const std::string &gcode, EmittedFacts &facts)
 {
     bool inside = false;
     std::istringstream stream(gcode);
@@ -183,8 +183,8 @@ EmittedFacts extract_emitted_facts(const std::string &gcode)
     const std::vector<GCodeProcessorResult::MoveVertex> moves = emitted_moves(gcode);
 
     // Bucket extrude moves by (layer_id, role, physical_tool_id). First-seen height/width/
-    // mm3_per_mm are kept -- not averaged -- for determinism: every RED fixture's bucket is
-    // uniform by construction (Step 2), so first-seen and average coincide there.
+    // mm3_per_mm are kept -- not averaged -- for determinism: every fixture's bucket is
+    // uniform by construction, so first-seen and average coincide there.
     std::map<std::tuple<unsigned int, ExtrusionRole, unsigned char>, size_t> bucket_index;
 
     bool have_prev_extrude = false;
@@ -226,7 +226,7 @@ EmittedFacts extract_emitted_facts(const std::string &gcode)
         have_prev_extrude = true;
     }
 
-    parse_srl_plan(gcode, facts);
+    parse_plan_records(gcode, facts);
 
     return facts;
 }

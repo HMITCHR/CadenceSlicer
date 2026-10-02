@@ -420,7 +420,7 @@ void place_two_cube_instances_apart(double gap, std::initializer_list<Slic3r::Co
 	print.set_status_silent();
 }
 
-// Moved from test_off_mode_parity.cpp so every E2E file compares G-code the same way.
+// Shared so every E2E file compares G-code the same way.
 std::string strip_nondeterministic_lines(const std::string &gcode)
 {
     const auto starts_with = [](const std::string &line, const char *prefix) { return line.rfind(prefix, 0) == 0; };

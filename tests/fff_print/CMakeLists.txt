@@ -4,22 +4,22 @@ add_executable(${_TEST_NAME}_tests
 	test_helpers.cpp
 	test_helpers.hpp
 	test_cooling.cpp
-	test_rebuild_admission.cpp
-	test_rebuild_off.cpp
-	test_rebuild_printers.cpp
-	test_rebuild_feature_support.cpp
-	test_rebuild_feature.cpp
-	test_rebuild_cooling.cpp
-	test_rebuild_tower.cpp
-	test_rebuild_rc5_tower.cpp
-	test_rebuild_rc5_misc.cpp
-	test_rebuild_reprime.cpp
-	test_rebuild_body_options.cpp
-	test_rebuild_body.cpp
-	test_rebuild_geometry.cpp
-	test_rebuild_bug_guards.cpp
-	test_rebuild_b38_support.cpp
-	test_rebuild_b39_startline.cpp
+	test_mixed_nozzle_admission.cpp
+	test_mixed_nozzle_off.cpp
+	test_mixed_nozzle_printers.cpp
+	test_mixed_nozzle_feature_support.cpp
+	test_mixed_nozzle_feature.cpp
+	test_mixed_nozzle_cooling.cpp
+	test_mixed_nozzle_tower.cpp
+	test_mixed_nozzle_tower_first_layer.cpp
+	test_mixed_nozzle_raft_and_narrow_infill.cpp
+	test_mixed_nozzle_reprime.cpp
+	test_mixed_nozzle_body_options.cpp
+	test_mixed_nozzle_body.cpp
+	test_mixed_nozzle_geometry.cpp
+	test_mixed_nozzle_bug_guards.cpp
+	test_mixed_nozzle_support.cpp
+	test_mixed_nozzle_start_line.cpp
 	test_extrusion_entity.cpp
 	test_fill.cpp
 	test_flow.cpp
@@ -34,8 +34,8 @@ add_executable(${_TEST_NAME}_tests
 	test_slicing_pipeline_hook.cpp
 	mixed_nozzle_facts.hpp
 	mixed_nozzle_facts.cpp
-	srl_fixtures.hpp
-	srl_fixtures.cpp
+	mixed_nozzle_fixtures.hpp
+	mixed_nozzle_fixtures.cpp
 	test_support_material.cpp
 	test_trianglemesh.cpp
 	test_wipe_tower.cpp

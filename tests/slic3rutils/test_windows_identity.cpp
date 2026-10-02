@@ -6,7 +6,7 @@
 #include <sstream>
 #include <string>
 
-// Release copy, September 24. Cadence Slicer installs next to OrcaSlicer on Windows, so the two
+// Cadence Slicer installs next to OrcaSlicer on Windows, so the two
 // must not share an executable name, file association ProgID or version-resource identity. These
 // checks read the build and installer sources, because none of it can run on the Mac that builds
 // the tests.

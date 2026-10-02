@@ -18,22 +18,22 @@ add_executable(${_TEST_NAME}_tests
     test_print_completion_selection.cpp
     test_webview_identity.cpp
     test_windows_identity.cpp
-    test_rebuild_plate.cpp
-    test_rebuild_editors.cpp
-    test_rebuild_ranking.cpp
-    test_rebuild_preview.cpp
-    test_rebuild_wizard_math.cpp
-    test_rebuild_workflows.cpp
-    test_rebuild_bug_guards.cpp
-    test_rebuild_b33_plater.cpp
-    test_rebuild_b34.cpp
-    test_rebuild_b35.cpp
-    test_rebuild_b39.cpp
-    test_rebuild_b40.cpp
-    test_rebuild_rc3.cpp
-    test_rebuild_rc5.cpp
-    test_rebuild_rc5_device.cpp
-    ../fff_print/srl_fixtures.cpp
+    test_mixed_nozzle_plate.cpp
+    test_mixed_nozzle_editors.cpp
+    test_mixed_nozzle_ranking.cpp
+    test_mixed_nozzle_preview.cpp
+    test_mixed_nozzle_wizard_math.cpp
+    test_mixed_nozzle_workflows.cpp
+    test_mixed_nozzle_bug_guards.cpp
+    test_mixed_nozzle_plater.cpp
+    test_mixed_nozzle_apply_bed_type.cpp
+    test_mixed_nozzle_apply_stale_paint.cpp
+    test_mixed_nozzle_apply_support_filaments.cpp
+    test_mixed_nozzle_apply_support_settings.cpp
+    test_mixed_nozzle_printer_sync.cpp
+    test_mixed_nozzle_high_flow.cpp
+    test_mixed_nozzle_device_sync.cpp
+    ../fff_print/mixed_nozzle_fixtures.cpp
     wizard_apply_support.hpp
     ../fff_print/test_helpers.cpp
     ../fff_print/mixed_nozzle_facts.cpp
