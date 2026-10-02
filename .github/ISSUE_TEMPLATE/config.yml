@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream OrcaSlicer
+    url: https://github.com/OrcaSlicer/OrcaSlicer/issues
+    about: If the same thing happens in OrcaSlicer, report it there. That is where it gets fixed.
+  - name: Questions and ideas
+    url: https://github.com/HMITCHR/CadenceSlicer/discussions
+    about: Use discussions for how-do-I questions and for ideas that are not yet a concrete request.

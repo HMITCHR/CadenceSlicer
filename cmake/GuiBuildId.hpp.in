@@ -1,0 +1,3 @@
+#pragma once
+#define ORCA_GUI_BUILD_COMMIT "@ORCA_GUI_BUILD_COMMIT@"
+#define ORCA_GUI_BUILD_ID "@ORCA_GUI_BUILD_ID@"

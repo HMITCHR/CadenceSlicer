@@ -1,0 +1,241 @@
+name: Windows build
+
+# Builds the Cadence Slicer Windows x64 app and its NSIS installer on a GitHub
+# hosted runner, with the fork's own build_release_vs.bat.
+#
+# This workflow publishes nothing. It uploads no release, creates no tags,
+# pushes nowhere and needs no secrets. Its outputs are run artifacts:
+# the installer, the portable folder, and the debug symbols.
+#
+# The dependency tree is built once and kept in the Actions cache, keyed on
+# the contents of deps/. Caches made on the default branch are visible to tag
+# runs, so the first run should be a manual one on the default branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build-deps-only:
+        description: Only build the dependencies and fill the cache
+        type: boolean
+        default: false
+      rebuild-deps:
+        description: Rebuild the dependencies even when the cache has them
+        type: boolean
+        default: false
+      build-tests:
+        description: Also build the test suites and run the fork's filtered tests
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned rather than windows-latest: the cached dependencies must come from
+  # the same Visual Studio as the app that links them.
+  RUNNER_IMAGE: windows-2025
+
+jobs:
+  check_cache:
+    name: Check dependency cache
+    runs-on: windows-2025
+    outputs:
+      cache-key: ${{ steps.names.outputs.cache-key }}
+      cache-path: ${{ steps.names.outputs.cache-path }}
+      valid-cache: ${{ steps.lookup.outputs.cache-hit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: Name the cache entry
+        id: names
+        shell: pwsh
+        run: |
+          "cache-key=${{ env.RUNNER_IMAGE }}-x64-cadence-deps-${{ hashFiles('deps/**') }}" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          "cache-path=${{ github.workspace }}/deps/build/OrcaSlicer_dep" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Look up the cache
+        id: lookup
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.names.outputs.cache-path }}
+          key: ${{ steps.names.outputs.cache-key }}
+          lookup-only: true
+
+  build_deps:
+    name: Dependencies
+    needs: check_cache
+    if: ${{ !cancelled() && (inputs.build-deps-only || inputs.rebuild-deps || needs.check_cache.outputs.valid-cache != 'true') }}
+    uses: ./.github/workflows/windows-deps.yml
+    with:
+      cache-key: ${{ needs.check_cache.outputs.cache-key }}
+      cache-path: ${{ needs.check_cache.outputs.cache-path }}
+      os: windows-2025
+
+  build:
+    name: Build Cadence Slicer (x64)
+    needs: [check_cache, build_deps]
+    if: ${{ !cancelled() && !inputs.build-deps-only && needs.check_cache.result == 'success' && (needs.build_deps.result == 'success' || needs.build_deps.result == 'skipped') }}
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      BUILD_DIR: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+
+      - name: Restore dependencies
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ needs.check_cache.outputs.cache-path }}
+          key: ${{ needs.check_cache.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+          useCloudCache: true
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      # A tag build is named after the tag. Anything else carries the product
+      # version from version.inc and the short commit, so two manual runs never
+      # produce artifacts with the same name.
+      - name: Name the build
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $ver = "${{ github.ref_name }}"
+          } else {
+            $content = Get-Content version.inc -Raw
+            if ($content -notmatch 'set\(CADENCE_PRODUCT_VERSION "(.*?)"\)') { throw "CADENCE_PRODUCT_VERSION not found in version.inc" }
+            $ver = "V" + $matches[1] + "_" + "${{ github.sha }}".Substring(0, 10)
+          }
+          "ver=$ver" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "Build name: $ver"
+
+      # The Chocolatey feed sometimes fails while choco still exits 0, so the
+      # install is retried and makensis itself is checked.
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $nsisDir = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
+          $makensis = Join-Path $nsisDir 'makensis.exe'
+          for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
+            if ($attempt -gt 1) { Start-Sleep -Seconds (15 * $attempt) }
+            choco install nsis --yes --no-progress
+          }
+          if (-not (Test-Path $makensis)) { throw "NSIS install failed: $makensis not found after 3 attempts." }
+          & $makensis /VERSION
+          $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+
+      - name: Build the app
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          if ("${{ inputs.build-tests }}" -eq "true") {
+            .\build_release_vs.bat slicer tests
+          } else {
+            .\build_release_vs.bat slicer
+          }
+
+      # build_release_vs.bat carries on after a failed compile and exits 0, so
+      # the install tree is checked before anything is packaged from it.
+      - name: Check the build output
+        id: build_output
+        shell: pwsh
+        run: |
+          $install = "${{ env.BUILD_DIR }}/OrcaSlicer"
+          foreach ($file in @("CadenceSlicer.exe", "OrcaSlicer.dll", "resources", "LICENSE.txt", "NOTICE.md")) {
+            if (-not (Test-Path (Join-Path $install $file))) { throw "Build failed or is incomplete: $file missing from $install" }
+          }
+
+      - name: libslic3r tests
+        if: ${{ inputs.build-tests }}
+        shell: bash
+        env:
+          TESTS_DIR: build/tests
+        run: |
+          bash .github/run-suite.sh libslic3r \
+            '[MixedNozzlePrime],[DepositIntent],[W36],[Preset],[MixedNozzlePreset],[MixedNozzleRebind],[MixedNozzleBinding],[Config],[MixedNozzleTowerBrim],[AppConfig],[W58]'
+
+      - name: slic3rutils tests
+        # Runs after a failed suite too, so one run reports all three.
+        if: ${{ !cancelled() && inputs.build-tests && steps.build_output.outcome == 'success' }}
+        shell: bash
+        env:
+          TESTS_DIR: build/tests
+        run: |
+          bash .github/run-suite.sh slic3rutils \
+            '[MixedNozzle],[TowerPolicy],[SetupController],[W14],[W17],[MixedNozzleWizard],[SidebarPanel],[W48]'
+
+      - name: fff_print tests
+        # Runs after a failed suite too, so one run reports all three.
+        if: ${{ !cancelled() && inputs.build-tests && steps.build_output.outcome == 'success' }}
+        shell: bash
+        env:
+          TESTS_DIR: build/tests
+        run: |
+          bash .github/run-suite.sh fff_print \
+            '[W40],[W32],[W33],[W46],[V24Pad],[TowerBrim],[MixedNozzleTower],[Tower],[D24],[Packet02],[MixedNozzleAdvisor],[FeatureEconomics],[FeatureEconomicsBaseline],[MixedNozzleCadence],[MixedNozzlePrime],[W35],[BodySplit],[FirstLayer],[Regression],[W47],[W44]'
+
+      - name: Upload test output
+        if: ${{ failure() && inputs.build-tests }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64-test-output
+          path: test-output/
+          retention-days: 5
+          if-no-files-found: ignore
+
+      # CPack names the file from version.inc:
+      # CadenceSlicer_Windows_Installer_V<product version>_x64.exe
+      - name: Create the installer
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}
+        shell: pwsh
+        run: |
+          cpack -G NSIS
+          if ($LASTEXITCODE -ne 0) { throw "cpack failed" }
+          $installer = Get-ChildItem -Filter "CadenceSlicer_Windows_Installer_*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "No CadenceSlicer installer was produced" }
+          Write-Host "Installer: $($installer.Name) ($([math]::Round($installer.Length / 1MB)) MB)"
+
+      - name: Pack debug symbols
+        working-directory: ${{ github.workspace }}/${{ env.BUILD_DIR }}/src/Release
+        shell: cmd
+        run: '"C:/Program Files/7-Zip/7z.exe" a -m0=lzma2 -mx9 CadenceSlicer_Windows_${{ env.ver }}_x64_PDB.7z *.pdb'
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: CadenceSlicer_Windows_Installer_${{ env.ver }}_x64
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/CadenceSlicer_Windows_Installer_*.exe
+          if-no-files-found: error
+
+      - name: Upload the portable folder
+        uses: actions/upload-artifact@v7
+        with:
+          name: CadenceSlicer_Windows_${{ env.ver }}_x64_portable
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/OrcaSlicer
+          if-no-files-found: error
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: CadenceSlicer_Windows_${{ env.ver }}_x64_PDB
+          path: ${{ github.workspace }}/${{ env.BUILD_DIR }}/src/Release/CadenceSlicer_Windows_${{ env.ver }}_x64_PDB.7z
+          retention-days: 30
+          if-no-files-found: warn

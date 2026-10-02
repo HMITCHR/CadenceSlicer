@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest something Cadence Slicer should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This fork exists for mixed-nozzle work: Feature Split, Body Split and
+        synchronized prime-pad deposition. Requests in that area are the ones
+        most likely to go anywhere.
+
+        Anything general to slicing belongs upstream in OrcaSlicer, where far
+        more people will see it.
+  - type: checkboxes
+    attributes:
+      label: Existing issues
+      options:
+        - label: I have searched the open and closed issues
+          required: true
+  - type: textarea
+    attributes:
+      label: What would you like it to do?
+      description: What should change, and what should the result be.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What problem does that solve?
+      description: What you are trying to print, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Anything else
+      description: Alternatives you have tried, sketches, screenshots, example models.
+    validations:
+      required: false

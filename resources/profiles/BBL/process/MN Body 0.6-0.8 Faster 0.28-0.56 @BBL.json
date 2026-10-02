@@ -1,0 +1,150 @@
+{
+	"type": "process",
+	"name": "MN Body 0.6-0.8 Faster 0.28-0.56 @BBL",
+	"inherits": "fdm_process_dual_0.30_nozzle_0.6",
+	"from": "system",
+	"setting_id": "ggtxfrdTf0Nber3A",
+	"instantiation": "true",
+	"description": "Body Split starting point for a 0.6 mm fine nozzle and a 0.8 mm coarse nozzle. Assign the fine body to the smaller nozzle at the base height and the coarse body to the larger nozzle at the named coarse height. For Feature Split, pick an MN Feature preset instead. Not yet print-tested on a 0.8 mm nozzle.",
+	"layer_height": "0.28",
+	"mixed_nozzle_coarse_layer_height": "0.56",
+	"mixed_nozzle_allowed_cadence_ratios": [
+		"2"
+	],
+	"bridge_line_width": "0",
+	"compatible_printers": [],
+	"compatible_printers_condition": "(size(nozzle_diameter)==2 and size(min_layer_height)>0 and size(max_layer_height)>0) ? ((nozzle_diameter[0]==0.6 and nozzle_diameter[1]==0.8 and (min_layer_height[0]==0 ? 0.07 : max(0.01,min_layer_height[0]))<=0.28 and max((min_layer_height[0]==0 ? 0.07 : max(0.01,min_layer_height[0])),(max_layer_height[0]==0 ? 0.75*nozzle_diameter[0] : max_layer_height[0]))>=0.28 and nozzle_diameter[0]>=0.28 and (min_layer_height[1]==0 ? 0.07 : max(0.01,min_layer_height[1]))<=0.28 and max((min_layer_height[1]==0 ? 0.07 : max(0.01,min_layer_height[1])),(max_layer_height[1]==0 ? 0.75*nozzle_diameter[1] : max_layer_height[1]))>=0.56 and nozzle_diameter[1]>=0.56) or (nozzle_diameter[1]==0.6 and nozzle_diameter[0]==0.8 and (min_layer_height[1]==0 ? 0.07 : max(0.01,min_layer_height[1]))<=0.28 and max((min_layer_height[1]==0 ? 0.07 : max(0.01,min_layer_height[1])),(max_layer_height[1]==0 ? 0.75*nozzle_diameter[1] : max_layer_height[1]))>=0.28 and nozzle_diameter[1]>=0.28 and (min_layer_height[0]==0 ? 0.07 : max(0.01,min_layer_height[0]))<=0.28 and max((min_layer_height[0]==0 ? 0.07 : max(0.01,min_layer_height[0])),(max_layer_height[0]==0 ? 0.75*nozzle_diameter[0] : max_layer_height[0]))>=0.56 and nozzle_diameter[0]>=0.56)) : false",
+	"support_top_z_distance": "0.28",
+	"support_bottom_z_distance": "0.28",
+	"support_filament": "2",
+	"support_interface_filament": "1",
+	"prime_tower_flat_ironing": "0",
+	"sparse_infill_pattern": "grid",
+	"minimum_sparse_infill_area": "0",
+	"top_shell_thickness": "0",
+	"detect_overhang_wall": "0",
+	"only_one_wall_top": "0",
+	"ensure_vertical_shell_thickness": "none",
+	"thick_internal_bridges": "0",
+	"elefant_foot_compensation": "0",
+	"flush_into_support": "0",
+	"print_extruder_id": [
+		"1",
+		"1",
+		"2",
+		"2",
+		"1",
+		"1",
+		"2",
+		"2"
+	],
+	"print_extruder_variant": [
+		"Direct Drive Standard",
+		"Direct Drive High Flow",
+		"Direct Drive Standard",
+		"Direct Drive High Flow",
+		"Bowden Standard",
+		"Bowden High Flow",
+		"Bowden Standard",
+		"Bowden High Flow"
+	],
+	"mixed_nozzle_process_nozzle_diameters": [
+		"0.6",
+		"0.8"
+	],
+	"outer_wall_speed": [
+		"120",
+		"120",
+		"60",
+		"60",
+		"50",
+		"50",
+		"50",
+		"50"
+	],
+	"inner_wall_speed": [
+		"150",
+		"150",
+		"120",
+		"120",
+		"150",
+		"150",
+		"120",
+		"120"
+	],
+	"top_surface_speed": [
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150"
+	],
+	"internal_solid_infill_speed": [
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150",
+		"150"
+	],
+	"sparse_infill_speed": [
+		"100",
+		"100",
+		"100",
+		"100",
+		"100",
+		"100",
+		"100",
+		"100"
+	],
+	"gap_infill_speed": [
+		"50",
+		"50",
+		"50",
+		"50",
+		"50",
+		"50",
+		"50",
+		"50"
+	],
+	"default_acceleration": [
+		"10000",
+		"10000",
+		"4000",
+		"4000",
+		"4000",
+		"4000",
+		"4000",
+		"4000"
+	],
+	"outer_wall_acceleration": [
+		"5000",
+		"5000",
+		"2000",
+		"2000",
+		"4000",
+		"4000",
+		"2000",
+		"2000"
+	],
+	"sparse_infill_density": "25%",
+	"wall_loops": "2",
+	"bottom_shell_layers": "3",
+	"top_shell_layers": "3",
+	"overhang_4_4_speed": [
+		"10",
+		"10",
+		"10",
+		"10",
+		"10",
+		"10",
+		"5",
+		"5"
+	],
+	"renamed_from": "MN Body 0.6-0.8 Faster 0.28-0.56 External-test candidate @BBL"
+}

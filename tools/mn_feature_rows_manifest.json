@@ -1,0 +1,1630 @@
+{
+  "schema_version": 1,
+  "catalogue": "mixed-nozzle-feature",
+  "mode": "feature_split",
+  "modes": [
+    "feature_split"
+  ],
+  "matrix_count": 24,
+  "new_row_count": 16,
+  "rows": [
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.4",
+      "fine_height": "0.08",
+      "coarse_height": "0.16",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.16",
+      "source_fine_height": "0.08",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.2-0.4 Detail 0.08-0.16 @BBL",
+      "renamed_from": null,
+      "setting_id": "saMxvsZmcftBOJOJ",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.2-0.4 Detail 0.08-0.16 @BBL",
+      "legacy_body_setting_id": "saMxvsZmcftBOJOJ",
+      "actual_process_path": "process/MN Body 0.2-0.4 Detail 0.08-0.16 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.16mm Balanced Quality @BBL H2D",
+        "coarse_height": "0.16",
+        "target_coarse_height": "0.16",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.4",
+      "fine_height": "0.08",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.08",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Feature 0.2-0.4 0.08-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.4 0.08-0.24 Candidate @BBL"
+      ],
+      "setting_id": "qGbafQGmfguvNJ5v",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.4 0.08-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Standard @BBL H2D",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Standard @BBL H2D",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.24mm Standard @BBL H2D",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.4"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.4",
+      "fine_height": "0.10",
+      "coarse_height": "0.20",
+      "target_fine_height": "0.10",
+      "target_coarse_height": "0.20",
+      "source_fine_height": "0.10",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.2-0.4 Standard 0.10-0.20 @BBL",
+      "renamed_from": null,
+      "setting_id": "QdQuSznSsl7jNLR4",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.2-0.4 Standard 0.10-0.20 @BBL",
+      "legacy_body_setting_id": "QdQuSznSsl7jNLR4",
+      "actual_process_path": "process/MN Body 0.2-0.4 Standard 0.10-0.20 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.10_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.20mm Balanced Strength @BBL H2D",
+        "coarse_height": "0.20",
+        "target_coarse_height": "0.20",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.4",
+      "fine_height": "0.12",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.12",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.12",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.2-0.4 Faster 0.12-0.24 @BBL",
+      "renamed_from": null,
+      "setting_id": "ebzEE8HYL8d2vDuN",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.2-0.4 Faster 0.12-0.24 @BBL",
+      "legacy_body_setting_id": "ebzEE8HYL8d2vDuN",
+      "actual_process_path": "process/MN Body 0.2-0.4 Faster 0.12-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.12_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Standard @BBL H2D",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.08",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.08",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.6 0.08-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.6 0.08-0.24 Candidate @BBL"
+      ],
+      "setting_id": "nQ80plvzF8XrAIXa",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.6 0.08-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.6"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.08",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.08",
+      "n": 5,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.6 0.08-0.40 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.6 0.08-0.40 Candidate @BBL"
+      ],
+      "setting_id": "EcPEEXbxXoLZL84U",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.6 0.08-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": false
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": false,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+      "coarse_source_height": "0.30",
+      "coarse_height_is_stock": false,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.6"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "5"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.10",
+      "coarse_height": "0.30",
+      "target_fine_height": "0.10",
+      "target_coarse_height": "0.30",
+      "source_fine_height": "0.10",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.6 0.10-0.30 Standard @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.6 0.10-0.30 Standard Candidate @BBL"
+      ],
+      "setting_id": "C1UgmiFulWlIDxP6",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.6 0.10-0.30 Standard @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.10_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.30",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.30",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.10_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+      "coarse_source_height": "0.30",
+      "coarse_height_is_stock": true,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.6"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.10",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.10",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.10",
+      "n": 4,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.6 0.10-0.40 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.6 0.10-0.40 Candidate @BBL"
+      ],
+      "setting_id": "dePjENLFcry4mcq3",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.6 0.10-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.10_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": false
+      },
+      "applied_source": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.30",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": false,
+        "fine_base": "fdm_process_dual_0.10_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.30mm Standard @BBL H2D 0.6 nozzle",
+      "coarse_source_height": "0.30",
+      "coarse_height_is_stock": false,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.6"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "4"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.12",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.12",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.12",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.2-0.6 Detail 0.12-0.24 @BBL",
+      "renamed_from": null,
+      "setting_id": "HaFLoOyl94AeZQa4",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.2-0.6 Detail 0.12-0.24 @BBL",
+      "legacy_body_setting_id": "HaFLoOyl94AeZQa4",
+      "actual_process_path": "process/MN Body 0.2-0.6 Detail 0.12-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.12_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.08",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.8 0.08-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.8 0.08-0.24 External-test candidate @BBL"
+      ],
+      "setting_id": "pAne37vU4WASh1ko",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.8 0.08-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.32",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.32",
+      "source_fine_height": "0.08",
+      "n": 4,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.8 0.08-0.32 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.8 0.08-0.32 External-test candidate @BBL"
+      ],
+      "setting_id": "hqSkk2ZzEeelacR6",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.8 0.08-0.32 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.32",
+        "target_coarse_height": "0.32",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.32",
+        "target_coarse_height": "0.32",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.32",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "4"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.08",
+      "n": 5,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.8 0.08-0.40 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.8 0.08-0.40 External-test candidate @BBL"
+      ],
+      "setting_id": "HI9jHPLs3TOT6p8a",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.8 0.08-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.40",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "5"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.10",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.10",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.10",
+      "n": 4,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.8 0.10-0.40 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.8 0.10-0.40 External-test candidate @BBL"
+      ],
+      "setting_id": "OHqmgyPyD71HlcWW",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.8 0.10-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.10_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+        "fine_height": "0.10",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.10_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.10mm Standard @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.40",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "4"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.2",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.12",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.12",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.12",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.2-0.8 0.12-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.2-0.8 0.12-0.24 External-test candidate @BBL"
+      ],
+      "setting_id": "HF0jlgsA5xd6TtgO",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.2-0.8 0.12-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.12_nozzle_0.2",
+      "source_reference": {
+        "fine_leaf": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.12_nozzle_0.2"
+      },
+      "fine_source_leaf": "0.12mm Balanced Quality @BBL H2D 0.2 nozzle",
+      "coarse_source_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.2",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.08",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.08",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.4-0.6 0.08-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.4-0.6 0.08-0.24 Candidate @BBL"
+      ],
+      "setting_id": "hiO7y4BJ33UslaXI",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.4-0.6 0.08-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.4"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D",
+      "coarse_source_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.4",
+        "0.6"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.6",
+      "fine_height": "0.12",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.12",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.12",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.4-0.6 Detail 0.12-0.24 @BBL",
+      "renamed_from": null,
+      "setting_id": "nfpqj9ORrkem7vH9",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.4-0.6 Detail 0.12-0.24 @BBL",
+      "legacy_body_setting_id": "nfpqj9ORrkem7vH9",
+      "actual_process_path": "process/MN Body 0.4-0.6 Detail 0.12-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.12_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.12mm Fine @BBL H2D",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.08",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.4-0.8 0.08-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.4-0.8 0.08-0.24 External-test candidate @BBL"
+      ],
+      "setting_id": "YfXzqa7UWdvJhmg5",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.4-0.8 0.08-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.4"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D",
+      "coarse_source_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.4",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.32",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.32",
+      "source_fine_height": "0.08",
+      "n": 4,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.4-0.8 0.08-0.32 @BBL",
+      "renamed_from": [
+        "MN Feature 0.4-0.8 0.08-0.32 External-test candidate @BBL"
+      ],
+      "setting_id": "4uceRVsH7zFlbvy4",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.4-0.8 0.08-0.32 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.32",
+        "target_coarse_height": "0.32",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.32",
+        "target_coarse_height": "0.32",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.4"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D",
+      "coarse_source_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.32",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.4",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "4"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.08",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.08",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.08",
+      "n": 5,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.4-0.8 0.08-0.40 @BBL",
+      "renamed_from": [
+        "MN Feature 0.4-0.8 0.08-0.40 External-test candidate @BBL"
+      ],
+      "setting_id": "fjm9AvRBLNiLoQq1",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.4-0.8 0.08-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.08_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.08mm Extra Fine @BBL H2D",
+        "fine_height": "0.08",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.08_nozzle_0.4"
+      },
+      "fine_source_leaf": "0.08mm Extra Fine @BBL H2D",
+      "coarse_source_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.40",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.4",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "5"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.12",
+      "coarse_height": "0.24",
+      "target_fine_height": "0.12",
+      "target_coarse_height": "0.24",
+      "source_fine_height": "0.12",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split"
+      ],
+      "name": "MN Feature 0.4-0.8 0.12-0.24 @BBL",
+      "renamed_from": [
+        "MN Feature 0.4-0.8 0.12-0.24 External-test candidate @BBL"
+      ],
+      "setting_id": "ZkHoUGSHZjZRSjBI",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.4-0.8 0.12-0.24 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.12_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.12mm Fine @BBL H2D",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": {
+        "fine_leaf": "0.12mm Fine @BBL H2D",
+        "fine_height": "0.12",
+        "coarse_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.24",
+        "target_coarse_height": "0.24",
+        "coarse_height_is_stock": true,
+        "fine_base": "fdm_process_dual_0.12_nozzle_0.4"
+      },
+      "fine_source_leaf": "0.12mm Fine @BBL H2D",
+      "coarse_source_leaf": "0.24mm Balanced Quality @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.24",
+      "coarse_height_is_stock": true,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.4",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.16",
+      "coarse_height": "0.32",
+      "target_fine_height": "0.16",
+      "target_coarse_height": "0.32",
+      "source_fine_height": "0.16",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.4-0.8 Detail 0.16-0.32 @BBL",
+      "renamed_from": null,
+      "setting_id": "Gp5sAFsswUGyXz0N",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.4-0.8 Detail 0.16-0.32 @BBL",
+      "legacy_body_setting_id": "Gp5sAFsswUGyXz0N",
+      "actual_process_path": "process/MN Body 0.4-0.8 Detail 0.16-0.32 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.16_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.16mm Balanced Quality @BBL H2D",
+        "fine_height": "0.16",
+        "coarse_leaf": "0.32mm Balanced Strength @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.32",
+        "target_coarse_height": "0.32",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.4",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.20",
+      "coarse_height": "0.40",
+      "target_fine_height": "0.20",
+      "target_coarse_height": "0.40",
+      "source_fine_height": "0.20",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.4-0.8 Standard 0.20-0.40 @BBL",
+      "renamed_from": null,
+      "setting_id": "AeJt7ph5i7rwHiAQ",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.4-0.8 Standard 0.20-0.40 @BBL",
+      "legacy_body_setting_id": "AeJt7ph5i7rwHiAQ",
+      "actual_process_path": "process/MN Body 0.4-0.8 Standard 0.20-0.40 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.20_nozzle_0.4",
+      "source_reference": {
+        "fine_leaf": "0.20mm Balanced Strength @BBL H2D",
+        "fine_height": "0.20",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.40",
+        "coarse_height_is_stock": true
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.6",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.18",
+      "coarse_height": "0.54",
+      "target_fine_height": "0.18",
+      "target_coarse_height": "0.54",
+      "source_fine_height": "0.18",
+      "n": 3,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Feature 0.6-0.8 0.18-0.54 @BBL",
+      "renamed_from": [
+        "MN Feature 0.6-0.8 0.18-0.54 External-test candidate @BBL"
+      ],
+      "setting_id": "OBUkIhKcHBTPT32F",
+      "id_provenance": "project-deterministic",
+      "legacy_reuse": false,
+      "legacy_body_name": null,
+      "legacy_body_setting_id": null,
+      "actual_process_path": "process/MN Feature 0.6-0.8 0.18-0.54 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.18_nozzle_0.6",
+      "source_reference": {
+        "fine_leaf": "0.18mm Balanced Quality @BBL H2D 0.6 nozzle",
+        "fine_height": "0.18",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.54",
+        "coarse_height_is_stock": false
+      },
+      "applied_source": {
+        "fine_leaf": "0.18mm Balanced Quality @BBL H2D 0.6 nozzle",
+        "fine_height": "0.18",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.54",
+        "coarse_height_is_stock": false,
+        "fine_base": "fdm_process_dual_0.18_nozzle_0.6"
+      },
+      "fine_source_leaf": "0.18mm Balanced Quality @BBL H2D 0.6 nozzle",
+      "coarse_source_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+      "coarse_source_height": "0.40",
+      "coarse_height_is_stock": false,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": [
+        "0.6",
+        "0.8"
+      ],
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "3"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    },
+    {
+      "fine_diameter": "0.6",
+      "coarse_diameter": "0.8",
+      "fine_height": "0.24",
+      "coarse_height": "0.48",
+      "target_fine_height": "0.24",
+      "target_coarse_height": "0.48",
+      "source_fine_height": "0.24",
+      "n": 2,
+      "mode": "feature_split",
+      "modes": [
+        "feature_split"
+      ],
+      "supported_modes": [
+        "feature_split",
+        "body_split"
+      ],
+      "name": "MN Body 0.6-0.8 Standard 0.24-0.48 @BBL",
+      "renamed_from": null,
+      "setting_id": "S680rkog9RA4DC7N",
+      "id_provenance": "existing-preserved",
+      "legacy_reuse": true,
+      "legacy_body_name": "MN Body 0.6-0.8 Standard 0.24-0.48 @BBL",
+      "legacy_body_setting_id": "S680rkog9RA4DC7N",
+      "actual_process_path": "process/MN Body 0.6-0.8 Standard 0.24-0.48 @BBL.json",
+      "actual_process_inherits": "fdm_process_dual_0.24_nozzle_0.6",
+      "source_reference": {
+        "fine_leaf": "0.24mm Balanced Strength @BBL H2D 0.6 nozzle",
+        "fine_height": "0.24",
+        "coarse_leaf": "0.40mm Standard @BBL H2D 0.8 nozzle",
+        "coarse_height": "0.40",
+        "target_coarse_height": "0.48",
+        "coarse_height_is_stock": false
+      },
+      "applied_source": null,
+      "fine_source_leaf": null,
+      "coarse_source_leaf": null,
+      "coarse_source_height": null,
+      "coarse_height_is_stock": null,
+      "candidate_status": "external-test candidate",
+      "mixed_nozzle_process_nozzle_diameters": null,
+      "mixed_nozzle_allowed_cadence_ratios": [
+        "2"
+      ],
+      "admission_pins": {
+        "prime_tower_flat_ironing": "0",
+        "sparse_infill_pattern": "grid",
+        "minimum_sparse_infill_area": "0",
+        "top_shell_thickness": "0",
+        "detect_overhang_wall": "0",
+        "only_one_wall_top": "0",
+        "ensure_vertical_shell_thickness": "none",
+        "thick_internal_bridges": "0",
+        "elefant_foot_compensation": "0",
+        "flush_into_support": "0"
+      }
+    }
+  ],
+  "source": {
+    "profile_root": "resources/profiles/BBL",
+    "variant_keys": [
+      "initial_layer_speed",
+      "initial_layer_infill_speed",
+      "outer_wall_speed",
+      "inner_wall_speed",
+      "small_perimeter_speed",
+      "small_perimeter_threshold",
+      "sparse_infill_speed",
+      "internal_solid_infill_speed",
+      "top_surface_speed",
+      "enable_overhang_speed",
+      "overhang_1_4_speed",
+      "overhang_2_4_speed",
+      "overhang_3_4_speed",
+      "overhang_4_4_speed",
+      "slowdown_for_curled_perimeters",
+      "bridge_speed",
+      "internal_bridge_speed",
+      "gap_infill_speed",
+      "support_speed",
+      "support_interface_speed",
+      "travel_speed",
+      "travel_speed_z",
+      "initial_layer_travel_speed",
+      "default_acceleration",
+      "bridge_acceleration",
+      "travel_acceleration",
+      "initial_layer_travel_acceleration",
+      "initial_layer_acceleration",
+      "outer_wall_acceleration",
+      "inner_wall_acceleration",
+      "sparse_infill_acceleration",
+      "internal_solid_infill_acceleration",
+      "top_surface_acceleration",
+      "default_jerk",
+      "outer_wall_jerk",
+      "inner_wall_jerk",
+      "infill_jerk",
+      "top_surface_jerk",
+      "initial_layer_jerk",
+      "travel_jerk",
+      "initial_layer_travel_jerk",
+      "default_junction_deviation",
+      "print_extruder_id",
+      "print_extruder_variant"
+    ],
+    "fine_role": "print_extruder_id=1",
+    "coarse_role": "print_extruder_id=2"
+  },
+  "registry": {
+    "previous_version": "02.01.00.27",
+    "proposed_version": "02.01.00.30",
+    "process_mode_key": null
+  }
+}

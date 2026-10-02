@@ -1,0 +1,49 @@
+html
+{
+	background-color: #fff;
+}
+
+body
+{
+	text-align:center;
+	padding-top: 10%;
+	overflow: auto;
+}
+
+#SlicerIcon
+{
+
+}
+
+#SlicerIcon img
+{
+	width: 160px;
+	height: 160px;
+	max-width: 100%;
+	object-fit: contain;
+}
+
+#Title
+{
+	height:20mm;
+	line-height: 20mm;
+	font-size: 6mm;
+	color: var(--main-color-text, #856400);
+}
+
+#STip
+{
+	padding:0mm 20mm;
+	height: 15%;
+}
+
+#BtnArea
+{
+	align-items: center;
+}
+
+#StartBtn
+{
+	display: inline-block;
+    text-decoration:none;	
+}

@@ -1,0 +1,29 @@
+{
+	"type": "filament",
+	"name": "Polymaker PLA Pro @Base",
+	"inherits": "fdm_filament_pla",
+	"from": "system",
+	"instantiation": "false",
+	"filament_density": [
+		"1.23"
+	],
+	"temp_min": [
+		"190"
+	],
+	"temp_max": [
+		"230"
+	],
+	"temperture_vitrification": [
+		"55"
+	],
+	"idle_temperture": [
+		"0"
+	],
+	"filament_soluble": [
+		"0"
+	],
+	"description": "",
+	"filament_vendor": [
+		"Polymaker"
+	]
+}

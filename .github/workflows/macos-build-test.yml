@@ -1,0 +1,97 @@
+name: macOS build and tests
+
+# Builds the macOS arm64 app and runs the three test suites with the same
+# filters the local builds use.
+#
+# This workflow publishes nothing. It uploads no release, pushes to no package
+# manager, and writes to nothing outside the job. The only artifact it produces
+# is test output, and only when a job fails. It is allowed to be slow: the
+# dependency build takes hours the first time, and is cached afterwards.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 360
+    env:
+      ARCH: arm64
+      DEPLOYMENT_TARGET: "11.3"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: |
+          brew install libtool
+          mkdir -p "${{ github.workspace }}/deps/build/${{ env.ARCH }}"
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~4.3.0"
+          useLocalCache: true
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo find /Applications -maxdepth 1 -type d -name "Xcode_*.app" ! -name "Xcode_16*.app" -exec rm -rf {} + || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          df -h /
+
+      # The dependency tree is pinned by the files under deps/, so it only needs
+      # rebuilding when one of them changes.
+      - name: Restore dependency build
+        id: deps-cache
+        uses: actions/cache@v6
+        with:
+          path: deps/build/${{ env.ARCH }}
+          key: macos-${{ env.ARCH }}-deps-${{ hashFiles('deps/**') }}
+
+      - name: Build dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: ./build_release_macos.sh -d -x -a "${{ env.ARCH }}" -t "${{ env.DEPLOYMENT_TARGET }}"
+
+      - name: Build the app and the tests
+        env:
+          # Build the test binaries here; the step below runs them with the
+          # filters, rather than letting the script run the whole ctest set.
+          ORCA_TESTS_BUILD_ONLY: "1"
+        run: ./build_release_macos.sh -s -x -T -a "${{ env.ARCH }}" -t "${{ env.DEPLOYMENT_TARGET }}"
+
+      - name: libslic3r tests
+        run: |
+          ./.github/run-suite.sh libslic3r \
+            '[MixedNozzlePrime],[DepositIntent],[W36],[Preset],[MixedNozzlePreset],[MixedNozzleRebind],[MixedNozzleBinding],[Config],[MixedNozzleTowerBrim],[AppConfig],[W58]'
+
+      - name: slic3rutils tests
+        run: |
+          ./.github/run-suite.sh slic3rutils \
+            '[MixedNozzle],[TowerPolicy],[SetupController],[W14],[W17],[MixedNozzleWizard],[SidebarPanel],[W48]'
+
+      - name: fff_print tests
+        run: |
+          ./.github/run-suite.sh fff_print \
+            '[W40],[W32],[W33],[W46],[V24Pad],[TowerBrim],[MixedNozzleTower],[Tower],[D24],[Packet02],[MixedNozzleAdvisor],[FeatureEconomics],[FeatureEconomicsBaseline],[MixedNozzleCadence],[MixedNozzlePrime],[W35],[BodySplit],[FirstLayer],[Regression],[W47],[W44]'
+
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64-test-output
+          path: test-output/
+          retention-days: 5
+          if-no-files-found: ignore
