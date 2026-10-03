@@ -113,7 +113,15 @@ On Windows:
 4. Click Apply and slice.
 5. After slicing, "Why fine or coarse?" in the sidebar shows which layer ranges went coarse and why.
 
-Bambu's network plug-in isn't bundled and is off by default. Without it, export the G-code to a USB stick or SD card. To send to a Bambu printer from the app, in LAN-only mode too, turn on "Enable Bambu network plug-in" in Preferences.
+**Sending prints to a Bambu printer**
+
+Cadence sends prints the same way OrcaSlicer does: over your local network. Since Bambu's 2025 firmware change, slicers other than Bambu Studio can't send prints through Bambu's cloud, so signing in to your Bambu account won't let you print from Cadence.
+
+1. On the printer, turn on LAN Only mode and Developer Mode (Settings, then Network).
+2. In Cadence, let the setup wizard install the Bambu network plug-in, or turn on "Enable Bambu network plug-in" in Preferences. Use the version Cadence downloads for you; a newer one from Bambu may not load.
+3. Your printer shows up under Device. Pair it with the IP address and access code shown on the printer's screen.
+
+Or skip all of that: export the G-code and print from a USB stick or SD card.
 
 ## Known issues
 
