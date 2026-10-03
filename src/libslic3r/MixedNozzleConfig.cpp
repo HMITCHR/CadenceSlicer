@@ -1592,6 +1592,13 @@ bool mixed_nozzle_compact_tower_applied_by_mode(const PrintConfig &config)
     return is_mixed_nozzle_feature_split(config) && !config.wipe_tower_no_sparse_layers.value;
 }
 
+PrintConfig mixed_nozzle_tower_config_as_off(const PrintConfig &config)
+{
+    PrintConfig off = config;
+    off.mixed_nozzle_slicing_mode.value = MixedNozzleSlicingMode::Off;
+    return off;
+}
+
 double body_split_first_cell_height(double first_layer, double base, double nozzle_minimum)
 {
     if (!std::isfinite(first_layer) || !std::isfinite(base) || base <= 0. || first_layer + EPSILON >= nozzle_minimum)

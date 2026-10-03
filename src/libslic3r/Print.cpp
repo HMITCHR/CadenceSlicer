@@ -6510,7 +6510,8 @@ void Print::select_feature_infill_by_time()
     // switches and the tower rows they pay for, never the tower as a whole: the priming, the solid
     // base, the levels laid between switches and the height needed to reach the last switch. Bands
     // that each save a little can stand up a tower that costs more than they save together, so the
-    // agreed plan is priced as a whole and set against all fine with no tower at all.
+    // agreed plan is priced as a whole and set against all fine. All fine keeps a tower only for the
+    // switches it still has; with no coarse work left, _make_wipe_tower() builds that tower as Off does.
     if (!kept.empty()) {
         std::vector<std::vector<char>> current_record;
         price_sequence({}, 0, nullptr, &current_record, nullptr);
@@ -6739,6 +6740,13 @@ void Print::_make_wipe_tower()
     m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, is_wipe_tower_type2);
     m_wipe_tower_data.tool_ordering.sort_and_build_data(*this, (unsigned int)-1, is_wipe_tower_type2);
 
+    // A Feature Split plate that never reaches the coarse nozzle gets Off's tower, so everything
+    // below that asks the mode reads tower_config.
+    m_wipe_tower_config_as_off.reset();
+    if (m_wipe_tower_data.tool_ordering.tower_planned_as_off())
+        m_wipe_tower_config_as_off = std::make_unique<PrintConfig>(mixed_nozzle_tower_config_as_off(m_config));
+    const PrintConfig &tower_config = this->wipe_tower_config();
+
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
         return;
@@ -6770,13 +6778,13 @@ void Print::_make_wipe_tower()
             return true;
         }();
         const bool auto_pad = auto_pad_option != nullptr && auto_pad_option->value &&
-                              (is_mixed_nozzle_body_split(m_config) || is_mixed_nozzle_feature_split(m_config)) &&
+                              (is_mixed_nozzle_body_split(tower_config) || is_mixed_nozzle_feature_split(tower_config)) &&
                               m_config.nozzle_diameter.values.size() == 2 &&
                               valid_auto_pad_mapping &&
                               std::none_of(m_config.extruder_max_nozzle_count.values.begin(),
                                            m_config.extruder_max_nozzle_count.values.end(),
                                            [](double count) { return count > 1.; });
-        WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_wipe_tower_data.tool_ordering.first_extruder(),
+        WipeTower wipe_tower(tower_config, m_plate_index, m_origin, m_wipe_tower_data.tool_ordering.first_extruder(),
                              m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z, m_wipe_tower_data.tool_ordering.all_extruders());
         // Orca: the tower's first-layer flow follows the user's first-layer flow ratio (BBS reads
         // its initial_layer_flow_ratio here — STUDIO-14254; first_layer_flow_ratio is Orca's analog,
@@ -6822,7 +6830,7 @@ void Print::_make_wipe_tower()
             tower.set_shared_print_bed(this->get_extruder_shared_printable_polygon());
             // Set the extruder & material properties at the wipe tower object.
             for (size_t i = 0; i < number_of_extruders; ++i)
-                tower.set_extruder(i, m_config);
+                tower.set_extruder(i, tower_config);
         };
         configure_wipe_tower(wipe_tower);
 
@@ -6874,7 +6882,7 @@ void Print::_make_wipe_tower()
         // its own paths: the role's speed from the region, capped by the filament's flow limit, as the
         // Feature Split economics price fills. Travel, acceleration and cooling slowdown are left out, so
         // the wait is a low estimate and the re-prime errs small. Only mixed-nozzle slicing pays for it.
-        const bool reprime_estimate = is_mixed_nozzle_slicing_enabled(m_config);
+        const bool reprime_estimate = is_mixed_nozzle_slicing_enabled(tower_config);
         std::vector<std::pair<double, const Layer *>> reprime_layers;
         if (reprime_estimate) {
             for (const PrintObject *object : m_objects)
@@ -7024,7 +7032,7 @@ void Print::_make_wipe_tower()
                             current_nozzle_info->extruder_id != extruder_id || current_nozzle_info->group_id == nozzle_id;
                         if (extruder_id >= 0)
                             conditioned_extruder_change_prime = mixed_nozzle_conditioned_extruder_change_prime(
-                                m_config, filament_id, size_t(extruder_id), physical_tool_switch, destination_holds_same_filament,
+                                tower_config, filament_id, size_t(extruder_id), physical_tool_switch, destination_holds_same_filament,
                                 incoming_hotend_stays);
                         // The conditioned helper carries the qualification, warm-return, mode,
                         // provenance, and ordinary-filament-prime guards. Only its unset
@@ -7034,20 +7042,20 @@ void Print::_make_wipe_tower()
                             (size_t(extruder_id) >= m_config.mixed_nozzle_extruder_change_prime_volume.values.size() ||
                              m_config.mixed_nozzle_extruder_change_prime_volume.is_nil(size_t(extruder_id)))) {
                             const auto handoff = mixed_nozzle_handoff_deposits(
-                                m_config, filament_id, size_t(extruder_id), -1.,
+                                tower_config, filament_id, size_t(extruder_id), -1.,
                                 auto_pad ? double(layer_tools.wipe_tower_layer_height) : -1., incoming_hotend_stays);
                             if (handoff) {
                                 if (auto_pad)
                                     automatic_handoff_extruder_change_prime = true;
                                 else
                                     handoff_extruder_change_prime = mixed_nozzle_idle_reprime_volume(
-                                        m_config, filament_id, handoff->prime_volume_mm3, reprime_idle);
+                                        tower_config, filament_id, handoff->prime_volume_mm3, reprime_idle);
                             }
                         }
                         if (current_nozzle_info && current_nozzle_info->extruder_id >= 0) {
                             outgoing_extruder = current_nozzle_info->extruder_id;
                             const auto handoff = mixed_nozzle_handoff_deposits(
-                                m_config, current_filament_id, size_t(current_nozzle_info->extruder_id), -1.,
+                                tower_config, current_filament_id, size_t(current_nozzle_info->extruder_id), -1.,
                                 auto_pad ? double(layer_tools.wipe_tower_layer_height) : -1., outgoing_hotend_stays);
                             if (handoff) {
                                 if (auto_pad)
@@ -7139,7 +7147,7 @@ void Print::_make_wipe_tower()
         // one filament id, resolved through the engine's shared nozzle resolver.
         int              lag_coarse_extruder = -1;
         std::vector<int> lag_filament_extruders;
-        if (is_mixed_nozzle_feature_split(m_config) || lag_ordering.mixed_nozzle_body_tower_lags()) {
+        if (is_mixed_nozzle_feature_split(tower_config) || lag_ordering.mixed_nozzle_body_tower_lags()) {
             float plan_height = 0.f;
             for (const WipeTowerPlanEvent &event : plan_events)
                 if (std::isfinite(event.z))
@@ -7249,7 +7257,7 @@ void Print::_make_wipe_tower()
         // result rejects an auto-pad candidate, while an unresolved/nonfinite binding throws a
         // named slicing diagnostic before any candidate or manual tower is accepted.
         auto audit_structural_emissions = [&](const std::vector<std::vector<WipeTower::ToolChangeResult>> &changes) {
-            if (!is_mixed_nozzle_feature_split(m_config) && !is_mixed_nozzle_body_split(m_config))
+            if (!is_mixed_nozzle_feature_split(tower_config) && !is_mixed_nozzle_body_split(tower_config))
                 return true;
             std::map<unsigned int, float> previous_z_by_domain;
             std::map<unsigned int, std::vector<const WipeTower::StructuralEmission *>> earlier_by_domain;

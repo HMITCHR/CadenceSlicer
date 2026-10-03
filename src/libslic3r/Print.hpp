@@ -1265,6 +1265,9 @@ public:
     size_t                      num_print_regions() const throw() { return m_print_regions.size(); }
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
     const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
+    // The config the prime tower is planned and written with: the print's own, or the Off view of
+    // it when a Feature Split plate never reaches the coarse nozzle (ToolOrdering::tower_planned_as_off).
+    const PrintConfig&          wipe_tower_config() const { return m_wipe_tower_config_as_off ? *m_wipe_tower_config_as_off : m_config; }
     // Bands tried, and object layers re-filled across those trials, on the last feature
     // economics pass. Both are zero when the pass did not run.
     size_t                      feature_economics_trials() const { return m_feature_economics_trials; }
@@ -1525,6 +1528,8 @@ private:
     // by the exporter for the header notice and by the GUI.
     float                                   m_mixed_nozzle_tower_lag_max { 0.f };
     std::string                             m_mixed_nozzle_tower_lag_notice;
+    // Set by _make_wipe_tower() when the tower is planned as Off plans it; see wipe_tower_config().
+    std::unique_ptr<PrintConfig>            m_wipe_tower_config_as_off;
     // How many of those trials found their band's own layers already re-filled for them. A band
     // whose layers no other band's trial touches can be re-filled before the deciding pass
     // reaches it; one that shares a layer, or whose layers a decision above it has since

@@ -248,6 +248,7 @@ public:
         m_stats_by_multi_extruder_curr.clear();
         m_mixed_nozzle_toolchange_stats.clear();
         m_mixed_nozzle_band_count = 0;
+        m_tower_planned_as_off = false;
     }
 
     // Only valid for non-sequential print:
@@ -357,6 +358,9 @@ public:
     // Tower decisions made by fill_wipe_tower_partitions(), read by the tower, Print and the exporter.
     bool                mixed_nozzle_body_tower_lags() const { return m_mixed_nozzle_body_tower_lags; }
     coordf_t            mixed_nozzle_lag_coarse_height() const { return m_mixed_nozzle_lag_coarse_height; }
+    // A Feature Split plate whose tool sequence never reaches the coarse nozzle has no coarse work
+    // for the mixed-nozzle tower, so sort_and_build_data() plans its tower as Off does.
+    bool                tower_planned_as_off() const { return m_tower_planned_as_off; }
     // Inputs to that decision, set by sort_and_build_data(); zero means no Body Split lagging tower.
     void                set_mixed_nozzle_body_heights(coordf_t base_height, coordf_t coarse_height)
     {
@@ -368,6 +372,7 @@ private:
     void				initialize_layers(std::vector<coordf_t> &zs);
     void 				collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches);
     bool                insert_wipe_tower_extruder();
+    bool                uses_coarse_nozzle(const PrintConfig &config) const;
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);
     void                reorder_extruders_for_minimum_flush_volume(bool reorder_first_layer);
@@ -381,6 +386,7 @@ private:
     coordf_t                   m_mixed_nozzle_body_coarse_height { 0. };
     coordf_t                   m_mixed_nozzle_lag_coarse_height { 0. };
     bool                       m_mixed_nozzle_body_tower_lags { false };
+    bool                       m_tower_planned_as_off { false };
     // Some object starts with a Body Split first cell above the first layer, so the first event
     // layer may print nothing (see mark_skirt_layers).
     bool                       m_first_layer_band { false };

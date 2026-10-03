@@ -412,6 +412,10 @@ bool mixed_nozzle_compact_tower(const PrintConfig &config);
 // True only where the mode is what turned the compact tower on, so the export can say so.
 bool mixed_nozzle_compact_tower_applied_by_mode(const PrintConfig &config);
 
+// The same config with the mode set to Off, for planning and writing the prime tower of a Feature
+// Split plate that never reaches the coarse nozzle: its tower is built exactly as Off builds it.
+PrintConfig mixed_nozzle_tower_config_as_off(const PrintConfig &config);
+
 // Whether this config gets the lagging prime tower; scheduler and tower must agree. Requires the
 // compact tower, and is unavailable with smooth timelapse or wrapping detection.
 bool mixed_nozzle_tower_lagging(const PrintConfig &config);

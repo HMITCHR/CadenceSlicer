@@ -593,6 +593,74 @@ TEST_CASE("Three filaments with the automatic tower: PETG interface on the fine 
 }
 
 namespace {
+struct TowerTally {
+    std::string refusal;
+    double      seconds = 0.;
+    size_t      tower_levels = 0;
+    size_t      coarse_roads = 0;
+};
+
+// The L part from the app project, with the support base on fine PLA (1) and the PETG interface (2)
+// on the fine nozzle as well. Counts the tower's levels and every road the coarse nozzle lays.
+TowerTally slice_l_part_fine_support(Mode mode)
+{
+    DynamicPrintConfig config = app_three_filament_config(mode, 0.10, 0.30, 3, k_normal);
+    config.set_key_value("support_filament", new ConfigOptionInt(1));
+    config.set_key_value("support_interface_filament", new ConfigOptionInt(2));
+    // Off prints the part in one filament, as stock does.
+    if (mode == Mode::Off)
+        for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
+                                "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
+            config.set_key_value(key, new ConfigOptionInt(0));
+    CadenceTest::Scene scene;
+    scene.config   = config;
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = "l-part";
+        object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+    TowerTally tally;
+    tally.refusal = facts.refusal.string;
+    tally.seconds = facts.seconds;
+    std::set<long> levels;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude)
+            continue;
+        if (move.extrusion_role == erWipeTower)
+            levels.insert(std::lround(double(move.position.z()) * 1000.));
+        tally.coarse_roads += move.physical_tool_id == 1;
+    }
+    tally.tower_levels = levels.size();
+    return tally;
+}
+} // namespace
+
+TEST_CASE("Feature Split with no coarse work left builds the same short prime tower as Off", "[TestRebuild][Tower]")
+{
+    // The time check sends every coarse band of this plate back to the fine nozzle, so the only tool
+    // changes left are the two PETG interface changes under the arm. Off lays its short tower for
+    // them; Feature Split used to build a full-height tower and took about 1.6 times as long.
+    const TowerTally off = slice_l_part_fine_support(Mode::Off);
+    REQUIRE(off.refusal.empty());
+    const TowerTally split = slice_l_part_fine_support(Mode::Feature);
+    INFO(split.refusal);
+    REQUIRE(split.refusal.empty());
+    CAPTURE(off.seconds, split.seconds, off.tower_levels, split.tower_levels, split.coarse_roads);
+    // The scene: the coarse nozzle prints nothing in either mode.
+    REQUIRE(off.coarse_roads == 0);
+    REQUIRE(split.coarse_roads == 0);
+    CHECK(split.tower_levels == off.tower_levels);
+    CHECK(split.tower_levels <= 2);
+    CHECK(std::abs(split.seconds - off.seconds) <= 0.01 * off.seconds);
+}
+
+namespace {
 // Shapes whose support stands on the part or on the bed under a curved underside.
 TriangleMesh c_shape_mesh()
 {
@@ -1126,14 +1194,15 @@ struct NozzlePair {
 
 // A low arm whose interface prints near the bed, beside a taller arm whose support base covers the
 // first layer. Returns how the first tower visit went, and sets qualifies when that visit had both
-// a coarse arrival and the interface filament.
-std::string interface_on_tower_bed(const NozzlePair &nozzles, int base, double arm_z, bool &qualifies, std::string &seen)
+// a coarse arrival and the interface filament. coarse_roads counts every road the coarse nozzle lays.
+std::string interface_on_tower_bed(const NozzlePair &nozzles, int base, double arm_z, bool &qualifies, std::string &seen,
+                                   Mode mode = Mode::Feature, size_t *coarse_roads = nullptr)
 {
     qualifies = false;
     std::ostringstream what;
-    what << nozzles.name << " / base " << base << " / arm at " << arm_z << ": ";
+    what << mode_name(mode) << " / " << nozzles.name << " / base " << base << " / arm at " << arm_z << ": ";
     const FilamentCase filaments{"PETG interface on fine", base, 3, "PETG"};
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, nozzles.fine, nozzles.coarse, nozzles.ratio, 0., k_normal, filaments);
+    DynamicPrintConfig config = h2d_support_config(mode, nozzles.fine, nozzles.coarse, nozzles.ratio, 0., k_normal, filaments);
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{nozzles.fine_nozzle, nozzles.coarse_nozzle});
     config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{nozzles.fine_nozzle, nozzles.coarse_nozzle});
     config.set_key_value("min_layer_height", new ConfigOptionFloats{nozzles.fine_min, nozzles.coarse_min});
@@ -1171,6 +1240,11 @@ std::string interface_on_tower_bed(const NozzlePair &nozzles, int base, double a
     for (const Move &move : facts.moves)
         if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
             tower_bottom = std::min(tower_bottom, double(move.position.z()));
+    if (coarse_roads != nullptr) {
+        *coarse_roads = 0;
+        for (const Move &move : facts.moves)
+            *coarse_roads += move.type == EMoveType::Extrude && move.physical_tool_id == 1;
+    }
     // The first visit: tower roads from the first one to the next road off the tower.
     bool in_visit = false, coarse_arrival = false, interface_arrival = false;
     size_t interface_at_bottom = 0;
@@ -1218,9 +1292,19 @@ TEST_CASE("The interface filament primes above the tower's first level", "[TestR
             for (double arm_z : {0.2, 0.4, 0.6, 1.0}) {
                 bool qualifies = false;
                 std::string scene;
-                const std::string failure = interface_on_tower_bed(nozzles, base, arm_z, qualifies, scene);
+                size_t coarse_roads = 0;
+                std::string failure = interface_on_tower_bed(nozzles, base, arm_z, qualifies, scene, Mode::Feature, &coarse_roads);
                 qualifying += qualifies;
                 seen << scene << (qualifies ? " (interface in the first visit)" : "") << '\n';
+                // A plate the coarse nozzle never prints on builds Off's tower, so it is held to Off.
+                if (!failure.empty() && coarse_roads == 0) {
+                    bool off_qualifies = false;
+                    std::string off_scene;
+                    const std::string off = interface_on_tower_bed(nozzles, base, arm_z, off_qualifies, off_scene, Mode::Off);
+                    seen << off_scene << '\n';
+                    if (!off.empty() && off.find("interface-filament roads on the tower's bed level") != std::string::npos)
+                        failure.clear();
+                }
                 if (!failure.empty() && !tree_refused(failure))
                     failures.push_back(failure);
             }

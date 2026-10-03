@@ -4394,7 +4394,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             merge_tower_support_levels(print, tool_ordering, layers_to_print);
             // Prusa Multi-Material wipe tower.
             if (has_wipe_tower && ! layers_to_print.empty()) {
-                m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(), *print.wipe_tower_data().priming.get(),
+                m_wipe_tower.reset(new WipeTowerIntegration(print.wipe_tower_config(), print.get_plate_index(), print.get_plate_origin(), *print.wipe_tower_data().priming.get(),
                                                             print.wipe_tower_data().tool_changes, *print.wipe_tower_data().final_purge.get(), print.get_slice_used_filaments(false),
                                                             print.wipe_tower_data().tool_ordering));
                 m_wipe_tower->set_wipe_tower_depth(print.get_wipe_tower_depth());
@@ -4404,7 +4404,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 // the tower. Travel to the tower at the start G-code's height and descend there,
                 // retracting first as a travel would. Off keeps the stock move.
                 const bool type2_priming = wipe_tower_type == WipeTowerType::Type2 && print.config().single_extruder_multi_material_priming;
-                const std::optional<Point> tower_start = is_mixed_nozzle_slicing_enabled(print.config()) && !type2_priming &&
+                const std::optional<Point> tower_start = is_mixed_nozzle_slicing_enabled(print.wipe_tower_config()) && !type2_priming &&
                     m_writer.filament() != nullptr ? m_wipe_tower->first_block_start(*this) : std::nullopt;
                 if (tower_start) {
                     // Where the start G-code left the head is unknown, so only a known short move skips it.

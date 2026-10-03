@@ -625,6 +625,21 @@ void ToolOrdering::handle_dontcare_extruder(unsigned int last_extruder_id)
     }
 }
 
+// Whether any layer uses a filament on the coarse nozzle of a mixed-nozzle plate.
+bool ToolOrdering::uses_coarse_nozzle(const PrintConfig &config) const
+{
+    const int coarse_extruder = mixed_nozzle_tower_coarse_extruder(config);
+    if (coarse_extruder < 0)
+        return true;
+    for (const LayerTools &lt : m_layer_tools)
+        for (unsigned int tool : lt.extruders) {
+            const std::optional<size_t> extruder = physical_extruder_for_filament(config, tool);
+            if (! extruder || int(*extruder) == coarse_extruder)
+                return true;
+        }
+    return false;
+}
+
 bool ToolOrdering::insert_wipe_tower_extruder()
 {
     if (!m_print_config_ptr || !m_print_config_ptr->enable_prime_tower)
@@ -684,10 +699,21 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
         }
     }
 
-    this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
+    // Feature Split can end with every band on the fine nozzle (the time check sends them back), or
+    // never reach the coarse nozzle at all. The switches left are then ordinary filament changes,
+    // and the tower is planned as Off plans it: no solid base, no levels between switches.
+    const auto plan_tower = [&]() {
+        m_tower_planned_as_off = is_mixed_nozzle_feature_split(print.config()) && ! this->uses_coarse_nozzle(print.config());
+        if (! m_tower_planned_as_off) {
+            this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
+            return;
+        }
+        this->fill_wipe_tower_partitions(mixed_nozzle_tower_config_as_off(print.config()), object_bottom_z, max_layer_height);
+    };
+    plan_tower();
     if (this->insert_wipe_tower_extruder()) {
         reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
-        this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
+        plan_tower();
     }
 
     this->collect_extruder_statistics(prime_multi_material);
