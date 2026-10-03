@@ -77,14 +77,14 @@ Not affiliated with Bambu Lab, Prusa Research, Snapmaker or the OrcaSlicer proje
 ## Platforms
 
 - macOS: Apple silicon only, macOS 11.3 or later.
-- Windows: x64. The first Windows build isn't out yet and will be added to the release when it is.
+- Windows: x64, Windows 10 or 11. Tested on a Surface Book.
 - Linux: there's no build. It should build from source with `build_linux.sh`, the same as OrcaSlicer, but I haven't tried it.
 
 ## Install
 
 Downloads are on the [Releases page](https://github.com/HMITCHR/CadenceSlicer/releases).
 
-The builds aren't signed, so macOS will warn you the first time you open them. The steps below get you past that. The source for every build is tagged in this repo, so you can build it yourself if you'd rather.
+The builds aren't signed, so macOS and Windows will warn you the first time you open them. The steps below get you past that. The source for every build is tagged in this repo, so you can build it yourself if you'd rather.
 
 On macOS:
 
@@ -98,7 +98,12 @@ Or, from Terminal:
 xattr -dr com.apple.quarantine /Applications/CadenceSlicer.app
 ```
 
-Windows: no build yet. I'm working on the first one and will add it to the release once it's tested.
+On Windows:
+
+1. Download the installer from the [Windows release](https://github.com/HMITCHR/CadenceSlicer/releases/tag/v1.0.0-windows-test). There's also a portable zip if you'd rather not install anything: unzip it and run CadenceSlicer.exe.
+2. Run it. Windows SmartScreen will say "Windows protected your PC". Click More info, then Run anyway.
+3. The first start can take a few minutes while it loads printer profiles. If Windows says the app isn't responding, click Wait.
+4. When the firewall asks, allow Cadence Slicer on private networks. That's how it finds your printer on your home network.
 
 ## First print
 
