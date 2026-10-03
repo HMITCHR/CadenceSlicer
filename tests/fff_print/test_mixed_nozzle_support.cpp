@@ -1958,3 +1958,72 @@ TEST_CASE("A coarse support base lays no more interface filament than the stock 
     CHECK(split.total >= 0.9 * stock.total);
     CHECK(split.layers <= stock.layers + 1);
 }
+
+namespace {
+struct CoarseRoads {
+    std::string refusal;
+    size_t      roads = 0;      // roads of the role the coarse nozzle lays above the first layer
+    size_t      thin_roads = 0; // of those, roads thinner than its minimum layer height
+    std::string where;
+};
+
+// The bunny in the app project under Feature Split, its support base on the coarse PLA (3) and the
+// interface on the fine PLA (1). Counts the roads of one role the 0.8 lays above the first layer,
+// and those below its 0.16 mm minimum layer height.
+CoarseRoads bunny_coarse_roads(ExtrusionRole role, double fine, double coarse, int ratio, bool support)
+{
+    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, fine, coarse, ratio, k_normal);
+    config.set_key_value("enable_support", new ConfigOptionBool(support));
+    config.set_key_value("support_filament", new ConfigOptionInt(3));
+    config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
+    set_automatic_tower(config);
+    config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
+    config.set_key_value("printable_height", new ConfigOptionFloat(325.));
+    const double coarse_minimum = config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
+    CadenceTest::Scene scene;
+    scene.config   = config;
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = "bunny";
+        handy_model("Stanford_Bunny.drc")(*object);
+        object->instances.front()->set_offset(Vec3d(40., 40., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+    CoarseRoads tally;
+    tally.refusal = facts.refusal.string;
+    std::ostringstream where;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude || move.extrusion_role != role || move.physical_tool_id != 1 ||
+            double(move.position.z()) < fine + 1e-3)
+            continue;
+        ++tally.roads;
+        if (double(move.height) < coarse_minimum - 0.005) {
+            if (tally.thin_roads < 5)
+                where << "[Z " << move.position.z() << ", height " << move.height << "] ";
+            ++tally.thin_roads;
+        }
+    }
+    tally.where = where.str();
+    return tally;
+}
+} // namespace
+
+TEST_CASE("The coarse nozzle never lays sparse infill thinner than its minimum layer height", "[TestRebuild][Support]")
+{
+    // On a band's top layer the sparse infill left beside the band (its clearance ring, and wherever
+    // the outline changes) is one fine layer thick. It used to print on the 0.8 at 0.08 or 0.1 mm.
+    for (const auto &[fine, coarse, ratio, support] : {std::tuple<double, double, int, bool>{0.08, 0.56, 7, false},
+                                                       {0.10, 0.30, 3, true}}) {
+        CAPTURE(fine, coarse, support);
+        const CoarseRoads sparse = bunny_coarse_roads(erInternalInfill, fine, coarse, ratio, support);
+        INFO(sparse.refusal);
+        REQUIRE(sparse.refusal.empty());
+        INFO(sparse.where);
+        CAPTURE(sparse.roads, sparse.thin_roads);
+        REQUIRE(sparse.roads > 0);
+        CHECK(sparse.thin_roads == 0);
+    }
+}

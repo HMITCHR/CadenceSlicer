@@ -45,6 +45,23 @@ std::optional<unsigned int> LayerRegion::flow_filament_override(FlowRole role) c
     return std::nullopt;
 }
 
+bool LayerRegion::feature_split_sparse_fine_owned_at(double height) const
+{
+    if (m_feature_split_sparse_fine_owned)
+        return true;
+    const PrintConfig &config = m_layer->object()->print()->config();
+    if (config.mixed_nozzle_slicing_mode.value != MixedNozzleSlicingMode::FeatureSplit || !(height > 0.) ||
+        m_region->config().outer_wall_filament_id.value <= 0)
+        return false;
+    const int coarse_owner = m_region->config().sparse_infill_filament_id.value;
+    const std::optional<size_t> coarse_nozzle = coarse_owner > 0 ?
+        physical_extruder_for_filament(config, unsigned(coarse_owner - 1)) : std::nullopt;
+    if (!coarse_nozzle)
+        return false;
+    const double coarse_minimum = resolved_min_layer_height(config, *coarse_nozzle);
+    return std::isfinite(coarse_minimum) && height < coarse_minimum - EPSILON;
+}
+
 Flow LayerRegion::flow(FlowRole role, double layer_height) const
 {
     // A Body cell that starts on the bed is a first layer wherever it is hosted: a body whose nozzle

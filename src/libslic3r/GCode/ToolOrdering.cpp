@@ -160,10 +160,27 @@ unsigned require_feature_object_filament_offered(unsigned zero_based_logical_fil
     return zero_based_logical_filament;
 }
 
-// Sparse infill that combine_infill() left fine-owned (see LayerRegion::feature_split_sparse_fine_owned())
-// prints on the region's outer wall tool; every other role uses feature_object_role_filament().
+// Height of the first path in an extrusion entity, or zero when it has none.
+static double first_path_height(const ExtrusionEntity &entity)
+{
+    if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity))
+        return path->height;
+    if (const auto *multi_path = dynamic_cast<const ExtrusionMultiPath *>(&entity))
+        return multi_path->paths.empty() ? 0. : multi_path->paths.front().height;
+    if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+        return loop->paths.empty() ? 0. : loop->paths.front().height;
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity))
+        for (const ExtrusionEntity *child : collection->entities)
+            if (child != nullptr)
+                return first_path_height(*child);
+    return 0.;
+}
+
+// Sparse infill that combine_infill() left fine-owned (see LayerRegion::feature_split_sparse_fine_owned()),
+// or that is thinner than the coarse nozzle can lay, prints on the region's outer wall tool; every other
+// role uses feature_object_role_filament().
 static unsigned feature_object_leaf_owner(ExtrusionRole role, const PrintRegion &region, unsigned extruder_override,
-                                          const LayerRegion *layerm)
+                                          const LayerRegion *layerm, double height)
 {
     const FeatureObjectRoleOwner owner = classify_feature_object_role(role);
     if (owner == FeatureObjectRoleOwner::Unsupported)
@@ -171,16 +188,16 @@ static unsigned feature_object_leaf_owner(ExtrusionRole role, const PrintRegion 
     if (extruder_override != 0)
         return extruder_override;
     if (owner == FeatureObjectRoleOwner::SparseInfill && layerm != nullptr &&
-        layerm->feature_split_sparse_fine_owned())
+        layerm->feature_split_sparse_fine_owned_at(height))
         return unsigned(region.config().outer_wall_filament_id.value);
     return feature_object_role_filament(role, region) + 1;
 }
 
 static void add_feature_object_leaf_filament(ExtrusionRole role, const PrintRegion &region, LayerTools &layer_tools,
                                               unsigned extruder_override, std::vector<int> *first_layer_extruders,
-                                              const LayerRegion *layerm)
+                                              const LayerRegion *layerm, double height)
 {
-    const unsigned owner = feature_object_leaf_owner(role, region, extruder_override, layerm);
+    const unsigned owner = feature_object_leaf_owner(role, region, extruder_override, layerm, height);
     layer_tools.extruders.emplace_back(owner);
     if (first_layer_extruders != nullptr && role == erExternalPerimeter)
         first_layer_extruders->emplace_back(owner);
@@ -205,23 +222,23 @@ static bool collect_feature_object_leaf_filaments(const ExtrusionEntity &entity,
         const ExtrusionRole owner_role = (loop_role == erOverhangPerimeter) ? erExternalPerimeter : loop_role;
         for (const ExtrusionPath &path : loop->paths) {
             const ExtrusionRole effective_role = (path.role() == erOverhangPerimeter) ? owner_role : path.role();
-            add_feature_object_leaf_filament(effective_role, region, layer_tools, extruder_override, first_layer_extruders, layerm);
+            add_feature_object_leaf_filament(effective_role, region, layer_tools, extruder_override, first_layer_extruders, layerm, path.height);
         }
         return !loop->paths.empty();
     }
 
     if (const auto *multi_path = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
         for (const ExtrusionPath &path : multi_path->paths)
-            add_feature_object_leaf_filament(path.role(), region, layer_tools, extruder_override, first_layer_extruders, layerm);
+            add_feature_object_leaf_filament(path.role(), region, layer_tools, extruder_override, first_layer_extruders, layerm, path.height);
         return !multi_path->paths.empty();
     }
 
     if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity)) {
-        add_feature_object_leaf_filament(path->role(), region, layer_tools, extruder_override, first_layer_extruders, layerm);
+        add_feature_object_leaf_filament(path->role(), region, layer_tools, extruder_override, first_layer_extruders, layerm, path->height);
         return true;
     }
 
-    add_feature_object_leaf_filament(entity.role(), region, layer_tools, extruder_override, first_layer_extruders, layerm);
+    add_feature_object_leaf_filament(entity.role(), region, layer_tools, extruder_override, first_layer_extruders, layerm, 0.);
     return true;
 }
 
@@ -311,9 +328,9 @@ unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, c
                     extruder = region.config().bottom_surface_filament_id;
                 else
                     extruder = region.config().internal_solid_filament_id;
-            } else if (layerm != nullptr && layerm->feature_split_sparse_fine_owned()) {
-                // Feature Split sparse infill left fine-owned by combine_infill() prints on the
-                // outer wall tool.
+            } else if (layerm != nullptr && layerm->feature_split_sparse_fine_owned_at(first_path_height(extrusions))) {
+                // Feature Split sparse infill left fine-owned by combine_infill(), or thinner than the
+                // coarse nozzle can lay, prints on the outer wall tool.
                 extruder = region.config().outer_wall_filament_id.value;
             } else {
                 extruder = region.config().sparse_infill_filament_id;

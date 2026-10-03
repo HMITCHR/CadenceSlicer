@@ -975,6 +975,15 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 // Preserve the sparse/coarse owner through fill preparation as well.
                 if (is_coarse_band_roof)
                     params.extruder = region_config.sparse_infill_filament_id;
+                // Sparse infill on a band's top layer that is thinner than the coarse nozzle can lay goes
+                // to the fine filament, with its flow and spacing (LayerRegion::feature_split_sparse_fine_owned_at).
+                const double fill_height = (surface.thickness == -1) ? layerm.height() : surface.thickness;
+                std::optional<unsigned int> thin_sparse_owner;
+                if (extrusion_role == frInfill && !is_coarse_band_roof && !layerm.feature_split_sparse_fine_owned() &&
+                    !layerm.cell_filament_override() && layerm.feature_split_sparse_fine_owned_at(fill_height)) {
+                    thin_sparse_owner = unsigned(region_config.outer_wall_filament_id.value - 1);
+                    params.extruder = region_config.outer_wall_filament_id.value;
+                }
                 // Orca: forced fill order applies only to top/bottom surfaces filled with a
                 // center-based pattern; everything else stays at Default to keep batching together.
                 if (params.pattern == ipConcentric || params.pattern == ipArchimedeanChords || params.pattern == ipOctagramSpiral) {
@@ -1029,6 +1038,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 				params.flow   = params.bridge ?
 					//Orca: enable thick bridge based on config
 					layerm.bridging_flow(extrusion_role, is_thick_bridge) :
+					thin_sparse_owner ?
+					layerm.region().flow(*layer.object(), extrusion_role, fill_height, layer.id() == 0, thin_sparse_owner) :
 					layerm.flow(extrusion_role, (surface.thickness == -1) ? layerm.height() : surface.thickness);
 
 				params.role_speed = 0;
@@ -1053,7 +1064,8 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 					// so that internall infill will be aligned over all layers of the current region.
 		            // Preserve native non-first-layer spacing, but use the same fine owner as
                     // fallback extrusion. Keep the existing Body spacing behavior unchanged.
-                    const auto spacing_owner = layer.object()->print()->config().mixed_nozzle_slicing_mode.value ==
+                    const auto spacing_owner = thin_sparse_owner ? thin_sparse_owner :
+                        layer.object()->print()->config().mixed_nozzle_slicing_mode.value ==
                         MixedNozzleSlicingMode::FeatureSplit ? layerm.flow_filament_override(frInfill) : std::nullopt;
                     params.spacing = layerm.region().flow(*layer.object(), frInfill, layerm.height(), false,
                                                          spacing_owner).spacing();
