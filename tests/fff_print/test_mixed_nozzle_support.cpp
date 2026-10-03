@@ -2027,3 +2027,16 @@ TEST_CASE("The coarse nozzle never lays sparse infill thinner than its minimum l
         CHECK(sparse.thin_roads == 0);
     }
 }
+
+TEST_CASE("The coarse nozzle never lays support thinner than its minimum layer height", "[TestRebuild][Support]")
+{
+    // A band road that reached a top contact inside the band was trimmed down to the height left
+    // above that contact, 0.1 mm on the 0.8. Such pieces now go to the interface nozzle.
+    const CoarseRoads body = bunny_coarse_roads(erSupportMaterial, 0.10, 0.30, 3, true);
+    INFO(body.refusal);
+    REQUIRE(body.refusal.empty());
+    INFO(body.where);
+    CAPTURE(body.roads, body.thin_roads);
+    REQUIRE(body.roads > 0);
+    CHECK(body.thin_roads == 0);
+}

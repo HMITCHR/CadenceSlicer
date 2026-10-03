@@ -1396,18 +1396,23 @@ void mixed_nozzle_band_support_body(
     const bool bed_layer_on_interface_nozzle = bed_filament &&
         print_config.filament_type.get_at(*bed_filament) == print_config.filament_type.get_at(object_config.support_filament.value - 1);
 
-    // A band road may not run through a top contact that sits inside the band's Z span.
-    const auto contacts_between = [&top_contacts](coordf_t bottom_z, coordf_t top_z) {
+    // A road joining a band is laid through the band's whole height, so it keeps a flow's width away
+    // from the contacts and interfaces inside the band.
+    const float clearance = float(support_params.support_material_flow.scaled_width());
+
+    // A band road may not run through a top contact that sits inside the band's Z span, nor come within
+    // a flow's width of it: generate_support_toolpaths() trims a road over a contact down to the height
+    // left above it, thinner than the band's nozzle can lay. What is cut away stays on the band's own
+    // layers, and the pass below hands it to the interface nozzle.
+    const auto contacts_between = [&top_contacts, clearance](coordf_t bottom_z, coordf_t top_z) {
         Polygons out;
         for (const SupportGeneratorLayer *contact : top_contacts)
             if (contact != nullptr && contact->print_z > bottom_z + EPSILON && contact->print_z < top_z - EPSILON)
                 polygons_append(out, contact->polygons);
-        return out;
+        return out.empty() ? out : expand(out, clearance);
     };
 
-    // Contacts and interfaces a band's Z span reaches, with a flow's width of clearance, since a road
-    // joining a band is laid through the band's whole height.
-    const float clearance = float(support_params.support_material_flow.scaled_width());
+    // Contacts and interfaces a band's Z span reaches, with that clearance.
     const auto interface_areas_between = [&](coordf_t bottom_z, coordf_t top_z) {
         Polygons out;
         for (const SupportGeneratorLayersPtr *list : {&bottom_contacts, &top_contacts, const_cast<const SupportGeneratorLayersPtr*>(&interface_layers)})
