@@ -100,7 +100,7 @@ xattr -dr com.apple.quarantine /Applications/CadenceSlicer.app
 
 On Windows:
 
-1. Download the installer from the [Windows release](https://github.com/HMITCHR/CadenceSlicer/releases/tag/v1.0.0-windows-test). There's also a portable zip if you'd rather not install anything: unzip it and run CadenceSlicer.exe.
+1. Download the Windows installer from the [latest release](https://github.com/HMITCHR/CadenceSlicer/releases/latest). There's also a portable zip if you'd rather not install anything: unzip it and run CadenceSlicer.exe.
 2. Run it. Windows SmartScreen will say "Windows protected your PC". Click More info, then Run anyway.
 3. The first start can take a few minutes while it loads printer profiles. If Windows says the app isn't responding, click Wait.
 4. When the firewall asks, allow Cadence Slicer on private networks. That's how it finds your printer on your home network.
