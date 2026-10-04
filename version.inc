@@ -13,7 +13,7 @@ endif()
 # The version the product presents to the user: the About dialog, the HTTP user
 # agent and the package name. Nothing compares a file or a configuration against
 # this.
-set(CADENCE_PRODUCT_VERSION "1.0.1")
+set(CADENCE_PRODUCT_VERSION "1.0.2")
 
 # NOT the product version, despite the name. SoftFever_VERSION is the project
 # file and configuration version. It is written into every exported 3MF and into
