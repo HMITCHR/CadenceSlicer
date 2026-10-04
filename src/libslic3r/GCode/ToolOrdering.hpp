@@ -277,7 +277,9 @@ public:
     bool 				empty()       const { return m_layer_tools.empty(); }
     std::vector<LayerTools>& layer_tools() { return m_layer_tools; }
     const std::vector<LayerTools>& layer_tools() const { return m_layer_tools; }
-    bool 				has_wipe_tower() const { return ! m_layer_tools.empty() && m_first_printing_extruder != (unsigned int)-1 && m_layer_tools.front().has_wipe_tower; }
+    // Whether the tower is built, read on the first layer with something to print. A Body Split body that
+    // cannot lay the shared first layer leaves that layer empty, and its first cell is the tower's bed level.
+    bool 				has_wipe_tower() const;
 
     int                 get_most_used_extruder() const { return most_used_extruder; }
 

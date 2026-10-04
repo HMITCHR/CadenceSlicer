@@ -1246,6 +1246,15 @@ static unsigned int wipe_tower_arriving_tool(const LayerTools &lt, unsigned int 
     return lt.extruders.empty() ? active_tool : lt.extruders.back();
 }
 
+bool ToolOrdering::has_wipe_tower() const
+{
+    if (m_layer_tools.empty() || m_first_printing_extruder == (unsigned int)-1)
+        return false;
+    const auto first_printing = std::find_if(m_layer_tools.begin(), m_layer_tools.end(),
+        [](const LayerTools &lt) { return lt.has_object || lt.has_support; });
+    return (first_printing != m_layer_tools.end() ? *first_printing : m_layer_tools.front()).has_wipe_tower;
+}
+
 void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height)
 {
     // A second pass can follow once the wipe-tower filament is inserted: remove only rows the

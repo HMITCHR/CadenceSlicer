@@ -381,3 +381,50 @@ TEST_CASE("A tower bed level laid by the coarse tool has its wall at the coarse 
     CHECK(audit.wall_widest[coarse_tool] >= 0.9 * 0.6);
     CHECK(audit.bed_contact_fast == 0.);
 }
+
+// A coarse body on the bed whose nozzle cannot lay the 0.10 mm first layer starts with a 0.20 mm
+// first cell, so nothing prints on the first layer. The tower was then left out altogether, and
+// every nozzle change went without a prime.
+TEST_CASE("A coarse body that starts above an empty first layer still gets the prime tower, primed at every nozzle change",
+          "[TestRebuild][TowerFirstLayer]")
+{
+    const bool swapped = GENERATE(false, true);
+    CAPTURE(swapped);
+    // 0.10 fine, 0.30 coarse on a 0.6 nozzle with a 0.12 minimum; the fine body starts 1.2 mm up.
+    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.10, 0.30, swapped, {2, 1}, 1.2);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    dump_gcode(std::string("coarse-first-cell-") + (swapped ? "swapped" : "plain"), facts.gcode);
+
+    double first_model_z = 1e9;
+    for (const Move &move : facts.moves)
+        if (CadenceTest::model_road(move))
+            first_model_z = std::min(first_model_z, double(move.position.z()));
+    const TowerBedAudit audit = audit_tower_bed(facts, first_model_z);
+    INFO(audit.levels);
+    CAPTURE(first_model_z, audit.first_z, audit.first_extent, audit.top_extent);
+    // The scene: the first printing layer is the coarse first cell, above the 0.10 mm first layer.
+    REQUIRE(first_model_z > 0.15);
+    REQUIRE(audit.first_z < 1e8);
+    // The tower starts with the part, and its bed level is wider than the tower above (its brim).
+    CHECK(std::abs(audit.first_z - first_model_z) < 1e-3);
+    CHECK(audit.first_extent > audit.top_extent + 1.);
+
+    // Every nozzle change starts on the tower: the new nozzle's first road there is a tower road.
+    size_t changes = 0, primed = 0;
+    int active = -1;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude)
+            continue;
+        const int tool = int(move.physical_tool_id);
+        if (active != -1 && tool != active) {
+            ++changes;
+            primed += move.extrusion_role == erWipeTower ? 1 : 0;
+        }
+        active = tool;
+    }
+    CAPTURE(changes, primed);
+    CHECK(changes > 0);
+    CHECK(primed == changes);
+}
