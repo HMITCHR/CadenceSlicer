@@ -4350,7 +4350,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
     //}
     Polygon outer_wall;
     // The base wall is one continuous loop (no gap wall), so it never crosses between segments.
-    // The wall uses the tool's own solid width; the brim loops below keep the shared one.
+    // The wall uses the tool's own solid width, and so do the brim loops below.
     const float wall_flow = structural_extrusion_flow(int(m_current_tool), m_extrusion_flow);
     const bool  wall_widened = wall_flow != m_extrusion_flow;
     if (wall_widened)
@@ -4381,6 +4381,19 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
             loops_num             = std::min(loops_num, chamfer_loops_num) - dist_to_1st;
         }
     }
+    // A tool wider than the shared width lays its brim and chamfer loops at its own width and
+    // spacing, as it would on its own. Its bed-level brim is as wide as the configured brim, and a
+    // chamfer loop never reaches past the shared chamfer, so the level below always carries it.
+    const float brim_road_width = structural_road_width(int(m_current_tool));
+    const bool  brim_widened    = brim_road_width > m_perimeter_width + 1e-4f;
+    if (brim_widened) {
+        const float wide_spacing = brim_road_width - m_layer_height * float(1. - M_PI_4);
+        loops_num = first_layer ? int((m_wipe_tower_brim_width + wide_spacing / 2.f) / wide_spacing) :
+                                  int(float(std::max(loops_num, 0)) * spacing / wide_spacing + 1e-3f);
+        spacing   = wide_spacing;
+        writer.set_extrusion_flow(structural_extrusion_flow(int(m_current_tool), m_extrusion_flow) * base_flow_ratio)
+              .change_analyzer_line_width(base_flow_ratio * brim_road_width);
+    }
 
     if (loops_num > 0) {
         //box_coordinates box = wt_box;
@@ -4403,6 +4416,9 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         }
         //wt_box = box;
     }
+
+    if (brim_widened)
+        writer.set_extrusion_flow(m_extrusion_flow * base_flow_ratio).change_analyzer_line_width(base_flow_ratio * m_perimeter_width);
 
     if (extrude_perimeter || loops_num > 0) {
         writer.add_wipe_path(outer_wall, m_filpar[m_current_tool].wipe_dist);
@@ -4558,7 +4574,7 @@ WipeTower::ToolChangeResult WipeTower::finish_block(const WipeTowerBlock &block,
                                static_cast<unsigned int>(2 + block.block_id));
 }
 
-WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &block, int filament_id, bool extrude_fill, WipeTowerLayerType layer_type)
+WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &block, int filament_id, bool extrude_fill, WipeTowerLayerType layer_type, int wall_tool)
 {
     float layer_height = m_layer_height;
     float e_flow = m_extrusion_flow;
@@ -4568,7 +4584,33 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
         e_flow = extrusion_flow(0.2);
     }
 
-    WipeTowerWriter writer(layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_travel_speed, m_lag_emit_block_z);
+    // A tool wider than the shared width lays the solid fill at its own width and spacing, so it is
+    // as full as on a single nozzle. The rows move in from the wall and from the rows before them
+    // by the extra width. Not on a contact level that starts the block, where the wall's skip
+    // points (get_wall_skip_points) assume the shared rows.
+    const bool is_full_block   = std::abs(block.cur_depth - block.start_depth) < EPSILON;
+    const bool skip_point_fill = is_full_block && layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features;
+    const float shared_fill_depth = block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - m_perimeter_width;
+    float road_width  = m_perimeter_width;
+    float wall_inset  = 0.f;
+    float start_inset = 0.f;
+    if (! skip_point_fill && structural_road_width(filament_id) > m_perimeter_width + 1e-4f) {
+        const float width = structural_road_width(filament_id);
+        // The rows sit as far from the wall's centreline as half of both widths.
+        const float to_wall = 0.5f * (structural_road_width(wall_tool >= 0 ? wall_tool : filament_id) + width) - m_perimeter_width;
+        // After this level's purge rows the block's depth assumed a shared-width first row.
+        const float to_start = is_full_block ? to_wall : 0.5f * (width - m_perimeter_width);
+        // A strip too shallow for the wider rows keeps the shared ones.
+        if (shared_fill_depth - to_wall - to_start > 0.f) {
+            road_width  = width;
+            wall_inset  = to_wall;
+            start_inset = to_start;
+            e_flow      = layer_height * (width - layer_height * float(1. - M_PI_4)) / filament_area();
+        }
+    }
+    const bool fill_widened = road_width > m_perimeter_width + 1e-4f;
+
+    WipeTowerWriter writer(layer_height, road_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_travel_speed, m_lag_emit_block_z);
     writer.set_extrusion_flow(e_flow)
         .set_z(m_z_pos)
         .set_initial_tool(filament_id)
@@ -4580,15 +4622,17 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
 
     // Slow down on the 1st layer.
     // BBS: speed up perimeter speed to 90mm/s for non-first layer
-    float feedrate = is_first_layer() ? std::min(first_layer_speed() * 60.f, m_max_speed) : std::min(60.0f * m_filpar[filament_id].max_e_speed / m_extrusion_flow, m_max_speed);
+    // A wider road keeps under the filament's volumetric limit too.
+    const float speed_flow = fill_widened ? std::max(m_extrusion_flow, e_flow) : m_extrusion_flow;
+    float feedrate = is_first_layer() ? std::min(first_layer_speed() * 60.f, m_max_speed) : std::min(60.0f * m_filpar[filament_id].max_e_speed / speed_flow, m_max_speed);
     feedrate       = (layer_type == WipeTowerLayerType::Contact || layer_type == WipeTowerLayerType::Contact_UP) ? 20.f * 60.f : feedrate;
     box_coordinates fill_box(Vec2f(0, 0), 0, 0);
-    fill_box = box_coordinates(Vec2f(m_perimeter_width, block.cur_depth), m_wipe_tower_width - 2 * m_perimeter_width,
-                               block.start_depth + block.layer_depths[m_cur_layer_id] - block.cur_depth - m_perimeter_width);
+    fill_box = box_coordinates(Vec2f(m_perimeter_width + wall_inset, block.cur_depth + start_inset), m_wipe_tower_width - 2 * (m_perimeter_width + wall_inset),
+                               shared_fill_depth - start_inset - wall_inset);
     bool toolchanges_on_layer = m_layer_info->toolchanges_depth() > WT_EPSILON;
     const float dy                   = (fill_box.lu.y() - fill_box.ld.y());
-    int   n                    = (dy + 0.25 * m_perimeter_width) / m_perimeter_width+1;
-    float spacing              = m_perimeter_width;
+    int   n                    = (dy + 0.25 * road_width) / road_width+1;
+    float spacing              = road_width;
     Vec2f initial_pos(0, 0);
     bool        up_to_down = false;
     //set initial pos 
@@ -4628,7 +4672,6 @@ WipeTower::ToolChangeResult WipeTower::finish_block_solid(const WipeTowerBlock &
             .append(";--------------------\n"
                     "; CP EMPTY GRID START\n")
             .comment_with_value(" layer #", m_num_layer_changes + 1);
-        bool is_full_block = std::abs(block.cur_depth - block.start_depth) < EPSILON;
         if (is_full_block && layer_type == WipeTowerLayerType::Contact && m_enable_tower_interface_features ) {
             Vec2f        stop_pos                                    = initial_pos;
             float        filament_tower_interface_pre_extrusion_dist = m_filpar[m_current_tool].filament_tower_interface_pre_extrusion_dist;
@@ -6008,7 +6051,7 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
                 if (!is_valid_last_layer(finish_layer_filament, m_cur_layer_id, layer.z)) continue;
                 ToolChangeResult finish_block_tcr;
                 if (block_solid) {
-                    finish_block_tcr = finish_block_solid(block, finish_layer_filament, layer.extruder_fill, block.layers_type[m_cur_layer_id]);
+                    finish_block_tcr = finish_block_solid(block, finish_layer_filament, layer.extruder_fill, block.layers_type[m_cur_layer_id], wall_idx);
                     block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
                 }
                 else {

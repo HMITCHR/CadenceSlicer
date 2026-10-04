@@ -550,9 +550,10 @@ TEST_CASE("A coarse body that starts above an empty first layer still gets the p
     CHECK(primed == changes);
 }
 
-// A coarse tool laying the tower's bed level draws its wall at its own width. Resetting the flow
-// after the wall dropped the first-layer boost from the brim loops laid next.
-TEST_CASE("A tower bed level laid by the coarse tool keeps the brim's first-layer flow boost",
+// A coarse tool laying the tower's bed level drew the brim loops, the solid fill and the base at
+// the fine nozzle's 0.25 mm width. The fill, spaced at that width, was only about 83 percent full
+// on a 0.2 mm layer.
+TEST_CASE("A tower bed level laid by the coarse tool is at its own width, full, and keeps the brim's first-layer flow boost",
           "[TestRebuild][TowerFirstLayer]")
 {
     const bool swapped = GENERATE(false, true);
@@ -570,6 +571,13 @@ TEST_CASE("A tower bed level laid by the coarse tool keeps the brim's first-laye
     REQUIRE(audit.first_z > 0.15);
     REQUIRE(audit.brim_width > 0.);
     REQUIRE(audit.chamfer_width > 0.);
+    // Every coarse road on the bed level is at least 0.75 x its nozzle.
+    CHECK(audit.narrowest >= 0.75 * 0.6);
     // The brim is laid with the 1.15 first-layer boost over the chamfer loops above it.
     CHECK_THAT(audit.brim_width / audit.chamfer_width, Catch::Matchers::WithinAbs(1.15, 0.035));
+    // About as full as a single nozzle's solid fill (94 percent at 0.75 mm wide and 0.2 mm high).
+    CHECK(audit.fullness >= 0.88);
+    CHECK(audit.fullness <= 1.02);
+    // The fine nozzle's tower roads stay at its own width.
+    CHECK(audit.fine_widest <= 0.2 * 1.25 + 0.01);
 }

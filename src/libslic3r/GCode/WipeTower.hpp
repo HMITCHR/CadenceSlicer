@@ -420,7 +420,8 @@ public:
     // The wall and sparse grid use the smallest nozzle's width, which a much larger nozzle draws as
     // a thin strand. With this on, a tool wider than the shared width lays those roads at its own
     // width, the first layer included: a coarse tool that lays the tower's bed level puts its wall
-    // down at its own width too. Paths, spacing, the brim and solid fills are unchanged.
+    // down at its own width too. Its brim, chamfer loops and solid fills also take its own width,
+    // with spacing to match. Paths are unchanged.
     static constexpr bool solid_structural_roads_per_tool = true;
     // The flow a structural road of this tool is laid at, given the flow the caller would use.
     float structural_extrusion_flow(int tool, float shared_flow) const
@@ -574,7 +575,9 @@ public:
     NozzleChangeResult ramming(int old_filament_id, int new_filament_id, bool solid_change = false, bool extruder_change = true); // extruder_chang means nozzle_change
     ToolChangeResult   finish_layer_new(bool extrude_perimeter = true, bool extrude_fill = true, bool extrude_fill_wall = true);
     ToolChangeResult   finish_block(const WipeTowerBlock &block, int filament_id, bool extrude_fill = true);
-    ToolChangeResult   finish_block_solid(const WipeTowerBlock &block, int filament_id, bool extrude_fill = true, WipeTowerLayerType layer_type = WipeTowerLayerType::Normal);
+    // wall_tool: the tool that lays this level's outer wall, or -1 when it is filament_id.
+    ToolChangeResult   finish_block_solid(const WipeTowerBlock &block, int filament_id, bool extrude_fill = true, WipeTowerLayerType layer_type = WipeTowerLayerType::Normal,
+                                          int wall_tool = -1);
     // wipe_volume_budget: requested prime volume (mm^3), 0 for none; emission stops once it is
     // deposited. is_nozzle_change skips the colour-flush ironing scrub (the tools share no filament).
     void toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length,bool solid_toolchange=false, float wipe_volume_budget=0.f, bool is_nozzle_change=false);
