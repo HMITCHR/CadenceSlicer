@@ -236,10 +236,11 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
 // on layer 1) and filament 2 on the coarse nozzle, whose first layer ends at the second fine layer.
 CadenceTest::Facts slice_fine_switch_on_layer_one(double coarse_d, double coarse_min, double coarse_max, double fine, double coarse,
                                                   bool swapped = false, std::vector<int> filaments = {1, 3, 2},
-                                                  double fine_lift = 0.)
+                                                  double fine_lift = 0., WipeTowerWallType wall_type = wtwRib)
 {
     CadenceTest::Scene scene;
     scene.config = four_filament_body_config(coarse_d, coarse_min, coarse_max, fine, coarse);
+    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wall_type));
     if (swapped) {
         scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{coarse_d, 0.2});
         scene.config.set_key_value("min_layer_height", new ConfigOptionFloats{coarse_min, 0.04});
@@ -265,6 +266,126 @@ CadenceTest::Facts slice_fine_switch_on_layer_one(double coarse_d, double coarse
         print.set_status_silent();
     };
     return CadenceTest::slice(scene);
+}
+
+// The coarse tool's tower roads on the tower's bed level, with widths measured from E the way the
+// G-code checker does it. Needs a rectangle wall: the brim is what lies well outside the bed level's
+// solid fill.
+struct CoarseBedLevel {
+    double first_z        = 0.;
+    double narrowest      = 1e9; // narrowest coarse road on the bed level
+    double brim_width     = 0.;  // mean width of the bed-level brim loops
+    double chamfer_width  = 0.;  // mean width of the chamfer loops on the next coarse level
+    double fullness       = 0.;  // deposited volume / (area x height) in the middle of the bed level
+    double fine_widest    = 0.;  // widest fine-tool tower road anywhere, not counting ramming
+};
+
+CoarseBedLevel audit_coarse_bed_level(const CadenceTest::Facts &facts, int coarse_tool)
+{
+    CoarseBedLevel audit;
+    const std::vector<bool> ramming = ramming_lines(facts.gcode);
+    // Lines inside a block fill.
+    std::vector<bool> block_fill(1, false);
+    {
+        std::istringstream lines(facts.gcode);
+        std::string line;
+        bool inside = false;
+        while (std::getline(lines, line)) {
+            if (line.rfind("; CP EMPTY GRID START", 0) == 0)
+                inside = true;
+            block_fill.push_back(inside);
+            if (line.rfind("; CP EMPTY GRID END", 0) == 0)
+                inside = false;
+        }
+    }
+    const double filament_area = 0.25 * M_PI * 1.75 * 1.75;
+    struct Road { Vec2d a, b; double z, height, width, area; int tool; bool rams, fill; };
+    std::vector<Road> roads;
+    Vec3f previous = Vec3f::Zero();
+    for (const Move &move : facts.moves) {
+        const Vec3f from = previous;
+        previous = move.position;
+        if (move.type != EMoveType::Extrude || move.extrusion_role != erWipeTower || move.delta_extruder <= 0.f || move.height <= 0.f)
+            continue;
+        const Vec2d a = from.head<2>().cast<double>(), b = move.position.head<2>().cast<double>();
+        const double length = (b - a).norm();
+        // Short roads carry too few digits of E to measure.
+        if (length < 1.)
+            continue;
+        const double area = double(move.delta_extruder) * filament_area / length;
+        roads.push_back({a, b, double(move.position.z()), double(move.height), area / double(move.height) + double(move.height) * (1. - M_PI / 4.),
+                         area, int(move.physical_tool_id), move.gcode_id < ramming.size() && ramming[move.gcode_id],
+                         move.gcode_id < block_fill.size() && block_fill[move.gcode_id]});
+    }
+    if (roads.empty())
+        return audit;
+    audit.first_z = 1e9;
+    for (const Road &road : roads)
+        audit.first_z = std::min(audit.first_z, road.z);
+    double second_z = 1e9;
+    for (const Road &road : roads)
+        if (road.tool == coarse_tool && road.z > audit.first_z + 1e-3)
+            second_z = std::min(second_z, road.z);
+    // The bed level's solid fill; the wall runs at most 1 mm outside it and the brim beyond.
+    BoundingBoxf fill;
+    for (const Road &road : roads)
+        if (road.fill && road.tool == coarse_tool && std::abs(road.z - audit.first_z) < 1e-3) {
+            fill.merge(road.a);
+            fill.merge(road.b);
+        }
+    if (! fill.defined)
+        return audit;
+    auto outside_body = [&fill](const Vec2d &p) {
+        return p.x() < fill.min.x() - 1.1 || p.x() > fill.max.x() + 1.1 || p.y() < fill.min.y() - 1.1 || p.y() > fill.max.y() + 1.1;
+    };
+    // The middle of the solid fill.
+    const Vec2d lo = fill.min + Vec2d(1., 1.), hi = fill.max - Vec2d(1., 1.);
+    // Length of the segment a-b inside [lo, hi] (Liang-Barsky).
+    auto clipped_length = [&lo, &hi](const Vec2d &a, const Vec2d &b) {
+        double t0 = 0., t1 = 1.;
+        const Vec2d d = b - a;
+        for (int axis = 0; axis < 2; ++axis) {
+            if (std::abs(d[axis]) < 1e-12) {
+                if (a[axis] < lo[axis] || a[axis] > hi[axis])
+                    return 0.;
+                continue;
+            }
+            double ta = (lo[axis] - a[axis]) / d[axis], tb = (hi[axis] - a[axis]) / d[axis];
+            if (ta > tb)
+                std::swap(ta, tb);
+            t0 = std::max(t0, ta);
+            t1 = std::min(t1, tb);
+        }
+        return t1 > t0 ? (t1 - t0) * d.norm() : 0.;
+    };
+    double brim_length = 0., brim_sum = 0., chamfer_length = 0., chamfer_sum = 0., volume = 0., height = 0.;
+    for (const Road &road : roads) {
+        const double length = (road.b - road.a).norm();
+        if (road.tool != coarse_tool) {
+            if (! road.rams)
+                audit.fine_widest = std::max(audit.fine_widest, road.width);
+            continue;
+        }
+        const bool brim_loop = outside_body(road.a) && outside_body(road.b);
+        if (std::abs(road.z - audit.first_z) < 1e-3) {
+            if (! road.rams)
+                audit.narrowest = std::min(audit.narrowest, road.width);
+            if (brim_loop) {
+                brim_length += length;
+                brim_sum += road.width * length;
+            }
+            volume += road.area * clipped_length(road.a, road.b);
+            height = road.height;
+        } else if (std::abs(road.z - second_z) < 1e-3 && brim_loop) {
+            chamfer_length += length;
+            chamfer_sum += road.width * length;
+        }
+    }
+    audit.brim_width    = brim_length > 0. ? brim_sum / brim_length : 0.;
+    audit.chamfer_width = chamfer_length > 0. ? chamfer_sum / chamfer_length : 0.;
+    const double box_area = std::max(0., hi.x() - lo.x()) * std::max(0., hi.y() - lo.y());
+    audit.fullness = box_area > 0. && height > 0. ? volume / (box_area * height) : 0.;
+    return audit;
 }
 } // namespace
 
@@ -427,4 +548,28 @@ TEST_CASE("A coarse body that starts above an empty first layer still gets the p
     CAPTURE(changes, primed);
     CHECK(changes > 0);
     CHECK(primed == changes);
+}
+
+// A coarse tool laying the tower's bed level draws its wall at its own width. Resetting the flow
+// after the wall dropped the first-layer boost from the brim loops laid next.
+TEST_CASE("A tower bed level laid by the coarse tool keeps the brim's first-layer flow boost",
+          "[TestRebuild][TowerFirstLayer]")
+{
+    const bool swapped = GENERATE(false, true);
+    CAPTURE(swapped);
+    // The coarse body stands on the bed with a 0.20 mm first cell; the fine body starts 1.2 mm up.
+    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.10, 0.30, swapped, {2, 1}, 1.2, wtwRectangle);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    dump_gcode(std::string("coarse-bed-width-") + (swapped ? "swapped" : "plain"), facts.gcode);
+    const int coarse_tool = swapped ? 0 : 1;
+    const CoarseBedLevel audit = audit_coarse_bed_level(facts, coarse_tool);
+    CAPTURE(audit.first_z, audit.narrowest, audit.brim_width, audit.chamfer_width, audit.fullness, audit.fine_widest);
+    // The scene: the coarse tool lays the bed level, and a brim and a chamfer were found.
+    REQUIRE(audit.first_z > 0.15);
+    REQUIRE(audit.brim_width > 0.);
+    REQUIRE(audit.chamfer_width > 0.);
+    // The brim is laid with the 1.15 first-layer boost over the chamfer loops above it.
+    CHECK_THAT(audit.brim_width / audit.chamfer_width, Catch::Matchers::WithinAbs(1.15, 0.035));
 }

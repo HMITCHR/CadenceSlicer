@@ -4314,7 +4314,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
                     writer.extrude(x, i % 2 ? fill_box.rd.y() : fill_box.ru.y(), m_mixed_nozzle_slicing ? feedrate : 0.f);
                 }
                 if (grid_widened)
-                    writer.set_extrusion_flow(m_extrusion_flow).change_analyzer_line_width(m_perimeter_width);
+                    writer.set_extrusion_flow(m_extrusion_flow * base_flow_ratio).change_analyzer_line_width(base_flow_ratio * m_perimeter_width);
 
                 finish_rect_wipe_path.clear();
                 // BBS: add wipe_path for this case: only with finish rectangle
@@ -4357,8 +4357,9 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         writer.set_extrusion_flow(wall_flow).change_analyzer_line_width(structural_road_width(int(m_current_tool)));
     outer_wall = generate_support_wall_new(writer, wt_box, feedrate, first_layer, m_use_rib_wall, extrude_perimeter,
                                            m_use_gap_wall && !is_tower_base_layer());
+    // Back to the layer's flow, with the first-layer boost the brim loops below are laid at.
     if (wall_widened)
-        writer.set_extrusion_flow(m_extrusion_flow).change_analyzer_line_width(m_perimeter_width);
+        writer.set_extrusion_flow(m_extrusion_flow * base_flow_ratio).change_analyzer_line_width(base_flow_ratio * m_perimeter_width);
     if (extrude_perimeter) {
         Polyline shift_polyline = to_polyline(outer_wall);
         shift_polyline.translate(0, scaled(m_y_shift));
