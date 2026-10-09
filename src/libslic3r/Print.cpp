@@ -1813,6 +1813,44 @@ static MixedNozzleSupportRefusal mixed_nozzle_support_refusal(const PrintConfig 
     return {};
 }
 
+// The feature a *_filament_id key prints, in words.
+static std::string mixed_nozzle_role_words(const std::string &key)
+{
+    return key == "outer_wall_filament_id" ? "outer walls" :
+           key == "inner_wall_filament_id" ? "inner walls" :
+           key == "internal_solid_filament_id" ? "solid infill" :
+           key == "top_surface_filament_id" ? "top surfaces" :
+           key == "bottom_surface_filament_id" ? "bottom surfaces" : "sparse infill";
+}
+
+// Why a Body Split body's nozzle cannot lay its layers or the shared first layer (body_split_tool_envelope()
+// answered Unsupported), in words: the nozzle, the heights it lays, and what to change.
+static std::string body_split_unlayable_reason(const PrintConfig &config, size_t nozzle, double base, double cadence,
+                                               double first_layer)
+{
+    const double diameter = config.nozzle_diameter.get_at(nozzle);
+    const double minimum  = resolved_min_layer_height(config, nozzle);
+    const double maximum  = std::min(resolved_max_layer_height(config, nozzle), diameter);
+    const bool   fine     = std::abs(cadence - base) <= EPSILON;
+    if (minimum > cadence + EPSILON || cadence > maximum + EPSILON)
+        return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm, but its %4% body is set to %5% mm layers. "
+                              "Change Layer height, or that body's Regional layer height, so its layers fit the nozzle.",
+                              diameter, minimum, maximum, fine ? "fine" : "coarse", cadence);
+    if (fine)
+        return Slic3r::format("The first layer is %1% mm, but the fine body's %2% mm nozzle, which lays the first layer, "
+                              "lays layers from %3% mm to %4% mm. Set First layer height to %5% mm.",
+                              first_layer, diameter, minimum, maximum,
+                              first_layer < minimum ? Slic3r::format("at least %1%", minimum) : Slic3r::format("at most %1%", maximum));
+    if (minimum <= base + EPSILON && minimum <= first_layer + EPSILON)
+        return Slic3r::format("The first layer is %1% mm, but the %2% mm nozzle lays layers from %3% mm to %4% mm. "
+                              "Set First layer height to at most %4% mm.",
+                              first_layer, diameter, minimum, maximum);
+    return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm. It cannot lay the %4% mm first layer, so its body "
+                          "starts on the bed with a first cell of %5% mm, which is too tall for it. Set First layer height to at "
+                          "least %2% mm.",
+                          diameter, minimum, maximum, first_layer, body_split_first_cell_height(first_layer, base, minimum));
+}
+
 StringObjectException Print::validate(std::vector<StringObjectException> *warnings, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     auto add_warning = [warnings](StringObjectException w) {
@@ -2097,14 +2135,26 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                         cadence > m_config.nozzle_diameter.get_at(*nozzle) ||
                         (lays_first_layer && (nozzle_minimum > shared_first_layer + EPSILON ||
                                               nozzle_maximum + EPSILON < shared_first_layer))) {
+                        // Say it in the words of the object, the feature and the nozzle, and name the setting to change.
+                        const double diameter = m_config.nozzle_diameter.get_at(*nozzle);
+                        const double highest  = std::min(nozzle_maximum, diameter);
+                        const std::string role = mixed_nozzle_role_words(owner.key);
+                        const bool layers_fit = nozzle_minimum <= cadence + EPSILON && cadence <= highest + EPSILON;
+                        const std::string problem = layers_fit ?
+                            Slic3r::format("the first layer is %1% mm", shared_first_layer) :
+                            Slic3r::format("its %1% would be laid at %2% mm layers", role, cadence);
+                        const std::string change = layers_fit ?
+                            Slic3r::format("Set First layer height to %1% mm",
+                                           shared_first_layer < nozzle_minimum ? Slic3r::format("at least %1%", nozzle_minimum) :
+                                                                                 Slic3r::format("at most %1%", highest)) :
+                            std::string(runs_at_coarse_height ? "Change Mixed-Nozzle coarse layer height to fit that nozzle"
+                                                              : "Change Layer height to fit that nozzle");
                         StringObjectException error;
                         error.string = Slic3r::format(
-                            "[SRL-F12] %1% names filament %2%, which prints on nozzle %3%. That nozzle lays "
-                            "between %4% mm and %5% mm through a %6% mm opening, and this role is deposited at %7% mm%8%.",
-                            owner.key, owner.filament, *nozzle + 1, nozzle_minimum, nozzle_maximum,
-                            m_config.nozzle_diameter.get_at(*nozzle), cadence,
-                            lays_first_layer ? Slic3r::format(", over a shared first layer of %1% mm", shared_first_layer)
-                                             : std::string());
+                            "[SRL-F12] \"%1%\" prints its %2% with filament %3% on the %4% mm nozzle, which lays layers from "
+                            "%5% mm to %6% mm, but %7%. %8%, or put the %2% on a filament on the other nozzle.",
+                            object->model_object()->name, role, owner.filament, diameter, nozzle_minimum, highest, problem,
+                            change);
                         error.object  = object->model_object();
                         error.opt_key = owner.key;
                         return error;
@@ -2829,7 +2879,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 m_config, nozzle, base_cadence, regional_cadences[region_id], shared_first_layer);
             if (envelope == BodySplitToolEnvelope::Unsupported)
                 return reject(object, "SRL-A38", "max_layer_height",
-                              "A body's layer height or the shared first layer is outside what its nozzle can print, or the base layer height is below that nozzle's minimum.");
+                              body_split_unlayable_reason(m_config, nozzle, base_cadence, regional_cadences[region_id],
+                                                          shared_first_layer));
             if (!body_split_tool_envelope_admitted(envelope, with_prime_tower, lagging_tower_available))
                 return reject(object, "SRL-A38", "timelapse_type", Slic3r::format(
                     "Nozzle %1% cannot lay the %2% mm base layer or the %3% mm first layer, so its body starts "

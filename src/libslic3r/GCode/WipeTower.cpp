@@ -3887,6 +3887,25 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
     const float lifted_inset = purge_lifted ? 0.5f * purge_width(int(new_tool)) : 0.f;
     box_coordinates cleaning_box(Vec2f(m_perimeter_width + lifted_inset, box_bottom),
                                  m_wipe_tower_width - 2 * (m_perimeter_width + lifted_inset), box_top - box_bottom);
+    // The same holds across the depth. Where the box starts the block, the wall's near side (the first block) or
+    // the block before, laid later at the level's height, is beside the first row; where it ends, the block fill
+    // laid after it is. There the rows keep half a row clear too.
+    box_coordinates rows_box = cleaning_box;
+    if (purge_lifted) {
+        const float rows_bottom = std::max(box_bottom, block->start_depth + lifted_inset);
+        const float rows_top    = box_top - lifted_inset;
+        if (rows_top > rows_bottom + WT_EPSILON)
+            rows_box = box_coordinates(Vec2f(cleaning_box.ld.x(), rows_bottom), cleaning_box.rd.x() - cleaning_box.ld.x(),
+                                       rows_top - rows_bottom);
+    }
+    // Rows after a ramming held above this level in the block (the arriving tool's purge) start clear of it, in the
+    // box's spare depth.
+    else if (const auto clear = m_level_clear_from.find(block->block_id); m_mixed_nozzle_slicing && clear != m_level_clear_from.end()) {
+        const float rows_bottom = clear->second + 0.5f * purge_width(int(new_tool));
+        if (rows_bottom > box_bottom + WT_EPSILON && rows_bottom < box_top - m_perimeter_width - WT_EPSILON)
+            rows_box = box_coordinates(Vec2f(cleaning_box.ld.x(), rows_bottom), cleaning_box.rd.x() - cleaning_box.ld.x(),
+                                       box_top - rows_bottom);
+    }
 
     WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_travel_speed, m_lag_emit_block_z);
     writer.set_extrusion_flow(m_extrusion_flow)
@@ -3910,7 +3929,13 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
 
     // Ram the hot material out of the melt zone, retract the filament into the cooling tubes and let it cool.
     if (new_tool != (unsigned int) -1) { // This is not the last change.
-        Vec2f initial_position = get_next_pos(cleaning_box, wipe_length, solid_toolchange);
+        Vec2f initial_position = get_next_pos(rows_box, wipe_length, solid_toolchange);
+        // Rows laid from the top down (odd layers) start where they would in the whole box, within the rows' box:
+        // only the rows next to the wall move.
+        if (m_cur_layer_id % 2 == 1 && (rows_box.ld.y() != cleaning_box.ld.y() || rows_box.lu.y() != cleaning_box.lu.y()))
+            initial_position.y() = std::max(rows_box.ld.y() + m_depth_traversed,
+                                            std::min(get_next_pos(cleaning_box, wipe_length, solid_toolchange).y(),
+                                                     rows_box.lu.y() + m_depth_traversed - m_perimeter_width));
         writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
         writer.append_wipe_tower_start();
@@ -3974,7 +3999,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
             m_z_pos         = held;
             writer.move_z(held);
         }
-        toolchange_wipe_new(writer, cleaning_box, wipe_length, solid_toolchange, wipe_volume_budget, is_nozzle_change);
+        toolchange_wipe_new(writer, rows_box, wipe_length, solid_toolchange, wipe_volume_budget, is_nozzle_change);
         departure_row = middle_purge_row(writer.extrusions(), purge_begin);
         // Wipe rows belong to the block's internal support domain, separate from the outer wall.
         purge_records = make_structural_emissions(writer.extrusions(), m_z_pos, m_layer_height,
@@ -4151,9 +4176,27 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
     m_cur_block = block;
 
     float dy = is_base_layer() ? m_nozzle_change_perimeter_width : m_layer_info->extra_spacing * get_block_gap_width(m_current_tool, true);
-    box_coordinates cleaning_box(Vec2f(x_offset, block->cur_depth + (m_nozzle_change_perimeter_width - m_perimeter_width) / 2),
-                                 nozzle_change_box_width,
+    // A ramming that stands above its level's top (the outgoing tool at its own minimum, or lifted to held rows)
+    // has roads of the level laid after it and lower: the wall, the block before it, the arriving tool's purge
+    // rows and the block fill. Like lifted purge rows, it keeps half a wall road clear of them: in from the wall
+    // at its ends, and off the block's start. The roads after it in the block keep clear of it
+    // (m_level_clear_from).
+    const bool  ram_held  = m_mixed_nozzle_slicing && ram_z > m_z_pos + WT_EPSILON;
+    const float ram_clear = ram_held ? 0.5f * m_perimeter_width : 0.f;
+    box_coordinates cleaning_box(Vec2f(x_offset + ram_clear, block->cur_depth + (m_nozzle_change_perimeter_width - m_perimeter_width) / 2),
+                                 nozzle_change_box_width - 2 * ram_clear,
                                  nozzle_change_depth);
+    if (ram_held && nozzle_change_line_count > 0) {
+        // Off the block's start the rows close up where they have room, so the last one stays where it was.
+        const float shift = block->start_depth + ram_clear - block->cur_depth;
+        if (shift > WT_EPSILON) {
+            const float closed_up = nozzle_change_line_count > 1 ? dy - shift / float(nozzle_change_line_count - 1) : 0.f;
+            if (!solid_infill && closed_up >= m_nozzle_change_perimeter_width - WT_EPSILON)
+                dy = closed_up;
+            cleaning_box = box_coordinates(cleaning_box.ld + Vec2f(0.f, shift), cleaning_box.rd.x() - cleaning_box.ld.x(),
+                                           cleaning_box.lu.y() - cleaning_box.ld.y() - shift);
+        }
+    }
     Vec2f initial_position = cleaning_box.ld;
     writer.set_initial_position(initial_position, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
@@ -4270,6 +4313,11 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
         }
         if (need_change_flow) {
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(ram_height) + "\n");
+        }
+        // The rows step up the block, so the last one is the top; later roads of the level start clear of it.
+        if (ram_held) {
+            float &clear_from = m_level_clear_from[block->block_id];
+            clear_from = std::max(clear_from, writer.y() + 0.5f * m_nozzle_change_perimeter_width + ram_clear);
         }
         // A ramming held below the level climbs back to the level's Z. One held above stays: the
         // tool switch lifts the head and the arriving tool's block brings it down.
@@ -6094,6 +6142,7 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
     m_held_rows_end.clear();
     m_held_spans.clear();
     m_held_rammings.clear();
+    m_level_clear_from.clear();
     for (auto &used : m_used_filament_length) // reset used filament stats
         used = 0.f;
 
@@ -6252,6 +6301,9 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
                 if (held_road_z(&block) > m_z_pos + WT_EPSILON)
                     if (const auto rows = m_held_rows_end.find(block.block_id); rows != m_held_rows_end.end())
                         block.cur_depth = std::max(block.cur_depth, rows->second);
+                // Its first road keeps clear of ramming rows held above this level.
+                if (const auto clear = m_level_clear_from.find(block.block_id); clear != m_level_clear_from.end())
+                    block.cur_depth = std::max(block.cur_depth, clear->second + 0.5f * m_perimeter_width);
                 if (block.cur_depth + EPSILON >= block.start_depth + block.layer_depths[m_cur_layer_id]-m_perimeter_width) {
                     continue;
                 }
@@ -6377,6 +6429,7 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
             m_held_spans[ramming.block_id].push_back({ramming.rows_start, ramming.rows_end, ramming.z});
         }
         m_held_rammings.clear();
+        m_level_clear_from.clear();
         if (layer.catch_up && !result.empty() && !result.back().empty()) {
             // A catch-up layer merges into the visit below it and carries its own Z.
             std::vector<ToolChangeResult> &visit = result.back();

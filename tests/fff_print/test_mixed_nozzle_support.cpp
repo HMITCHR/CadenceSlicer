@@ -2,6 +2,7 @@
 
 #include "mixed_nozzle_harness.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ConflictChecker.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
@@ -9,6 +10,7 @@
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Support/SupportCommon.hpp"
 #include "libslic3r/Support/SupportLayer.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1499,6 +1501,134 @@ std::string tower_plough_failure(const std::string &gcode_text)
     return {};
 }
 
+// Empty when no tower road touches an earlier purge or ramming row that stands more than 0.02 mm higher: their edges
+// must keep at least min_gap apart, or the nozzle laying the lower road rubs the side of the higher row. Each road's
+// width comes from its E, length and tagged height (1.75 mm filament); arcs are followed in pieces of about 0.5 mm.
+std::string tower_touch_failure(const std::string &gcode_text, double min_gap)
+{
+    struct Road { Vec2d a, b; double z, width; const char *row; size_t line; };
+    std::vector<Road> roads;
+    std::istringstream gcode(gcode_text);
+    std::string line;
+    double x = 0., y = 0., z = 0., height = 0.2;
+    bool in_tower = false, in_purge = false, in_ramming = false;
+    const double filament_area = 0.25 * M_PI * 1.75 * 1.75;
+    size_t line_no = 0;
+    while (std::getline(gcode, line)) {
+        ++line_no;
+        if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
+            break;
+        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; WIPE_TOWER_END", 0) == 0) {
+            in_tower = line.rfind("; WIPE_TOWER_START", 0) == 0;
+            if (! in_tower)
+                in_purge = in_ramming = false;
+            continue;
+        }
+        if (line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0) {
+            in_purge = line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0;
+            continue;
+        }
+        if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
+            in_ramming = line.rfind("; NOZZLE_CHANGE_START", 0) == 0;
+            continue;
+        }
+        for (const char *tag : {"; LAYER_HEIGHT:", ";HEIGHT:"})
+            if (line.rfind(tag, 0) == 0)
+                height = std::atof(line.c_str() + std::strlen(tag));
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
+            continue;
+        double nx = x, ny = y, e = 0., ci = 0., cj = 0.;
+        std::istringstream words(code.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word.size() < 2)
+                continue;
+            const double value = std::atof(word.c_str() + 1);
+            if (word[0] == 'X') nx = value;
+            else if (word[0] == 'Y') ny = value;
+            else if (word[0] == 'Z') z = value;
+            else if (word[0] == 'E') e = value;
+            else if (word[0] == 'I') ci = value;
+            else if (word[0] == 'J') cj = value;
+        }
+        std::vector<Vec2d> points{Vec2d(x, y), Vec2d(nx, ny)};
+        if ((code[1] == '2' || code[1] == '3') && (ci != 0. || cj != 0.)) {
+            const Vec2d center(x + ci, y + cj);
+            const double radius = std::hypot(ci, cj);
+            const double a0 = std::atan2(y - center.y(), x - center.x());
+            double a1 = std::atan2(ny - center.y(), nx - center.x());
+            if (code[1] == '3')
+                while (a1 <= a0) a1 += 2. * M_PI;
+            else
+                while (a1 >= a0) a1 -= 2. * M_PI;
+            const int pieces = std::max(2, int(std::abs(a1 - a0) * radius / 0.5) + 1);
+            points.clear();
+            for (int k = 0; k <= pieces; ++k) {
+                const double a = a0 + (a1 - a0) * k / pieces;
+                points.emplace_back(center.x() + radius * std::cos(a), center.y() + radius * std::sin(a));
+            }
+        }
+        double length = 0.;
+        for (size_t k = 1; k < points.size(); ++k)
+            length += (points[k] - points[k - 1]).norm();
+        if (in_tower && e > 0. && length > 0.05 && height > 0.) {
+            const double width = e * filament_area / (length * height) + height * (1. - 0.25 * M_PI);
+            for (size_t k = 1; k < points.size(); ++k)
+                roads.push_back({points[k - 1], points[k], z, width, in_purge ? "purge" : in_ramming ? "ramming" : nullptr, line_no});
+        }
+        x = nx;
+        y = ny;
+    }
+    const auto point_to_segment = [](const Vec2d &p, const Vec2d &a, const Vec2d &b) {
+        const Vec2d ab = b - a;
+        const double t = ab.squaredNorm() > 0. ? std::clamp((p - a).dot(ab) / ab.squaredNorm(), 0., 1.) : 0.;
+        return (p - (a + t * ab)).norm();
+    };
+    const auto distance = [&point_to_segment](const Road &r, const Road &s) {
+        const auto side = [](const Vec2d &o, const Vec2d &p, const Vec2d &q) {
+            return (p.x() - o.x()) * (q.y() - o.y()) - (p.y() - o.y()) * (q.x() - o.x());
+        };
+        if (side(s.a, s.b, r.a) * side(s.a, s.b, r.b) < 0. && side(r.a, r.b, s.a) * side(r.a, r.b, s.b) < 0.)
+            return 0.;
+        return std::min({point_to_segment(r.a, s.a, s.b), point_to_segment(r.b, s.a, s.b), point_to_segment(s.a, r.a, r.b),
+                         point_to_segment(s.b, r.a, r.b)});
+    };
+    // Grid of 2 mm cells over the held rows laid so far: only purge and ramming rows count as earlier roads.
+    std::map<std::pair<int, int>, std::vector<size_t>> grid;
+    for (size_t i = 0; i < roads.size(); ++i) {
+        const Road &road = roads[i];
+        const double reach = 1.;
+        for (int gx = int(std::floor((std::min(road.a.x(), road.b.x()) - reach) / 2.)); gx <= int(std::floor((std::max(road.a.x(), road.b.x()) + reach) / 2.)); ++gx)
+            for (int gy = int(std::floor((std::min(road.a.y(), road.b.y()) - reach) / 2.)); gy <= int(std::floor((std::max(road.a.y(), road.b.y()) + reach) / 2.)); ++gy) {
+                const auto cell = grid.find({gx, gy});
+                if (cell == grid.end())
+                    continue;
+                for (size_t j : cell->second) {
+                    const Road &earlier = roads[j];
+                    if (earlier.z <= road.z + 0.02)
+                        continue;
+                    const double gap = distance(road, earlier) - 0.5 * (road.width + earlier.width);
+                    if (gap < min_gap) {
+                        std::ostringstream out;
+                        out << "a tower road at Z " << road.z << " (G-code line " << road.line << ") comes within " << gap
+                            << " mm of an earlier " << earlier.row << " row at Z " << earlier.z << " (line " << earlier.line << ")";
+                        return out.str();
+                    }
+                }
+            }
+        if (road.row == nullptr)
+            continue;
+        std::set<std::pair<int, int>> cells;
+        for (int gx = int(std::floor(std::min(road.a.x(), road.b.x()) / 2.)); gx <= int(std::floor(std::max(road.a.x(), road.b.x()) / 2.)); ++gx)
+            for (int gy = int(std::floor(std::min(road.a.y(), road.b.y()) / 2.)); gy <= int(std::floor(std::max(road.a.y(), road.b.y()) / 2.)); ++gy)
+                cells.insert({gx, gy});
+        for (const auto &cell : cells)
+            grid[cell].push_back(i);
+    }
+    return {};
+}
+
 // Empty when no move outside the tower blocks comes down over the tower's footprint more than allowed below the
 // highest tower road laid so far: the nozzle going back to the part layer would hit a tower standing above it.
 std::string tower_dive_failure(const std::string &gcode_text, double allowed)
@@ -1745,6 +1875,9 @@ std::string feature_split_held_ramming(const char *shape_name, const std::functi
         return what.str() + "no ramming held above its level";
     if (std::string plough = tower_plough_failure(facts.gcode); !plough.empty())
         return what.str() + std::to_string(held) + " held rammings, and " + plough;
+    // Roads laid later at the level's height keep clear of the held rows, not only out from under them.
+    if (std::string touch = tower_touch_failure(facts.gcode, 0.02); !touch.empty())
+        return what.str() + std::to_string(held) + " held rammings, and " + touch;
     return {};
 }
 } // namespace
@@ -1763,6 +1896,68 @@ TEST_CASE("Feature Split towers: no tower road runs under a ramming the coarse n
         report << failure << '\n';
     INFO(report.str());
     CHECK(failures.empty());
+}
+
+TEST_CASE("Feature Split towers: rows held above their level keep clear of the roads laid beside them", "[TestRebuild][Support]")
+{
+    // Owner-style tower test plate (test build 7): an H2D 0.2/0.6, an L of a 10 mm column with an arm on Feature
+    // Split at 0.08/0.40, organic support with a PETG interface. The 0.6 rams at its 0.12 minimum on 0.08 levels, so
+    // its ramming rows stand 0.04 mm proud, and later purge rows are lifted onto them. Both used to lie one road
+    // from the wall line and the block's start, so the wall, the block before and the arriving tool's purge, laid
+    // after them at the level's height, ran edge to edge along them (and under them where the wall's arcs bow in).
+    Model model;
+    DynamicPrintConfig config;
+    {
+        ScopedTemporaryDir unpack("cadence-3mf");
+        const std::string previous = temporary_dir();
+        set_temporary_dir(unpack.string());
+        ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+        model = Model::read_from_file(std::string(TEST_DATA_DIR) + "/feature-split-L-tower-008.3mf", &config, &substitutions,
+                                      LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+        set_temporary_dir(previous);
+    }
+    REQUIRE(model.objects.size() == 1);
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, config);
+    print.set_status_silent();
+    const CadenceTest::Facts facts = CadenceTest::slice(print);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    // The plate has rows held above their level: rammings that climb, and purge rows lifted onto them.
+    size_t climbing = 0;
+    {
+        std::istringstream gcode(facts.gcode);
+        std::string line;
+        double z = 0.;
+        bool in_row = false, counted = false;
+        while (std::getline(gcode, line)) {
+            if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0) {
+                in_row = true;
+                counted = false;
+            } else if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0)
+                in_row = false;
+            else if (line.rfind("G1 ", 0) == 0) {
+                const std::string code = line.substr(0, line.find(';'));
+                if (const size_t at = code.find(" Z"); at != std::string::npos) {
+                    const double next = std::atof(code.c_str() + at + 2);
+                    if (in_row && !counted && next > z + 0.02 && next < z + 0.1) {
+                        ++climbing;
+                        counted = true;
+                    }
+                    z = next;
+                }
+            }
+        }
+    }
+    CHECK(climbing > 0);
+    const std::string plough = tower_plough_failure(facts.gcode);
+    INFO(plough);
+    CHECK(plough.empty());
+    const std::string touch = tower_touch_failure(facts.gcode, 0.02);
+    INFO(touch);
+    CHECK(touch.empty());
 }
 
 namespace {

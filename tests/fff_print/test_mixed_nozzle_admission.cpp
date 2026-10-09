@@ -132,3 +132,37 @@ TEST_CASE("A surface material uses its mapped nozzle only when that nozzle can p
     CHECK(bridge_roads > 0);
     CHECK(wall_roads > 0);
 }
+
+TEST_CASE("A layer height a nozzle cannot lay is refused naming the nozzle, the heights it lays and the setting to change",
+          "[TestRebuild][Admission]")
+{
+    // The combo sweep's Body Split refusal for a first layer outside the fine nozzle's range read "A body's layer
+    // height or the shared first layer is outside what its nozzle can print ...", naming neither the nozzle nor the
+    // value to change. Feature Split named setting keys ("top_surface_filament_id names filament 7 ...").
+    SECTION("Body Split, a first layer too thick for the fine nozzle") {
+        Scene scene = body_coupon();
+        scene.config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.3));
+        const StringObjectException error = admission(scene);
+        INFO(error.string);
+        REQUIRE(error.string.find("SRL-A38") != std::string::npos);
+        CHECK(error.string.find("The first layer is 0.3 mm") != std::string::npos);
+        CHECK(error.string.find("0.2 mm nozzle") != std::string::npos);
+        CHECK(error.string.find("Set First layer height to at most") != std::string::npos);
+        CHECK(error.string.find("_height") == std::string::npos);
+    }
+    SECTION("Feature Split, top surfaces on a nozzle that cannot lay the layer height") {
+        Scene scene = feature_cube();
+        scene.config.set_key_value("top_shell_layers", new ConfigOptionInt(3));
+        scene.config.set_key_value("dont_filter_internal_bridges", new ConfigOptionEnum<InternalBridgeFilter>(ibfNofilter));
+        scene.config.set_key_value("top_surface_filament_id", new ConfigOptionInt(7));
+        scene.config.set_key_value("min_layer_height", new ConfigOptionFloats{.04, .16});
+        const StringObjectException error = admission(scene);
+        INFO(error.string);
+        REQUIRE(error.string.find("SRL-F12") != std::string::npos);
+        CHECK(error.opt_key == "top_surface_filament_id");
+        CHECK(error.string.find("prints its top surfaces with filament 7 on the") != std::string::npos);
+        CHECK(error.string.find("which lays layers from 0.16 mm to") != std::string::npos);
+        CHECK(error.string.find("Change Layer height to fit that nozzle, or put the top surfaces on a filament on the other nozzle.") != std::string::npos);
+        CHECK(error.string.find("_filament_id") == std::string::npos);
+    }
+}

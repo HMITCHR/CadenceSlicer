@@ -701,6 +701,9 @@ private:
                            float moved_depth) const;
     // The depth the purge rows of this tool change take (toolchange_wipe_new()), for beside_held_rows().
     float purge_rows_depth(int tool, float wipe_length, float wipe_volume_budget, bool solid) const;
+    // Per block id, in the level being generated: the depth from which roads laid later at the level's height may
+    // reach (their edge), to keep clear of ramming rows held above the level's top earlier in it.
+    std::map<int, float> m_level_clear_from;
     void   update_tower_base_extent();
     Vec2f            m_origin;
     std::vector<int>    m_last_layer_id;
