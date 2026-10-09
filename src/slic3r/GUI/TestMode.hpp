@@ -32,6 +32,9 @@ void start();
 int popup_menu(wxWindow &owner, wxMenu &menu, const wxPoint &at);
 // Each plate validation's result, in order, for the state dumps. Nothing outside test mode.
 void note_validation(const std::string &error);
+// Where a scenario's export_gcode step saves the G-code, in place of the save panel. Empty
+// outside test mode and outside that step, so the user always gets the panel.
+std::string export_path();
 // The pretend printer a scenario connected (TestModePrinter.hpp), or null. Always null outside
 // test mode, so the device manager sees only real printers there.
 MachineObject *fake_printer();

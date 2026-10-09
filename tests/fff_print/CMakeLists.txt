@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_nozzle_geometry.cpp
 	test_mixed_nozzle_bug_guards.cpp
 	test_mixed_nozzle_support.cpp
+	test_mixed_nozzle_sunk_text.cpp
 	test_mixed_nozzle_start_line.cpp
 	test_extrusion_entity.cpp
 	test_fill.cpp

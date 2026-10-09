@@ -92,6 +92,7 @@ std::string g_menu_error;
 json g_menu_last;
 // Plate validation results since the last step's dump, oldest first.
 json g_validations = json::array();
+std::string g_export_path;
 // The pretend printer a scenario connected; see connect_printer.
 std::unique_ptr<MachineObject> g_fake_printer;
 
@@ -591,6 +592,7 @@ private:
     json m_dismissed = json::array();
     int m_failures {0};
     std::optional<Clock::time_point> m_layout_wait;
+    std::uintmax_t m_export_size = 0;
     // Every dialog that opened, in order, so a scenario can check which came first.
     json m_dialog_history = json::array();
     std::set<wxTopLevelWindow *> m_dialogs_shown;
@@ -728,6 +730,15 @@ private:
                 return false;
             const PartPlate *plate = plater->get_partplate_list().get_curr_plate();
             return plate != nullptr && plate->is_slice_result_valid();
+        }
+        // The exported file is there and has stopped growing.
+        if (wait == "export_done") {
+            const boost::filesystem::path path = m_out / step().at("name").get<std::string>();
+            boost::system::error_code ec;
+            const auto size = boost::filesystem::exists(path, ec) ? boost::filesystem::file_size(path, ec) : 0;
+            const bool steady = size > 0 && size == m_export_size;
+            m_export_size = size;
+            return steady && !plater->is_background_process_slicing();
         }
         if (wait == "no_dialog")
             return shown_modal_dialogs().empty();
@@ -1154,6 +1165,13 @@ private:
             const boost::filesystem::path path = m_out / s.at("name").get<std::string>();
             return plater->export_3mf(path) == 0 || (error = "export_3mf failed", false);
         }
+        // Export G-code as the Print button's menu does, saving to the out dir instead of asking.
+        if (what == "export_gcode") {
+            g_export_path = (m_out / s.at("name").get<std::string>()).string();
+            plater->export_gcode(false);
+            g_export_path.clear();
+            return true;
+        }
         if (what == "open_3mf") {
             plater->load_project(from_u8((m_out / s.at("name").get<std::string>()).string()));
             return true;
@@ -1216,7 +1234,8 @@ private:
             const MixedNozzleModeSource mode = effective_mixed_nozzle_mode(project, *plate);
             json entry {{"index", i}, {"mode", mode_name(mode.effective)}, {"inherits_project", mode.inherits_project},
                         {"filament_maps", plate->get_real_filament_maps(project)},
-                        {"slice_valid", plate->is_slice_result_valid()}};
+                        {"slice_valid", plate->is_slice_result_valid()},
+                        {"ready_for_print", plate->is_slice_result_ready_for_print()}};
             for (const std::string &key : plate->config()->keys())
                 entry["overrides"][key] = plate->config()->opt_serialize(key);
             plates.push_back(entry);
@@ -1240,6 +1259,10 @@ private:
                                                                                 "curr_bed_type");
         }
         out["undo"] = {{"can_undo", plater->can_undo()}, {"can_redo", plater->can_redo()}};
+        // The main Print button (Print plate, Send, Export G-code file): what it says and whether it can be pressed.
+        if (const SideButton *print = wxGetApp().mainframe->m_print_btn)
+            out["print_button"] = {{"label", into_u8(print->GetLabel())}, {"enabled", print->IsEnabled()},
+                                   {"shown", print->IsShown()}};
         out["slicing"] = plater->is_background_process_slicing();
 
         json objects = json::array();
@@ -1501,6 +1524,11 @@ void note_validation(const std::string &error)
 {
     if (active())
         g_validations.push_back(error);
+}
+
+std::string export_path()
+{
+    return active() ? g_export_path : std::string();
 }
 
 MachineObject *fake_printer()

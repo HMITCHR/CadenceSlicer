@@ -2537,7 +2537,7 @@ void PrintObject::detect_surfaces_type()
                         const ExPolygons T = union_ex(to_expolygons(top));
                         // Walls are laid out on spacing, not width; and only_one_wall_top leaves a single wall over
                         // a top surface, which is exactly the situation handled here.
-                        const int    wall_loops = region_config.only_one_wall_top.value ? std::min(region_config.wall_loops.value, 1)
+                        const int    wall_loops = layerm->one_wall_top() ? std::min(region_config.wall_loops.value, 1)
                                                                                         : region_config.wall_loops.value;
                         const double wall_band  = wall_loops <= 0 ? 0. :
                             double(layerm->flow(frExternalPerimeter).scaled_width()) +

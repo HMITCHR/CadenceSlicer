@@ -1427,6 +1427,13 @@ static inline ExPolygons detect_overhangs(
         // Filter out areas whose diameter that is smaller than extrusion_width. Do not use offset2() for this purpose!
         // FIXME if there are multiple regions with different extrusion width, the following code may not be right.
         float fw = float(layer.regions().front()->flow(frExternalPerimeter).scaled_width());
+        // With mixed nozzles the first region can be a body on the big nozzle, whose road is wider than text on
+        // the small one. Filtering the text below by that road dropped its thin strokes, so every stroke above
+        // looked like a sharp tail with nothing under it and got support between the letters. Filter by the
+        // narrowest road on the layer.
+        if (is_mixed_nozzle_slicing_enabled(print_config))
+            for (const LayerRegion *layerm : layer.regions())
+                fw = std::min(fw, float(layerm->flow(frExternalPerimeter).scaled_width()));
         ExPolygons lower_layer_expolys;
         for (const ExPolygon& expoly : lower_layer.lslices) {
             if (!offset_ex(expoly, -fw / 2).empty()) {

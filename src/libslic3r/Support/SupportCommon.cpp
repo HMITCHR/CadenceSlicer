@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <optional>
 #include <map>
 #include <iomanip>
 #include <set>
@@ -1343,6 +1344,41 @@ static void modulate_extrusion_by_overlapping_layers(
         extrusion_entities_append_paths(extrusions_in_out, std::move(it_fragment->polylines), extrusion_role, it_fragment->mm3_per_mm, it_fragment->width, it_fragment->height);
 }
 
+// Under Body Split a coarse support band ends where the bodies its nozzle lays end their cells, so the
+// support and the part share their layers. Without that the bands start on the support's own first
+// layer (0.1 under bodies whose first cell is 0.2 tall) and every band ends one layer off the part's
+// cells: twice the layers, and a tower level for each.
+struct SnappedBand {
+    size_t last;
+    // False when the layers up to that cell top are too thin for the coarse nozzle: they are left to
+    // the interface nozzle, and the next band starts on the cell top.
+    bool   legal;
+};
+
+// The band starting at run[i] that ends on the first of the body's cell tops at or above run[i]'s top.
+// None where the run is above the body's cells, a run layer lies off the body's cell tops, or the run
+// ends inside a cell: the band rules without the cells apply there.
+static std::optional<SnappedBand> band_on_body_cells(const std::vector<SupportGeneratorLayer*> &run, const std::vector<coordf_t> &height,
+                                                     size_t i, const std::vector<coordf_t> &body_tops,
+                                                     const std::function<bool(coordf_t)> &legal, coordf_t body_max)
+{
+    if (body_tops.empty() || run[i]->print_z > body_tops.back() + EPSILON)
+        return std::nullopt;
+    const auto on_top = [&body_tops](coordf_t z) {
+        auto it = std::lower_bound(body_tops.begin(), body_tops.end(), z - EPSILON);
+        return it != body_tops.end() && std::abs(*it - z) < EPSILON;
+    };
+    coordf_t sum = 0.;
+    for (size_t j = i; j < run.size(); ++ j) {
+        sum += height[j];
+        if (sum > body_max + EPSILON)
+            return std::nullopt;
+        if (on_top(run[j]->print_z))
+            return SnappedBand{j, legal(sum)};
+    }
+    return std::nullopt;
+}
+
 // How organic tree support on a coarse base is laid in bands, for one run of base layers that stack
 // without a gap. The tree is planned and sliced on the object's layers; each slice is a cut through
 // the branches' tubes at that layer's middle.
@@ -1365,6 +1401,8 @@ struct TreeBandRules {
     float                                             thin_radius = 0.;
     // Pieces narrower than twice this are too thin for the interface nozzle's road.
     float                                             sliver      = 0.;
+    // Under Body Split, the cell tops of the bodies the coarse nozzle lays (band_on_body_cells()).
+    std::vector<coordf_t>                             body_tops;
 };
 
 // A band is one coarse layer, so it takes the cut nearest its own middle, as stock does at that layer
@@ -1388,6 +1426,8 @@ static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBa
         run[k]->polygons.clear();
     }
     std::vector<bool> hosts_band(n, false);
+    // Layers inside a band's span below its top: nothing at them prints until the band does, at its top.
+    std::vector<bool> inside_band(n, false);
 
     const auto make_band = [&](size_t first, size_t last) {
         if (left[first].empty() || left[last].empty())
@@ -1421,6 +1461,8 @@ static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBa
         run[last]->bottom_z = bottom_z;
         run[last]->height   = top_z - bottom_z;
         hosts_band[last]    = true;
+        for (size_t k = first; k < last; ++ k)
+            inside_band[k] = true;
         ++ num_bands;
     };
 
@@ -1430,18 +1472,24 @@ static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBa
             continue;
         }
         // Band heights as for normal support: the smallest legal band on the bed, above it as close to
-        // the coarse cadence as whole layers get.
-        size_t   j   = i;
-        coordf_t sum = height[i];
-        if (run[i]->bottom_z < EPSILON) {
-            while (sum < rules.body_min - EPSILON && j + 1 < n && sum + height[j + 1] < rules.body_max + EPSILON)
-                sum += height[++ j];
+        // the coarse cadence as whole layers get. Under Body Split, the body's cells.
+        size_t j = i;
+        if (const std::optional<SnappedBand> snapped = band_on_body_cells(run, height, i, rules.body_tops, rules.legal, rules.body_max)) {
+            j = snapped->last;
+            if (j > i && snapped->legal)
+                make_band(i, j);
         } else {
-            while (j + 1 < n && sum + height[j + 1] < rules.target + EPSILON)
-                sum += height[++ j];
+            coordf_t sum = height[i];
+            if (run[i]->bottom_z < EPSILON) {
+                while (sum < rules.body_min - EPSILON && j + 1 < n && sum + height[j + 1] < rules.body_max + EPSILON)
+                    sum += height[++ j];
+            } else {
+                while (j + 1 < n && sum + height[j + 1] < rules.target + EPSILON)
+                    sum += height[++ j];
+            }
+            if (j > i && rules.legal(sum))
+                make_band(i, j);
         }
-        if (j > i && rules.legal(sum))
-            make_band(i, j);
         // What that band left, where enough of it stacks up, in the smallest bands the nozzle can lay.
         // The band's own top layer is taken.
         const size_t end_free = hosts_band[j] ? j : j + 1;
@@ -1457,9 +1505,29 @@ static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBa
         i = j + 1;
     }
 
+    // What prints at the layer below, for pieces over a band that is still being laid.
+    Polygons printed_below;
     for (size_t k = 0; k < n; ++ k) {
         SupportGeneratorLayer &layer = *run[k];
         Polygons fine = std::move(left[k]);
+        // Over a layer inside a band, only what that layer itself prints holds a piece up: the band prints at
+        // its top, later. A piece with nothing under it would be laid in the air, a fine layer or more above the
+        // last printed surface. It is part of a branch that widens inside the band, so it is left out.
+        const bool over_band = k > 0 && inside_band[k - 1];
+        const auto keep_held = [&printed_below, &rules](Polygons pieces) {
+            if (pieces.empty())
+                return pieces;
+            if (printed_below.empty())
+                return Polygons();
+            const Polygons under = expand(printed_below, rules.sliver + float(SCALED_EPSILON));
+            Polygons held;
+            for (ExPolygon &piece : union_ex(pieces))
+                if (! intersection(to_polygons(piece), under).empty())
+                    polygons_append(held, to_polygons(std::move(piece)));
+            return held;
+        };
+        if (over_band)
+            fine = keep_held(std::move(fine));
         // A layer the coarse nozzle can lay at its own height keeps what is wide enough for its road.
         if (! hosts_band[k] && rules.legal(height[k]) && ! fine.empty() &&
             ! (layer.bottom_z < EPSILON && rules.bed_layer_on_interface_nozzle)) {
@@ -1476,6 +1544,8 @@ static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBa
             layer.fine_body_height   = height[k];
             ++ num_fine_layers;
         }
+        printed_below = layer.fine_body_polygons;
+        polygons_append(printed_below, layer.polygons);
     }
 }
 
@@ -1536,6 +1606,21 @@ void mixed_nozzle_band_support_body(
     if (! std::isfinite(target) || target <= 0.)
         target = body_max;
     target = std::clamp(target, body_min, body_max);
+
+    // Under Body Split, the cell tops of the bodies the support nozzle lays, where its bands end too.
+    std::vector<coordf_t> body_tops;
+    if (is_mixed_nozzle_body_split(print_config)) {
+        const std::vector<size_t> &grid_tools = object.region_grid_physical_extruders();
+        const std::vector<std::vector<NativeRegionCellState>> &cells = object.native_regional_grid_state().cells;
+        for (size_t region_id = 0; region_id < cells.size() && region_id < grid_tools.size(); ++ region_id)
+            if (grid_tools[region_id] == body_tool)
+                for (const NativeRegionCellState &cell : cells[region_id])
+                    if (! cell.cell.fine_skin)
+                        body_tops.push_back(cell.cell.top_z);
+        std::sort(body_tops.begin(), body_tops.end());
+        body_tops.erase(std::unique(body_tops.begin(), body_tops.end(), [](coordf_t a, coordf_t b) { return std::abs(a - b) < EPSILON; }),
+                        body_tops.end());
+    }
 
     const auto legal = [body_min, body_max](coordf_t height) {
         return height > body_min - EPSILON && height < body_max + EPSILON;
@@ -1674,6 +1759,7 @@ void mixed_nozzle_band_support_body(
         tree_rules.lean_cap     = float(scale_(0.5 * road_width));
         tree_rules.thin_radius  = float(scale_(0.75 * road_width));
         tree_rules.sliver       = float(scale_(0.5 * support_params.mixed_nozzle_fine_body_flow.width()));
+        tree_rules.body_tops    = body_tops;
     }
     for (std::vector<SupportGeneratorLayer*> &run : runs) {
         if (organic_tree) {
@@ -1723,17 +1809,24 @@ void mixed_nozzle_band_support_body(
             // Where this band ends. On the bed the band is the smallest one the nozzle can lay, so
             // the first road is no thicker than it has to be; above it, as close to the plan's
             // coarse cadence as whole layers get without going over.
-            size_t   j   = i;
-            coordf_t sum = height[i];
-            if (run[i]->bottom_z < EPSILON) {
-                while (sum < body_min - EPSILON && j + 1 < n && sum + height[j + 1] < body_max + EPSILON)
-                    sum += height[++ j];
+            // Under Body Split, the body's cells.
+            size_t j = i;
+            if (const std::optional<SnappedBand> snapped = band_on_body_cells(run, height, i, body_tops, legal, body_max)) {
+                j = snapped->last;
+                if (j > i && snapped->legal)
+                    make_band(i, j);
             } else {
-                while (j + 1 < n && sum + height[j + 1] < target + EPSILON)
-                    sum += height[++ j];
+                coordf_t sum = height[i];
+                if (run[i]->bottom_z < EPSILON) {
+                    while (sum < body_min - EPSILON && j + 1 < n && sum + height[j + 1] < body_max + EPSILON)
+                        sum += height[++ j];
+                } else {
+                    while (j + 1 < n && sum + height[j + 1] < target + EPSILON)
+                        sum += height[++ j];
+                }
+                if (j > i && legal(sum))
+                    make_band(i, j);
             }
-            if (j > i && legal(sum))
-                make_band(i, j);
             // What that band could not hold, where the shape changes inside it, in the smallest
             // groups the nozzle can lay, from the bottom up. The band's own top layer is taken.
             const size_t last_free = hosts_band[j] ? j - 1 : j;

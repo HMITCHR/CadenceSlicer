@@ -117,8 +117,8 @@ public:
         // Ramming held above its level to meet the outgoing tool's minimum; audited as a road but
         // not the top of its support chain.
         bool held_above_level{false};
-        // A road of a held coarse prime level, or a later road lifted to it (WipeTowerInfo::held_above): no
-        // road laid lower down may cross it before the tower top reaches it.
+        // A road of a held coarse prime level (WipeTowerInfo::held_above), a ramming row held above its level,
+        // or a later road lifted to one: no road laid lower down may cross it before the tower top reaches it.
         bool held_level{false};
     };
 
@@ -673,6 +673,16 @@ private:
     // Per block id, where the held level's rows end in the block (its cursor after them). A full level below the
     // held top starts its block fill there, so the fill lies beside the held rows, not under them.
     std::map<int, float> m_held_rows_end;
+    // Ramming rows the outgoing tool laid above the level's top to keep to its own minimum (ramming_height()), in
+    // the level being generated: block id, Z of the rows, and the block's cursor before and after them. Once the
+    // level is done they are held roads like a held prime level's (m_held_road_z, m_held_rows_end, m_held_spans), so
+    // no later road runs under them. Not before: the arriving tool's purge in the same level lies beside them.
+    struct HeldRamming { int block_id; float z; float rows_start; float rows_end; };
+    std::vector<HeldRamming> m_held_rammings;
+    // Per block id, the stretches of the block (from, to: block depths) the held rows cover and their Z, kept and
+    // dropped with m_held_road_z. A ramming below its level may stand on them (see ramming()).
+    struct HeldSpan { float from; float to; float z; };
+    std::map<int, std::vector<HeldSpan>> m_held_spans;
     float held_road_z(const WipeTowerBlock *block) const
     {
         if (block == nullptr)
@@ -680,6 +690,17 @@ private:
         const auto it = m_held_road_z.find(block->block_id);
         return it == m_held_road_z.end() ? 0.f : it->second;
     }
+    // Rows of this tool laid at z with this height, in a box of box_depth from the block's cursor, under a held road in
+    // the block. They go beside the held rows instead of being lifted to the held top when they start after them
+    // already, or when the lift would make them taller than the tool can lay and they fit after the held rows: in the
+    // box's part after them (needed is the depth they take), or with the box moved there, when the block has room on
+    // this level for moved_depth (the rest of the level's rows in the block) after them. Returns where they start, or
+    // -1 to lift them (rows above the tool's maximum are left to the purge and ramming exemption, as before) or when
+    // nothing is held there.
+    float beside_held_rows(const WipeTowerBlock *block, int tool, float z, float height, float box_depth, float needed,
+                           float moved_depth) const;
+    // The depth the purge rows of this tool change take (toolchange_wipe_new()), for beside_held_rows().
+    float purge_rows_depth(int tool, float wipe_length, float wipe_volume_budget, bool solid) const;
     void   update_tower_base_extent();
     Vec2f            m_origin;
     std::vector<int>    m_last_layer_id;

@@ -47,6 +47,9 @@ public:
     // Native regional-grid cell metadata. With no assigned cell these accessors describe the whole
     // event layer, as for one region per layer.
     bool        has_cell() const;
+    // Whether this region's walls drop to one wall over a top surface: only_one_wall_top, or a Body Split
+    // body on the coarse nozzle. See LayerRegion.cpp.
+    bool        one_wall_top() const;
     coordf_t    height() const;
     coordf_t    bottom_z() const;
     coordf_t    slice_z() const;

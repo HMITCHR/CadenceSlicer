@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cmath>
 #include <iterator>
+#include <optional>
 #include <utility>
 
 namespace Slic3r {
@@ -120,7 +121,10 @@ std::vector<coordf_t> rephased_boundaries(
 //   3. when it is cell 1, fold it into cell 0, which may grow up to the nozzle maximum;
 //   4. merge it with the cell below, or else the one above, when the merged cell is no taller
 //      than the cadence (a contact cut is then not applied to this region);
-//   5. when it is the region's top cell, drop it.
+//   5. move every boundary below it down by the rows it lacks, from the region's first plane up, with
+//      cell 0 taking the rows (up to the nozzle maximum), when no contact plane lies below it: the grid
+//      then lands on its top, or on a contact plane above it, instead of losing it;
+//   6. when it is the region's top cell, drop it.
 // Anything still short is left for the caller's envelope check to refuse.
 void hold_cells_to_minimum_rows(
     std::vector<coordf_t>                  &boundaries,
@@ -141,6 +145,31 @@ void hold_cells_to_minimum_rows(
     };
     const long k = long(minimum_rows);
     const long n_rows = long(std::max<size_t>(cadence_rows, minimum_rows));
+    // Step 5: the boundaries under cell i, each moved down by deficit rows. Cell 1 then loses those rows
+    // and is folded into cell 0, which may grow up to the nozzle maximum. Every cell keeps its rows.
+    const auto shift_cells_below_down = [&](const std::vector<coordf_t> &tops, size_t i, long deficit)
+        -> std::optional<std::vector<coordf_t>> {
+        if (deficit <= 0 || i < 2 || maximum_first_cell_height <= 0.)
+            return std::nullopt;
+        std::vector<coordf_t> out = tops;
+        for (size_t j = 1; j < i; ++j) {
+            const size_t row = lattice_index(lattice, out[j]);
+            if (is_contact(out[j]) || row < size_t(deficit))
+                return std::nullopt;
+            out[j] = lattice[row - size_t(deficit)];
+        }
+        // Cell 1 now spans fewer rows than before; fold it into cell 0 when it is short.
+        if (rows_between(out[0], out[1]) < k) {
+            if (out[1] > maximum_first_cell_height + grid_epsilon)
+                return std::nullopt;
+            out.erase(out.begin());
+            --i;
+        }
+        for (size_t j = 1; j <= i; ++j)
+            if (rows_between(out[j - 1], out[j]) < k || rows_between(out[j - 1], out[j]) > n_rows)
+                return std::nullopt;
+        return out;
+    };
     // Bound only guards against malformed input; every repair makes progress.
     for (size_t pass = 0; pass < 4 * boundaries.size() + 8; ++pass) {
         bool changed = false;
@@ -167,6 +196,9 @@ void hold_cells_to_minimum_rows(
                 changed = true;
             } else if (i + 1 <= last && rows_between(boundaries[i - 1], boundaries[i + 1]) <= n_rows) {
                 boundaries.erase(boundaries.begin() + long(i));
+                changed = true;
+            } else if (std::optional<std::vector<coordf_t>> shifted = shift_cells_below_down(boundaries, i, k - rows); shifted) {
+                boundaries = std::move(*shifted);
                 changed = true;
             } else if (i == last) {
                 boundaries.pop_back();
@@ -458,11 +490,18 @@ coordf_t contact_width_mm(const ExPolygons &contact)
     return unscale<double>(std::max(box.size().x(), box.size().y()));
 }
 
+// A contact thinner than this is slicing noise, not a contact: the same part sliced on two rows
+// can differ by a hairline along its sloped or curved sides (text sunk into a base showed 0.004 mm2
+// on rows inside the letters). A forced plane there split the base's cells for nothing, and the
+// cell repair then dropped the real plane under the letters. The same hairline as the overlap check.
+constexpr coordf_t contact_hairline_mm = 0.01;
+
 bool survives_contact_tolerance(ExPolygons contact, coordf_t tolerance)
 {
     if (contact.empty())
         return false;
-    contact = opening_ex(contact, tolerance > 0. ? scaled<float>(0.5 * tolerance) : ClipperSafetyOffset);
+    contact = opening_ex(contact, tolerance > 0. ? scaled<float>(std::max(0.5 * tolerance, contact_hairline_mm)) :
+                                                   scaled<float>(contact_hairline_mm));
     return !contact.empty();
 }
 

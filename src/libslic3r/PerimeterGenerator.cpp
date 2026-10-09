@@ -1396,7 +1396,7 @@ void PerimeterGenerator::process_classic()
     // ORCA: neither one-wall option has a surface to act on without the shell behind it, see
     // has_top_shell_layers() / has_bottom_shell_layers(). Gated here so every use below - including the
     // topmost and first layers - sees the same answer.
-    const bool only_one_wall_top         = this->config->only_one_wall_top && has_top_shell_layers(*this->config);
+    const bool only_one_wall_top         = (this->config->only_one_wall_top || this->one_wall_top_forced) && has_top_shell_layers(*this->config);
     const bool only_one_wall_first_layer = this->config->only_one_wall_first_layer && has_bottom_shell_layers(*this->config);
     for (size_t order_idx = 0; order_idx < surface_order.size(); order_idx++) {
         const Surface &surface = all_surfaces[surface_order[order_idx]];
@@ -2379,7 +2379,7 @@ void PerimeterGenerator::process_arachne()
     // ORCA: neither one-wall option has a surface to act on without the shell behind it, see
     // has_top_shell_layers() / has_bottom_shell_layers(). Gated here so every use below - including the
     // topmost and first layers - sees the same answer.
-    const bool only_one_wall_top         = this->config->only_one_wall_top && has_top_shell_layers(*this->config);
+    const bool only_one_wall_top         = (this->config->only_one_wall_top || this->one_wall_top_forced) && has_top_shell_layers(*this->config);
     const bool only_one_wall_first_layer = this->config->only_one_wall_first_layer && has_bottom_shell_layers(*this->config);
     // we need to process each island separately because we might have different
     // extra perimeters for each one

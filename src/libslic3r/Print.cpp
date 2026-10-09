@@ -2368,11 +2368,22 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     if (nozzle_minimum > layer_height + EPSILON || nozzle_maximum + EPSILON < layer_height ||
                         layer_height > m_config.nozzle_diameter.get_at(*nozzle) ||
                         nozzle_minimum > shared_first_layer + EPSILON || nozzle_maximum + EPSILON < shared_first_layer)
+                    {
+                        // A plain object prints whole on its filament's nozzle; say so in the words of the object
+                        // and its filament, not the role key the region resolved it through.
+                        const std::string role = std::string(key) == "outer_wall_filament_id" ? "outer walls" :
+                            std::string(key) == "inner_wall_filament_id" ? "inner walls" :
+                            std::string(key) == "internal_solid_filament_id" ? "solid infill" :
+                            std::string(key) == "top_surface_filament_id" ? "top surfaces" :
+                            std::string(key) == "bottom_surface_filament_id" ? "bottom surfaces" : "sparse infill";
                         return reject(object, "SRL-A38", key, Slic3r::format(
-                            "%1% names filament %2%, which prints on nozzle %3%. That nozzle lays between %4% mm and %5% mm "
-                            "through a %6% mm opening, and this object prints at %7% mm over a shared first layer of %8% mm.",
-                            key, filament, *nozzle + 1, nozzle_minimum, nozzle_maximum,
-                            m_config.nozzle_diameter.get_at(*nozzle), layer_height, shared_first_layer));
+                            "\"%1%\" prints its %2% with filament %3% on the %4% mm nozzle, which lays layers from %5% mm to "
+                            "%6% mm, but the object is set to %7% mm layers on a %8% mm first layer. Change the object's layer "
+                            "height or the first layer to fit that nozzle, move the object to a filament on the other nozzle, "
+                            "or give it a part on the other nozzle so Body Split plans its layers.",
+                            object->model_object()->name, role, filament, m_config.nozzle_diameter.get_at(*nozzle),
+                            nozzle_minimum, nozzle_maximum, layer_height, shared_first_layer));
+                    }
                 }
             }
             return std::nullopt;
@@ -8077,9 +8088,9 @@ void Print::_make_wipe_tower()
                             double(change.print_z) - double(emission.z) >
                                 double(m_mixed_nozzle_tower_lag_max) + EPSILON)
                             return reject("the tower sits further below the part than this plate allows");
-                        // A held coarse prime road (or a road lifted to one) stands above its block's support chain
-                        // until a road reaches its height. A road crossing it lower down (by more than the G-code's
-                        // rounding) would be printed into it.
+                        // A held road (a held coarse prime road, a ramming held above its level, or a road lifted to
+                        // one) stands above its block's support chain until a road reaches its height. A road crossing
+                        // it lower down (by more than the G-code's rounding) would be printed into it.
                         {
                             std::vector<const WipeTower::StructuralEmission *> &held = held_by_domain[emission.support_domain];
                             held.erase(std::remove_if(held.begin(), held.end(), [&](const WipeTower::StructuralEmission *road) {

@@ -1349,6 +1349,16 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     for (LayerTools &lt : m_layer_tools)
         lt.has_wipe_tower |= (lt.has_object && (config.timelapse_type == TimelapseType::tlSmooth || lt.wipe_tower_partitions > 0))
             || lt.print_z < object_bottom_z + EPSILON;
+    // The first layer that prints can hold only support: the support's bed layer under a Body Split
+    // body whose nozzle cannot lay the first layer and starts with a taller cell. has_wipe_tower()
+    // reads that layer, so without a level there the plate got no tower at all. It is the tower's
+    // bed level whenever the plate switches tools.
+    if (is_mixed_nozzle_slicing_enabled(config)) {
+        const auto first_printing = std::find_if(m_layer_tools.begin(), m_layer_tools.end(),
+            [](const LayerTools &lt) { return lt.has_object || lt.has_support; });
+        if (first_printing != m_layer_tools.end() && ! first_printing->has_object && first_printing->wipe_tower_partitions > 0)
+            first_printing->has_wipe_tower = true;
+    }
 
     // Test for a raft, insert additional wipe tower layer to fill in the raft separation gap.
     bool raft_row_inserted = false;

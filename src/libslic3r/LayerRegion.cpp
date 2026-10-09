@@ -139,6 +139,29 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
     }
 }
 
+// A Body Split body on the coarse nozzle lays its top surfaces with one wall, whatever only_one_wall_top
+// says. Its walls are about three times as wide as the fine body's, so the usual wall count (four on the
+// MN presets) takes 2.5 mm or more from every edge of a top surface, and from every hole in it. A top
+// around text or another part sunk into the body is then nearly all walls meeting at odd angles, with
+// the slivers between them left to gap fill or left open (owner print of the combined L test, build 5:
+// one top-surface road per letter gap, 250 gap fill roads per layer, holes between the letters).
+// One wall is the stock Bambu default (fdm_process_common), so this hands the top to the top surface
+// pattern the way a single-nozzle slice would. Cells converted to the fine nozzle by fine skins are
+// left alone, and so are Off mode and Feature Split, where no region is a coarse Body Split cell.
+bool LayerRegion::one_wall_top() const
+{
+    const PrintRegionConfig &region_config = this->region().config();
+    if (region_config.only_one_wall_top.value)
+        return true;
+    if (!this->has_cell() || !is_mixed_nozzle_body_split(this->layer()->object()->print()->config()))
+        return false;
+    const double base = this->layer()->object()->config().layer_height.value;
+    if (region_config.regional_layer_height.value <= base + EPSILON)
+        return false;
+    const int cell_filament = this->cell_filament_id();
+    return cell_filament == 0 || cell_filament == region_config.outer_wall_filament_id.value;
+}
+
 void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap, double effective_height)
 {
     this->perimeters.clear();
@@ -202,6 +225,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     }
 
     g.layer_id              = int(this->cell_index());
+    g.one_wall_top_forced   = this->one_wall_top() && !region_config.only_one_wall_top.value;
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter, effective_height);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges, effective_height);
     g.solid_infill_flow     = this->flow(frSolidInfill, effective_height);

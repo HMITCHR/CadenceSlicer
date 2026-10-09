@@ -1405,16 +1405,17 @@ std::string tower_ahead_failure(const std::string &gcode, double coarse_min)
 }
 
 // Empty when no tower road crosses an earlier purge row (between "; CP_TOOLCHANGE_WIPE" and "; CP TOOLCHANGE END")
-// that stands more than 0.02 mm higher: the nozzle would be pushed through deposited plastic. Roads are compared by
-// their bounding boxes, widened by 0.2 mm. Ramming rows held at the outgoing nozzle's minimum are not counted here.
+// or ramming row (between "; NOZZLE_CHANGE_START" and "; NOZZLE_CHANGE_END") that stands more than 0.02 mm higher:
+// the nozzle would be pushed through deposited plastic. Roads are compared by their bounding boxes, widened by 0.2 mm.
+// A ramming row stands higher when the outgoing tool rams at its own minimum above a lower level.
 std::string tower_plough_failure(const std::string &gcode_text)
 {
-    struct Road { double x0, y0, x1, y1, z; bool purge; };
+    struct Road { double x0, y0, x1, y1, z; const char *row; };
     std::vector<Road> roads;
     std::istringstream gcode(gcode_text);
     std::string line;
     double x = 0., y = 0., z = 0.;
-    bool in_tower = false, in_purge = false;
+    bool in_tower = false, in_purge = false, in_ramming = false;
     while (std::getline(gcode, line)) {
         if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
             break;
@@ -1424,6 +1425,10 @@ std::string tower_plough_failure(const std::string &gcode_text)
         }
         if (line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0) {
             in_purge = line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0;
+            continue;
+        }
+        if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
+            in_ramming = line.rfind("; NOZZLE_CHANGE_START", 0) == 0;
             continue;
         }
         const std::string code = line.substr(0, line.find(';'));
@@ -1465,7 +1470,8 @@ std::string tower_plough_failure(const std::string &gcode_text)
         if (in_tower && e > 0. && std::abs(nx - x) + std::abs(ny - y) > 0.05)
             for (size_t k = 1; k < points.size(); ++k)
                 roads.push_back({std::min(points[k - 1].x(), points[k].x()), std::min(points[k - 1].y(), points[k].y()),
-                                 std::max(points[k - 1].x(), points[k].x()), std::max(points[k - 1].y(), points[k].y()), z, in_purge});
+                                 std::max(points[k - 1].x(), points[k].x()), std::max(points[k - 1].y(), points[k].y()), z,
+                                 in_purge ? "purge" : in_ramming ? "ramming" : nullptr});
         x = nx;
         y = ny;
     }
@@ -1480,10 +1486,10 @@ std::string tower_plough_failure(const std::string &gcode_text)
         for (const auto &cell : cells)
             for (size_t j : grid[cell]) {
                 const Road &earlier = roads[j];
-                if (earlier.purge && earlier.z > road.z + 0.02 && earlier.x1 >= road.x0 - 0.2 && earlier.x0 <= road.x1 + 0.2 &&
+                if (earlier.row != nullptr && earlier.z > road.z + 0.02 && earlier.x1 >= road.x0 - 0.2 && earlier.x0 <= road.x1 + 0.2 &&
                     earlier.y1 >= road.y0 - 0.2 && earlier.y0 <= road.y1 + 0.2) {
                     std::ostringstream out;
-                    out << "a tower road at Z " << road.z << " crosses an earlier purge row at Z " << earlier.z;
+                    out << "a tower road at Z " << road.z << " crosses an earlier " << earlier.row << " row at Z " << earlier.z;
                     return out.str();
                 }
             }
@@ -1670,6 +1676,88 @@ TEST_CASE("Body Split blocks with supports slice, every nozzle change is on the 
     for (const SupportCase &support : {k_normal, k_organic})
         if (std::string failure = body_split_three_part(support, 2, 0.08, 0.56, true); !failure.empty())
             failures.push_back(failure);
+    std::ostringstream report;
+    for (const std::string &failure : failures)
+        report << failure << '\n';
+    INFO(report.str());
+    CHECK(failures.empty());
+}
+
+namespace {
+// Slices a shape in Feature Split with organic trees in the project the app saved (fine PLA and PETG interface on the
+// 0.2, coarse PLA base on the 0.8). Where the coarse tool hands over to the fine one, the tower level is one fine layer
+// tall and the coarse tool rams at its own minimum, above that level. Empty when such rammings are there and no later
+// tower road runs under one (or under a purge row).
+std::string feature_split_held_ramming(const char *shape_name, const std::function<void(ModelObject&)> &add_parts,
+                                       double fine, double coarse, int ratio)
+{
+    std::ostringstream what;
+    what << shape_name << " / Feature Split / " << fine << "/" << coarse << ": ";
+    CadenceTest::Scene scene;
+    scene.config   = app_three_filament_config(Mode::Feature, fine, coarse, ratio, k_organic);
+    scene.populate = [&add_parts, shape_name](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = shape_name;
+        add_parts(*object);
+        if (object->instances.empty())
+            object->add_instance();
+        object->center_around_origin(false);
+        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    CadenceTest::Facts facts;
+    try {
+        facts = CadenceTest::slice(scene);
+    } catch (const std::exception &error) {
+        return what.str() + "threw " + error.what();
+    }
+    if (!facts.refusal.string.empty())
+        return what.str() + "refused: " + facts.refusal.string;
+    // Nozzle changes whose ramming climbs above the Z the head had when the change began.
+    size_t held = 0;
+    {
+        std::istringstream gcode(facts.gcode);
+        std::string line;
+        double z = 0., z_at_start = 0.;
+        bool ramming = false, counted = false;
+        while (std::getline(gcode, line)) {
+            if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0) {
+                ramming = true;
+                counted = false;
+                z_at_start = z;
+            } else if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0)
+                ramming = false;
+            else if (line.rfind("G1 ", 0) == 0) {
+                const std::string code = line.substr(0, line.find(';'));
+                if (const size_t at = code.find(" Z"); at != std::string::npos) {
+                    z = std::atof(code.c_str() + at + 2);
+                    if (ramming && !counted && z > z_at_start + 0.02) {
+                        ++held;
+                        counted = true;
+                    }
+                }
+            }
+        }
+    }
+    if (held == 0)
+        return what.str() + "no ramming held above its level";
+    if (std::string plough = tower_plough_failure(facts.gcode); !plough.empty())
+        return what.str() + std::to_string(held) + " held rammings, and " + plough;
+    return {};
+}
+} // namespace
+
+TEST_CASE("Feature Split towers: no tower road runs under a ramming the coarse nozzle holds at its own minimum", "[TestRebuild][Support]")
+{
+    std::vector<std::string> failures;
+    // The Benchy at 0.10/0.30 (ratio 3) is the plate the crossing was measured on; the Benchy-like pocket at 0.08/0.56
+    // (ratio 7) rams a 0.16 coarse minimum over half-height fine levels.
+    if (std::string failure = feature_split_held_ramming("3DBenchy.drc", handy_model("3DBenchy.drc"), 0.10, 0.30, 3); !failure.empty())
+        failures.push_back(failure);
+    if (std::string failure = feature_split_held_ramming("Benchy-like pocket", parts_of(benchy_like_parts), 0.08, 0.56, 7); !failure.empty())
+        failures.push_back(failure);
     std::ostringstream report;
     for (const std::string &failure : failures)
         report << failure << '\n';
@@ -2081,9 +2169,13 @@ TEST_CASE("The fake wipe tower stops on data that could never give a finite stac
 
 TEST_CASE("A tower-enabled print that needs no tower never checks conflicts against one", "[TestRebuild][Support]")
 {
-    // The Body Split scene of the support body test: the tower is on, but no layer switches tools.
+    // Feature Split with no sparse infill and no support, so nothing reaches the coarse nozzle: the tower
+    // is on, but no layer switches tools. (This was a Body Split column and arm on two nozzles with
+    // support from the bed, which does switch tools; it only looked tower-free while a plate whose first
+    // layer is support alone got no tower. Body Split always prints on both nozzles.)
     DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
-    config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
+    config.set_key_value("enable_support", new ConfigOptionBool(false));
+    config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0.));
     for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
                             "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
         config.set_key_value(key, new ConfigOptionInt(0));
@@ -2104,7 +2196,7 @@ TEST_CASE("A tower-enabled print that needs no tower never checks conflicts agai
         volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
         volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
     };
-    add(make_cube(20., 20., 40.), 3, 0.3);
+    add(make_cube(20., 20., 40.), 1, 0.1);
     TriangleMesh arm = make_cube(40., 20., 10.);
     arm.translate(20.f, 0.f, 30.f);
     add(std::move(arm), 1, 0.1);

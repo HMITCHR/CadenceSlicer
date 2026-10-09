@@ -2493,6 +2493,29 @@ void GCode::PlaceholderParserIntegration::validate_output_vector_variables()
     }
 }
 
+// The height of the tallest road a support layer lays, or 0 when it lays none.
+static coordf_t tallest_support_road(const SupportLayer &layer)
+{
+    coordf_t tallest = 0.;
+    std::function<void(const ExtrusionEntity &)> visit = [&tallest, &visit](const ExtrusionEntity &entity) {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+            for (const ExtrusionEntity *child : collection->entities)
+                visit(*child);
+        } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity)) {
+            tallest = std::max(tallest, coordf_t(path->height));
+        } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
+            for (const ExtrusionPath &path : multipath->paths)
+                tallest = std::max(tallest, coordf_t(path.height));
+        } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+            for (const ExtrusionPath &path : loop->paths)
+                tallest = std::max(tallest, coordf_t(path.height));
+        }
+    };
+    visit(layer.support_fills);
+    visit(layer.fine_body_fills);
+    return tallest;
+}
+
 // Collect pairs of object_layer + support_layer sorted by print_z.
 // object_layer & support_layer are considered to be on the same print_z, if they are not further than EPSILON.
 std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObject& object)
@@ -2599,6 +2622,11 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 for (const LayerRegion *region : layer_to_print.object_layer->regions())
                     if (region->has_cell() && region->has_extrusions())
                         deposited_height = std::max(deposited_height, region->height());
+            // A coarse support band also spans several event layers. Where it ends on an event layer
+            // whose object layer prints nothing, layer() is that empty object layer, one event layer
+            // tall, so measure with the tallest support road laid here.
+            if (layer_to_print.support_layer && is_mixed_nozzle_slicing_enabled(object.print()->config()))
+                deposited_height = std::max(deposited_height, tallest_support_road(*layer_to_print.support_layer));
             double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.)
                 + deposited_height
                 + std::max(0., extra_gap);

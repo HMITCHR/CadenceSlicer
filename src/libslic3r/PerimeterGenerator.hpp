@@ -103,6 +103,9 @@ public:
 
     bool                                            has_fuzzy_skin = false;
     bool                                            has_fuzzy_hole = false;
+    // One wall on top surfaces even with only_one_wall_top off: set for a Body Split body on the coarse
+    // nozzle (LayerRegion::one_wall_top()). Off mode and Feature Split never set it.
+    bool                                            one_wall_top_forced = false;
     // Preserve construction order so overlap precedence remains deterministic.
     std::vector<std::pair<FuzzySkinConfig, ExPolygons>> regions_by_fuzzify;
     

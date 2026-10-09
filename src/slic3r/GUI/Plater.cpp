@@ -16880,7 +16880,9 @@ void Plater::export_gcode(bool prefer_removable)
     }
 
     fs::path output_path;
-    {
+    if (const std::string scripted = TestMode::export_path(); !scripted.empty())
+        output_path = into_path(from_u8(scripted));
+    else {
         std::string ext = default_output_file.extension().string();
         wxFileDialog dlg(this, (printer_technology() == ptFFF) ? _L("Save G-code file as:") : _L("Save SLA file as:"),
             start_dir,
