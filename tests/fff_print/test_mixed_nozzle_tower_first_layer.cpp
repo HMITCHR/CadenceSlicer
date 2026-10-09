@@ -550,6 +550,77 @@ TEST_CASE("A coarse body that starts above an empty first layer still gets the p
     CHECK(primed == changes);
 }
 
+// Fine skins on a coarse body on the bed: the body's bottom layers print on the fine nozzle at the
+// fine height, then the first coarse layer arrives 0.3 mm above the last tower level. The fine
+// nozzle, which starts that visit and is the tower's usual wall filament, laid the level's wall
+// 0.3 mm tall, over its 0.14 mm limit, and the slice stopped with an internal tower error. The
+// arriving coarse nozzle now lays that level.
+TEST_CASE("Fine skins under a coarse body: the coarse nozzle lays the tower level the fine nozzle cannot",
+          "[TestRebuild][TowerFirstLayer]")
+{
+    CadenceTest::Scene scene;
+    scene.config = four_filament_body_config(0.6, 0.12, 0.42, 0.10, 0.30);
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &config) {
+        ModelObject *object = model.add_object();
+        object->name = "fine-skins-under-coarse";
+        ModelVolume *coarse = object->add_volume(make_cube(20., 12., 3.), ModelVolumeType::MODEL_PART, false);
+        coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
+        coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+        coarse->config.set_key_value("mixed_nozzle_body_fine_skins", new ConfigOptionBool(true));
+        for (const char *key : {"internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id"})
+            coarse->config.set_key_value(key, new ConfigOptionInt(1));
+        // A fine block on top and a fine strip on the front face from 0.9 mm up (raised text on the
+        // top and the side): with switches on every coarse layer the fine filament is the tower's
+        // usual wall filament.
+        const auto add_fine = [object](const Vec3d &size, const Vec3d &offset) {
+            ModelVolume *fine = object->add_volume(make_cube(size.x(), size.y(), size.z()), ModelVolumeType::MODEL_PART, false);
+            fine->set_offset(offset);
+            fine->config.set_key_value("extruder", new ConfigOptionInt(1));
+            fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+        };
+        add_fine(Vec3d(8., 6., 1.), Vec3d(6., 3., 3.));
+        add_fine(Vec3d(10., 1., 2.), Vec3d(5., -1., 0.9));
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+    };
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    dump_gcode("fine-skins-under-coarse", facts.gcode);
+
+    // The scene: the fine nozzle prints the bottom skins on the bed, then the coarse nozzle arrives.
+    size_t fine_on_bed = 0, tower_roads = 0;
+    for (const Move &move : facts.moves) {
+        if (CadenceTest::model_road(move) && move.physical_tool_id == 0 && move.position.z() < 0.15f)
+            ++fine_on_bed;
+        if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
+            ++tower_roads;
+    }
+    CAPTURE(fine_on_bed, tower_roads);
+    REQUIRE(fine_on_bed > 0);
+    CHECK(tower_roads > 0);
+    // Every nozzle change starts on the tower.
+    size_t changes = 0, primed = 0;
+    int active = -1;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude)
+            continue;
+        const int tool = int(move.physical_tool_id);
+        if (active != -1 && tool != active) {
+            ++changes;
+            primed += move.extrusion_role == erWipeTower ? 1 : 0;
+        }
+        active = tool;
+    }
+    CAPTURE(changes, primed);
+    CHECK(changes > 0);
+    CHECK(primed == changes);
+}
+
 // A coarse tool laying the tower's bed level drew the brim loops, the solid fill and the base at
 // the fine nozzle's 0.25 mm width. The fill, spaced at that width, was only about 83 percent full
 // on a 0.2 mm layer.

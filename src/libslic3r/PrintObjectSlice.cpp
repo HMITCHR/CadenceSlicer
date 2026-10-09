@@ -1,6 +1,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <cmath>
+#include <iomanip>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -1269,6 +1270,11 @@ void PrintObject::slice_volumes()
     // Measured only for an object staged because of a modifier or a negative part: its staged rows
     // are clipped part against part and can no longer show an overlap. For every other Body object
     // the ownership lattice measures it.
+    // Shared areas smaller than one dot of the finest installed nozzle are slivers where two parts'
+    // faces meet, not overlaps (RegionalGrids.hpp, body_split_overlap_sliver_mm2).
+    const double overlap_sliver_mm2 = print->config().nozzle_diameter.values.empty() ? 0. :
+        body_split_overlap_sliver_mm2(*std::min_element(print->config().nozzle_diameter.values.begin(),
+                                                        print->config().nozzle_diameter.values.end()));
     const bool body_split_region_volumes = body_split_object &&
         std::any_of(this->model_object()->volumes.begin(), this->model_object()->volumes.end(),
                     [](const ModelVolume *volume) { return volume->is_modifier() || volume->is_negative_volume(); });
@@ -1287,7 +1293,7 @@ void PrintObject::slice_volumes()
                 const ExPolygons shared = opening_ex(intersection_ex(part_slices[0]->slices[layer_idx],
                                                                      part_slices[1]->slices[layer_idx]),
                                                      scaled<float>(0.01));
-                if (! shared.empty()) {
+                if (! shared.empty() && unscale<double>(unscale<double>(std::abs(area(shared)))) >= overlap_sliver_mm2) {
                     m_regional_volume_overlap_layer = layer_idx;
                     m_regional_volume_overlap_mm2   = unscale<double>(unscale<double>(area(shared)));
                     break;
@@ -1533,64 +1539,11 @@ void PrintObject::slice_volumes()
                 body_owner_cadence(parent_volume);
             if (own_cadence <= 0.)
                 return result;
-            const MixedNozzleToolResolution own_tool = resolve_mixed_nozzle_tool(
-                print->config(), own_logical, MixedNozzleResolveScope::PhysicalToolOnly);
-            const MixedNozzleToolResolution target_tool = resolve_mixed_nozzle_tool(
-                print->config(), target_logical, MixedNozzleResolveScope::PhysicalToolOnly);
-            if (!own_tool || !target_tool)
-                return result;
-
-            // A colour that stays on the body's physical tool keeps the body's own cadence.
-            if (own_tool.tool->physical_extruder == target_tool.tool->physical_extruder)
-                return own_cadence;
-
-            std::optional<coordf_t> target_cadence;
-            for (const BodySplitRegionAssignment &assignment : body_owner_assignments)
-                if (assignment.logical_filament == target_logical) {
-                    if (target_cadence && !is_approx(*target_cadence, assignment.cadence))
-                        return result;
-                    target_cadence = coordf_t(assignment.cadence);
-                }
-            // A colour no body is bound to prints at the cadence of the bodies on its physical tool, as a
-            // second colour on a nozzle does in Feature Split. Bodies sharing a tool share a cadence; if they
-            // ever disagree, fail closed.
-            if (!target_cadence)
-                for (const BodySplitRegionAssignment &assignment : body_owner_assignments) {
-                    const MixedNozzleToolResolution body_tool = resolve_mixed_nozzle_tool(
-                        print->config(), assignment.logical_filament, MixedNozzleResolveScope::PhysicalToolOnly);
-                    if (!body_tool || body_tool.tool->physical_extruder != target_tool.tool->physical_extruder)
-                        continue;
-                    if (target_cadence && !is_approx(*target_cadence, assignment.cadence))
-                        return result;
-                    target_cadence = coordf_t(assignment.cadence);
-                }
-            if (target_cadence) {
-                if (is_approx(*target_cadence, own_cadence))
-                    return result; // two physical tools at one cadence are not qualified.
-
-                const bool target_is_fine = *target_cadence < own_cadence;
-                const MixedNozzleCadenceResolution resolved = target_is_fine ?
-                    resolve_mixed_nozzle_cadence(print->config(), *target_cadence, own_cadence,
-                                                 target_logical, own_logical) :
-                    resolve_mixed_nozzle_cadence(print->config(), own_cadence, *target_cadence,
-                                                 own_logical, target_logical);
-                if (!resolved)
-                    return result;
-                return *target_cadence;
-            }
-
-            // A single coarse body may have no separate fine body at all.  In that case the
-            // target is still qualified when the body's own coarse cadence and physical nozzle
-            // form a valid pair with the configured base cadence; otherwise fail closed instead
-            // of inheriting the parent's regional_layer_height.
-            if (own_cadence <= base_h || !is_approx(own_cadence / base_h,
-                                                      std::round(own_cadence / base_h)))
-                return result;
-            const MixedNozzleCadenceResolution resolved = resolve_mixed_nozzle_cadence(
-                print->config(), base_h, own_cadence, target_logical, own_logical);
-            if (!resolved)
-                return result;
-            return coordf_t(resolved.cadence->fine_height);
+            const std::optional<double> cadence = resolve_body_split_child_cadence(
+                print->config(), body_owner_assignments, base_h, own_logical, own_cadence, target_logical);
+            if (cadence)
+                result = coordf_t(*cadence);
+            return result;
         };
         // The live lattice slices are final here: nothing below writes them before the lattice ownership
         // is committed (the conical-overhang pass on the midpoint view swaps m_layers out and restores
@@ -1767,6 +1720,10 @@ void PrintObject::slice_volumes()
         std::vector<std::vector<ExPolygons>> raw_lattice_samples(
             region_count, std::vector<ExPolygons>(lattice_planes.size()));
         std::vector<size_t> precedence;
+        // Each model part's own rows, for the overlap measure below. Staged rows are already clipped
+        // part against part.
+        struct PartRows { const ModelVolume *volume; size_t region; const std::vector<ExPolygons> *rows; };
+        std::vector<PartRows> part_rows;
         ModelVolumePtrs declared_volumes = model_object()->volumes;
         model_volumes_sort_by_id(declared_volumes);
         for (const ModelVolume *volume : declared_volumes) {
@@ -1791,12 +1748,128 @@ void PrintObject::slice_volumes()
                     raw_lattice_samples[region_id][row] = to_expolygons(
                         m_layers[row]->get_region(int(region_id))->slices.surfaces);
             } else {
-                raw_lattice_samples[region_id] = raw_it->slices;
+                // Several parts can map to one region (two text parts on one filament). Each adds its
+                // slices; assigning would keep only the last part's.
+                part_rows.push_back({volume, region_id, &raw_it->slices});
+                std::vector<ExPolygons> &samples = raw_lattice_samples[region_id];
+                for (size_t row = 0; row < lattice_planes.size() && row < raw_it->slices.size(); ++row) {
+                    if (raw_it->slices[row].empty())
+                        continue;
+                    if (samples[row].empty())
+                        samples[row] = raw_it->slices[row];
+                    else
+                        samples[row] = union_ex(samples[row], raw_it->slices[row]);
+                }
             }
             if (std::find(precedence.begin(), precedence.end(), region_id) == precedence.end())
                 precedence.push_back(region_id);
         }
         assert(precedence.size() == size_t(std::count(is_body_region.begin(), is_body_region.end(), true)));
+
+        // A smaller part sunk into a bigger one on another region (text sunk into a base) keeps the
+        // shared space, at its own nozzle and layer height, when the overlap is a minor part of the
+        // bigger one (body_split_smaller_part_keeps_overlap). The bigger part loses that space, so it
+        // keeps its own outer shape and top. If any overlap does not qualify, nothing changes here
+        // and the overlap is refused below.
+        std::vector<std::pair<size_t, size_t>> kept_overlaps; // (bigger part's region, smaller part's region)
+        if (part_rows.size() > 1) {
+            const size_t rows = lattice_planes.size();
+            const auto row_bottom = [&lattice_planes](size_t row) { return row == 0 ? 0. : lattice_planes[row - 1]; };
+            struct PartSize { double mm3 = 0.; coordf_t bottom = 0., top = 0.; BoundingBox box; };
+            std::vector<PartSize> sizes(part_rows.size());
+            for (size_t part = 0; part < part_rows.size(); ++part) {
+                bool seen = false;
+                for (size_t row = 0; row < rows && row < part_rows[part].rows->size(); ++row) {
+                    const ExPolygons &slices = (*part_rows[part].rows)[row];
+                    if (slices.empty())
+                        continue;
+                    sizes[part].mm3 += unscale<double>(unscale<double>(std::abs(area(slices)))) *
+                                       (lattice_planes[row] - row_bottom(row));
+                    sizes[part].box.merge(get_extents(slices));
+                    if (!seen)
+                        sizes[part].bottom = row_bottom(row);
+                    sizes[part].top = lattice_planes[row];
+                    seen = true;
+                }
+            }
+            struct Overlap { size_t smaller, bigger; double mm3; coordf_t bottom, top; };
+            std::vector<Overlap> overlaps;
+            for (size_t a = 0; a < part_rows.size(); ++a)
+                for (size_t b = a + 1; b < part_rows.size(); ++b) {
+                    if (part_rows[a].region == part_rows[b].region || !sizes[a].box.defined || !sizes[b].box.defined ||
+                        !sizes[a].box.overlap(sizes[b].box))
+                        continue;
+                    Overlap overlap{a, b, 0., 0., 0.};
+                    bool seen = false;
+                    for (size_t row = 0; row < rows && row < part_rows[a].rows->size() && row < part_rows[b].rows->size(); ++row) {
+                        const ExPolygons &rows_a = (*part_rows[a].rows)[row];
+                        const ExPolygons &rows_b = (*part_rows[b].rows)[row];
+                        if (rows_a.empty() || rows_b.empty())
+                            continue;
+                        // Measured as the refusal measures it: opened by 10 um, slivers ignored.
+                        const ExPolygons shared = opening_ex(intersection_ex(rows_a, rows_b, ApplySafetyOffset::Yes),
+                                                             scaled<float>(0.01));
+                        const double shared_mm2 = unscale<double>(unscale<double>(std::abs(area(shared))));
+                        if (shared.empty() || shared_mm2 < overlap_sliver_mm2)
+                            continue;
+                        overlap.mm3 += shared_mm2 * (lattice_planes[row] - row_bottom(row));
+                        if (!seen)
+                            overlap.bottom = row_bottom(row);
+                        overlap.top = lattice_planes[row];
+                        seen = true;
+                    }
+                    if (!seen)
+                        continue;
+                    if (sizes[b].mm3 < sizes[a].mm3)
+                        std::swap(overlap.smaller, overlap.bigger);
+                    overlaps.push_back(overlap);
+                }
+            std::vector<std::pair<size_t, size_t>> loser_winner;
+            bool all_kept = !overlaps.empty();
+            for (const Overlap &overlap : overlaps) {
+                all_kept = all_kept && body_split_smaller_part_keeps_overlap(
+                    sizes[overlap.smaller].mm3, sizes[overlap.bigger].mm3, overlap.mm3);
+                loser_winner.emplace_back(part_rows[overlap.bigger].region, part_rows[overlap.smaller].region);
+            }
+            const std::optional<std::vector<size_t>> reordered = all_kept ?
+                precedence_with_kept_overlaps(precedence, loser_winner) : std::nullopt;
+            if (reordered) {
+                precedence = *reordered;
+                kept_overlaps = loser_winner;
+                // "0.2", "1.25": two decimals at most.
+                const auto number = [](double value, int decimals) {
+                    std::ostringstream out;
+                    out << std::fixed << std::setprecision(decimals) << value;
+                    std::string text = out.str();
+                    if (text.find('.') != std::string::npos) {
+                        text.erase(text.find_last_not_of('0') + 1);
+                        if (text.back() == '.')
+                            text.pop_back();
+                    }
+                    return text;
+                };
+                const auto name = [](const ModelVolume *volume) {
+                    return "\"" + (volume->name.empty() ? _u8L("unnamed") : volume->name) + "\"";
+                };
+                std::string message;
+                for (const Overlap &overlap : overlaps) {
+                    const ModelVolume *smaller = part_rows[overlap.smaller].volume;
+                    const ModelVolume *bigger  = part_rows[overlap.bigger].volume;
+                    const coordf_t depth = overlap.top - overlap.bottom;
+                    // A part sunk from above or below overlaps over part of its height: say how deep.
+                    // Otherwise (sunk in from the side, or wholly inside) say how much.
+                    const std::string line = depth < sizes[overlap.smaller].top - sizes[overlap.smaller].bottom - EPSILON ?
+                        Slic3r::format(_u8L("Part %1% overlaps part %2% by %3% mm; %1% was kept there, at its own nozzle and layer height."),
+                                       name(smaller), name(bigger), number(depth, 2)) :
+                        Slic3r::format(_u8L("Part %1% overlaps part %2% by %3% mm3; %1% was kept there, at its own nozzle and layer height."),
+                                       name(smaller), name(bigger), number(overlap.mm3, overlap.mm3 < 10. ? 1 : 0));
+                    BOOST_LOG_TRIVIAL(warning) << "Body Split: " << line;
+                    message += (message.empty() ? "" : "\n") + line;
+                }
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    message + "\n" + _u8L("Object name") + ": " + this->model_object()->name);
+            }
+        }
 
         // Non-empty painted children take part after their model-part parents. The partition has already
         // removed each child's polygons from its parent; this resolver still does the cross-body
@@ -1829,7 +1902,7 @@ void PrintObject::slice_volumes()
                 std::vector<ExPolygons> raw_row(region_count);
                 for (size_t region = 0; region < region_count; ++region)
                     raw_row[region] = raw_lattice_samples[region][row];
-                const RegionalOwnershipResolution resolved = resolve_regional_ownership(raw_row, precedence);
+                const RegionalOwnershipResolution resolved = resolve_regional_ownership(raw_row, precedence, 0.01, overlap_sliver_mm2, kept_overlaps);
                 if (resolved.b01_overlap) {
                     pre_cone_overlap_layer = row;
                     pre_cone_overlap_mm2   = resolved.b01_overlap_mm2;
@@ -1856,7 +1929,7 @@ void PrintObject::slice_volumes()
             std::vector<ExPolygons> raw_row(region_count);
             for (size_t region = 0; region < region_count; ++region)
                 raw_row[region] = raw_lattice_samples[region][row];
-            RegionalOwnershipResolution resolved = resolve_regional_ownership(raw_row, precedence);
+            RegionalOwnershipResolution resolved = resolve_regional_ownership(raw_row, precedence, 0.01, overlap_sliver_mm2, kept_overlaps);
             if (resolved.b01_overlap && m_regional_volume_overlap_layer == size_t(-1)) {
                 m_regional_volume_overlap_layer = row;
                 m_regional_volume_overlap_mm2 = resolved.b01_overlap_mm2;
@@ -1887,6 +1960,10 @@ void PrintObject::slice_volumes()
         planning.maximum_first_cell_height = maximum_first_cell_height;
         // Each cell is sampled, sliced and later contoured on this one plane.
         planning.contour_slice_offset = contour_slice_offset;
+        if (!kept_overlaps.empty()) {
+            planning.kept_overlaps = kept_overlaps;
+            planning.kept_overlap_raw_rows = raw_lattice_samples;
+        }
 
         // The fine-skins opt-in is the explicit per-object/per-region key mixed_nozzle_body_fine_skins.
         // Divergent skin filament ids are not used as the signal: PrintRegion::flow() resolves
@@ -1924,9 +2001,21 @@ void PrintObject::slice_volumes()
         std::vector<VolumeSlices> native_raw = slice_volumes_inner(
             print->config(), config(), trafo_centered(), model_object()->volumes,
             m_shared_regions->layer_ranges, native_zs, throw_on_cancel_callback);
+        // With a kept overlap the parts are not clipped in declared order: the midplane samples are
+        // resolved with the same precedence as the lattice, so the smaller part keeps the overlap here too.
         std::vector<std::vector<ExPolygons>> native_ownership = slices_to_regions(
             print->config(), *this, model_object()->volumes, *m_shared_regions, native_zs,
-            std::move(native_raw), PrintObject::clip_multipart_objects, throw_on_cancel_callback);
+            std::move(native_raw), PrintObject::clip_multipart_objects && kept_overlaps.empty(), throw_on_cancel_callback);
+        if (!kept_overlaps.empty())
+            for (size_t row = 0; row < native_zs.size(); ++row) {
+                std::vector<ExPolygons> samples(native_ownership.size());
+                for (size_t region = 0; region < native_ownership.size(); ++region)
+                    samples[region] = union_ex(native_ownership[region][row]);
+                RegionalOwnershipResolution resolved = resolve_regional_ownership(
+                    samples, precedence, 0.01, overlap_sliver_mm2, kept_overlaps);
+                for (size_t region = 0; region < native_ownership.size(); ++region)
+                    native_ownership[region][row] = std::move(resolved.resolved[region]);
+            }
         // The cells take their footprints from these midplane samples, so they carry the same cone.
         if (conical_on_native_rows)
             this->apply_conical_overhang_to_rows(native_midplanes, native_ownership);

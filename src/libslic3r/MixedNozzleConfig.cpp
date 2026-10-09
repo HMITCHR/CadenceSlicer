@@ -1186,6 +1186,10 @@ std::vector<BodySplitRegionAssignment> collect_body_split_volume_assignments(
             if (filament_1based > 0)
                 assignments.push_back({cadence, size_t(filament_1based - 1)});
     }
+    // A modifier that names a filament prints its area of a body with it, like a painted colour.
+    for (const ModelVolume *volume : model_object.volumes)
+        if (volume != nullptr && volume->is_modifier() && volume->config.has("extruder") && volume->config.extruder() > 0)
+            assignments.push_back({base_cadence, size_t(volume->config.extruder() - 1)});
     return assignments;
 }
 
@@ -1202,6 +1206,70 @@ std::vector<BodySplitRegionAssignment> collect_body_split_body_assignments(
                                size_t(volume->extruder_id() - 1)});
     }
     return assignments;
+}
+
+std::optional<double> resolve_body_split_child_cadence(const PrintConfig &config,
+                                                       const std::vector<BodySplitRegionAssignment> &bodies,
+                                                       double base_cadence, size_t own_logical,
+                                                       double own_cadence, size_t target_logical)
+{
+    if (own_cadence <= 0.)
+        return std::nullopt;
+    const MixedNozzleToolResolution own_tool = resolve_mixed_nozzle_tool(
+        config, own_logical, MixedNozzleResolveScope::PhysicalToolOnly);
+    const MixedNozzleToolResolution target_tool = resolve_mixed_nozzle_tool(
+        config, target_logical, MixedNozzleResolveScope::PhysicalToolOnly);
+    if (!own_tool || !target_tool)
+        return std::nullopt;
+
+    // A colour that stays on the body's physical tool keeps the body's own cadence.
+    if (own_tool.tool->physical_extruder == target_tool.tool->physical_extruder)
+        return own_cadence;
+
+    std::optional<double> target_cadence;
+    for (const BodySplitRegionAssignment &assignment : bodies)
+        if (assignment.logical_filament == target_logical) {
+            if (target_cadence && !is_approx(*target_cadence, assignment.cadence))
+                return std::nullopt;
+            target_cadence = assignment.cadence;
+        }
+    // A colour no body is bound to prints at the cadence of the bodies on its physical tool, as a
+    // second colour on a nozzle does in Feature Split. Bodies sharing a tool share a cadence; if they
+    // ever disagree, fail closed.
+    if (!target_cadence)
+        for (const BodySplitRegionAssignment &assignment : bodies) {
+            const MixedNozzleToolResolution body_tool = resolve_mixed_nozzle_tool(
+                config, assignment.logical_filament, MixedNozzleResolveScope::PhysicalToolOnly);
+            if (!body_tool || body_tool.tool->physical_extruder != target_tool.tool->physical_extruder)
+                continue;
+            if (target_cadence && !is_approx(*target_cadence, assignment.cadence))
+                return std::nullopt;
+            target_cadence = assignment.cadence;
+        }
+    if (target_cadence) {
+        if (is_approx(*target_cadence, own_cadence))
+            return std::nullopt; // two physical tools at one cadence are not qualified.
+
+        const bool target_is_fine = *target_cadence < own_cadence;
+        const MixedNozzleCadenceResolution resolved = target_is_fine ?
+            resolve_mixed_nozzle_cadence(config, *target_cadence, own_cadence, target_logical, own_logical) :
+            resolve_mixed_nozzle_cadence(config, own_cadence, *target_cadence, own_logical, target_logical);
+        if (!resolved)
+            return std::nullopt;
+        return target_cadence;
+    }
+
+    // A single coarse body may have no separate fine body at all.  In that case the
+    // target is still qualified when the body's own coarse cadence and physical nozzle
+    // form a valid pair with the configured base cadence; otherwise fail closed instead
+    // of inheriting the parent's regional_layer_height.
+    if (own_cadence <= base_cadence || !is_approx(own_cadence / base_cadence, std::round(own_cadence / base_cadence)))
+        return std::nullopt;
+    const MixedNozzleCadenceResolution resolved = resolve_mixed_nozzle_cadence(
+        config, base_cadence, own_cadence, target_logical, own_logical);
+    if (!resolved)
+        return std::nullopt;
+    return resolved.cadence->fine_height;
 }
 
 bool is_body_split_object(const PrintConfig &config, const ModelObject &model_object)
@@ -1229,7 +1297,19 @@ bool is_body_split_object(const PrintConfig &config, const ModelObject &model_ob
                 tools_used.insert(*tool);
         }
     }
-    if (model_parts == 0 || (model_parts == 1 && !only_part->is_mm_painted()))
+    // A modifier that names a filament on the other nozzle splits a lone part like painting does.
+    bool modifier_filament = false;
+    for (const ModelVolume *volume : model_object.volumes) {
+        if (volume == nullptr || !volume->is_modifier() || !volume->config.has("extruder") || volume->config.extruder() <= 0)
+            continue;
+        modifier_filament = true;
+        const std::optional<size_t> tool = physical_extruder_for_filament(config, unsigned(volume->config.extruder() - 1));
+        if (!tool)
+            unresolved = true;
+        else
+            tools_used.insert(*tool);
+    }
+    if (model_parts == 0 || (model_parts == 1 && !only_part->is_mm_painted() && !modifier_filament))
         return false;
     return unresolved || tools_used.size() >= 2;
 }

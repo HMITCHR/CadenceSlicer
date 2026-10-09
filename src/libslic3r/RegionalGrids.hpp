@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace Slic3r {
@@ -86,11 +87,38 @@ struct RegionalOwnershipResolution
 
 // Resolves one sampling row in ascending declared-volume order; each later region clips all
 // earlier ones, as slices_to_regions() does. The hairline check runs on the raw samples before
-// precedence, after opening by the supplied threshold.
+// precedence, after opening by the supplied threshold. A shared area under b01_sliver_mm2 is a
+// rounding sliver, not an overlap: it is still handed to the later region, but not reported.
+// kept_overlaps lists region pairs whose shared area was accepted (a smaller part sunk into a
+// bigger one): it goes to the later region in the precedence and is not reported either.
 [[nodiscard]] RegionalOwnershipResolution resolve_regional_ownership(
-    const std::vector<ExPolygons> &raw_samples,
-    const std::vector<size_t>     &precedence,
-    coordf_t                       b01_hairline_mm = 0.01);
+    const std::vector<ExPolygons>                   &raw_samples,
+    const std::vector<size_t>                       &precedence,
+    coordf_t                                         b01_hairline_mm = 0.01,
+    double                                           b01_sliver_mm2 = 0.,
+    const std::vector<std::pair<size_t, size_t>>    &kept_overlaps = {});
+
+// When a smaller Body Split part overlaps a bigger one (text sunk into a base), the smaller part
+// keeps the shared space if the overlap is a minor part of the bigger one and the smaller part is
+// clearly the smaller: the shared volume is at most 10% of the bigger part's volume and the smaller
+// part is at most half the bigger part's volume. Text sunk 0.2 mm into a 60 x 40 x 10 mm base shares
+// about 0.2% of the base and is about 1% of its volume. Two boxes of similar size, or a heavy overlap
+// of half a box, are refused as before: neither part is clearly the one the user meant to win.
+constexpr double body_split_kept_overlap_max_share  = 0.10;
+constexpr double body_split_kept_part_max_share     = 0.50;
+[[nodiscard]] bool body_split_smaller_part_keeps_overlap(double smaller_mm3, double bigger_mm3, double shared_mm3);
+
+// The precedence with each kept overlap's winner after its loser: every (loser, winner) pair puts the
+// winner later, otherwise the given order is kept. Empty when the pairs contradict each other.
+[[nodiscard]] std::optional<std::vector<size_t>> precedence_with_kept_overlaps(
+    const std::vector<size_t>                    &precedence,
+    const std::vector<std::pair<size_t, size_t>> &loser_winner);
+
+// The largest shared area two Body Split parts may have on one layer without being refused as
+// overlapping: one dot of the finest nozzle, pi d^2 / 4 (0.031 mm2 for a 0.2 mm nozzle). No nozzle
+// lays a bead into a smaller area, so it is a rounding sliver of two faces that meet (a flush inlay
+// in its pocket), never a double deposition. A part sunk into another shares whole letters or faces.
+[[nodiscard]] double body_split_overlap_sliver_mm2(double finest_nozzle_diameter);
 
 struct RegionalInterlockingConfig
 {
@@ -140,6 +168,11 @@ struct NativeRegionalPlanningInput
     // plus this offset (the smallest zaa_min_z of the regions that ask for it) instead of at its
     // midpoint, as new_layers() slices an ordinary layer. Unset keeps every cell on its midpoint.
     std::optional<coordf_t> contour_slice_offset;
+    // Overlaps given to the smaller part, as (bigger part's region, smaller part's region), with the
+    // regions' raw rows before ownership. Where the bigger part's own shape ends under (or starts
+    // over) the smaller part, that plane is a contact too, so the bigger part keeps its designed top.
+    std::vector<std::pair<size_t, size_t>> kept_overlaps;
+    std::vector<std::vector<ExPolygons>>   kept_overlap_raw_rows;
 };
 
 // Complete planning state: sampled ownership and cell footprints only.

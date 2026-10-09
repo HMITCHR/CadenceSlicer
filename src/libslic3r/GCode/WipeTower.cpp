@@ -5634,8 +5634,13 @@ void WipeTower::plan_lagging_tower()
                 level.tool_changes.assign(source.tool_changes.begin(), source.tool_changes.begin() + long(coarse_end));
             }
             // After a held-back window the step is too tall for the fine tool, so the first coarse
-            // arrival of the run owns the whole level, wall included.
-            if (base_step_held && coarse_end > 0) {
+            // arrival of the run owns the whole level, wall included. So it does when the fine tool
+            // that starts the visit cannot lay the step for another reason, as after fine-only levels
+            // (fine skins on a coarse body's bottom) followed by layers without a tower visit.
+            const unsigned int visiting_tool = source.tool_changes.empty() ? active_tool : source.tool_changes.front().old_tool;
+            const bool too_tall_for_visitor = coarse_end > 0 && visiting_tool < m_filpar.size() &&
+                !on_coarse_nozzle(int(visiting_tool)) && level.height > m_filpar[visiting_tool].max_layer_height + WT_EPSILON;
+            if ((base_step_held || too_tall_for_visitor) && coarse_end > 0) {
                 size_t run_begin = coarse_end - 1;
                 while (run_begin > 0 && on_coarse_nozzle(int(source.tool_changes[run_begin - 1].new_tool)))
                     -- run_begin;

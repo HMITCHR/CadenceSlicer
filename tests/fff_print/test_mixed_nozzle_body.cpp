@@ -15,6 +15,7 @@
 #include <sstream>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -382,6 +383,128 @@ TEST_CASE("Side paint on a coarse body adds fine shell planes while coarse roads
     CHECK_FALSE(added_fine_planes.empty());
 }
 
+// Fine filament painted onto a coarse body that is too thick for the fine nozzle (0.30 mm against the
+// 0.2 nozzle's 0.14 mm limit). Admission took the painted area's height from the body and refused it;
+// slicing prints it at the fine height. Alone, and beside a separate fine part.
+TEST_CASE("Fine paint on a coarse body is admitted and printed at the fine layer height", "[TestRebuild][BodySplit]")
+{
+    const bool with_fine_part = GENERATE(false, true);
+    CAPTURE(with_fine_part);
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    Model model;
+    Print print;
+    ModelObject *object = model.add_object();
+    object->name = "fine-paint-on-coarse-body";
+    ModelVolume *coarse = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+    coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
+    coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+    paint_cadence_facets(*coarse, {4, 5}, EnforcerBlockerType::Extruder1);
+    if (with_fine_part) {
+        ModelVolume *fine = object->add_volume(make_cube(6., 20., 4.), ModelVolumeType::MODEL_PART, false);
+        fine->set_offset(Vec3d(25., 0., 0.));
+        fine->config.set_key_value("extruder", new ConfigOptionInt(1));
+        fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+    const CadenceTest::Facts facts = CadenceTest::slice(print);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+
+    // Over the painted body: fine roads, at most 0.10 mm thick, and coarse roads.
+    const double left = model.objects.front()->instance_bounding_box(0).min.x();
+    size_t fine_roads = 0, coarse_roads = 0;
+    double thickest_fine = 0.;
+    for (const Move &move : facts.moves) {
+        if (!CadenceTest::model_road(move) || move.position.x() <= left + 0.5 || move.position.x() >= left + 19.5)
+            continue;
+        if (move.physical_tool_id == 0) {
+            ++fine_roads;
+            thickest_fine = std::max(thickest_fine, double(move.height));
+        } else if (move.physical_tool_id == 1)
+            ++coarse_roads;
+    }
+    CAPTURE(fine_roads, coarse_roads, thickest_fine);
+    CHECK(fine_roads > 0);
+    CHECK(coarse_roads > 0);
+    CHECK(thickest_fine <= 0.10 + 1e-3);
+    CHECK_FALSE(facts.emitted.plan_malformed);
+}
+
+// A text-shaped modifier on the fine filament inside a single coarse part (a flush inlay) was refused
+// unless the object had another fine part. Its area is now a second body, printed at
+// the fine layer height like fine paint. A modifier that names no filament keeps the part plain.
+TEST_CASE("A fine-filament modifier in a single coarse part is a Body Split inlay", "[TestRebuild][BodySplit]")
+{
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    const auto make = [&](bool modifier_filament, Model &model, Print &print) {
+        ModelObject *object = model.add_object();
+        object->name = "modifier-inlay";
+        ModelVolume *coarse = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+        coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
+        coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+        ModelVolume *inlay = object->add_volume(make_cube(8., 3., 0.8), ModelVolumeType::PARAMETER_MODIFIER, false);
+        inlay->set_offset(Vec3d(6., 8., 3.2));
+        if (modifier_filament)
+            inlay->config.set_key_value("extruder", new ConfigOptionInt(1));
+        else
+            inlay->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40.));
+        object->add_instance();
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+    };
+
+    Model model;
+    Print print;
+    make(true, model, print);
+    const CadenceTest::Facts facts = CadenceTest::slice(print);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    const BoundingBoxf3 box = model.objects.front()->instance_bounding_box(0);
+    size_t fine_in_inlay = 0, fine_elsewhere = 0, coarse_roads = 0;
+    double thickest_fine = 0., fine_top = 0.;
+    Vec3f previous = Vec3f::Zero();
+    for (const Move &move : facts.moves) {
+        const Vec3f from = previous;
+        previous = move.position;
+        if (!CadenceTest::model_road(move))
+            continue;
+        const double x = 0.5 * double(move.position.x() + from.x()) - box.min.x();
+        const double y = 0.5 * double(move.position.y() + from.y()) - box.min.y();
+        if (move.physical_tool_id == 0) {
+            const bool inside = x > 5.5 && x < 14.5 && y > 7.5 && y < 11.5;
+            (inside ? fine_in_inlay : fine_elsewhere)++;
+            thickest_fine = std::max(thickest_fine, double(move.height));
+            fine_top = std::max(fine_top, double(move.position.z()));
+        } else if (move.physical_tool_id == 1)
+            ++coarse_roads;
+    }
+    CAPTURE(fine_in_inlay, fine_elsewhere, coarse_roads, thickest_fine, fine_top);
+    CHECK(fine_in_inlay > 0);
+    CHECK(fine_elsewhere == 0);
+    CHECK(coarse_roads > 0);
+    CHECK(thickest_fine <= 0.10 + 1e-3);
+    CHECK(std::abs(fine_top - 4.) < 1e-3);
+
+    Model plain_model;
+    Print plain_print;
+    make(false, plain_model, plain_print);
+    CHECK_FALSE(is_body_split_object(plain_print.config(), *plain_model.objects.front()));
+}
+
 TEST_CASE("Body Split fine skins put a coarse body's roof and pocket floor on the fine nozzle", "[TestRebuild][BodySplit]")
 {
     DynamicPrintConfig config = fine_skin_ratio3_config();
@@ -583,6 +706,107 @@ TEST_CASE("Body Split beams cross a synthetic raised joint in both directions", 
     CAPTURE(fine_into_plate, coarse_into_strip);
     CHECK(fine_into_plate > 0);
     CHECK(coarse_into_strip > 0);
+}
+
+// Two fine parts on one filament, on top of and beside a coarse base. Only the last part's slices
+// used to reach the shared fine region, so with the side part last the base's top was planned as if
+// nothing sat on it: under the top part the base stopped one coarse layer short, the base rose past
+// its top elsewhere, and the top part started over a gap. Both part orders must print the same.
+TEST_CASE("Body Split prints several fine parts on one filament the same in any order, on top of the base",
+          "[TestRebuild][BodySplit]")
+{
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.20, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    // The coarse layers end at 2.8 and 3.1, so the base top at 3.0 has to come from the parts above it.
+    constexpr double base_top = 3.;
+    struct Result { CadenceTest::Facts facts; Vec2d base_origin; };
+    const auto slice_order = [&](bool side_last) {
+        Model model;
+        Print print;
+        ModelObject *object = model.add_object();
+        object->name = side_last ? "side-part-last" : "top-part-last";
+        ModelVolume *base = object->add_volume(make_cube(20., 20., base_top), ModelVolumeType::MODEL_PART, false);
+        base->config.set_key_value("extruder", new ConfigOptionInt(2));
+        base->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+        const auto add_fine = [&](const char *name, const Vec3d &size, const Vec3d &offset) {
+            ModelVolume *part = object->add_volume(make_cube(size.x(), size.y(), size.z()), ModelVolumeType::MODEL_PART, false);
+            part->name = name;
+            part->set_offset(offset);
+            part->config.set_key_value("extruder", new ConfigOptionInt(1));
+            part->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+        };
+        const auto add_top  = [&] { add_fine("top", Vec3d(8., 8., 1.), Vec3d(4., 4., base_top)); };
+        const auto add_side = [&] { add_fine("side", Vec3d(6., 1., 1.6), Vec3d(7., -1., 0.6)); };
+        if (side_last) { add_top(); add_side(); } else { add_side(); add_top(); }
+        object->add_instance();
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+        Result result{CadenceTest::slice(print), Vec2d::Zero()};
+        INFO(result.facts.refusal.string);
+        REQUIRE(result.facts.refusal.string.empty());
+        REQUIRE_FALSE(result.facts.gcode.empty());
+        // The side part sticks out 1 mm in front of the base.
+        const BoundingBoxf3 box = model.objects.front()->instance_bounding_box(0);
+        result.base_origin = Vec2d(box.min.x(), box.min.y() + 1.);
+        return result;
+    };
+
+    struct Summary {
+        std::map<std::tuple<int, int, int>, long> lengths; // per layer, tool and role, tenths of a mm
+        double coarse_top = 0.;                            // highest coarse road anywhere
+        double coarse_top_under = 0.;                      // highest coarse road under the top part
+        double fine_bottom_over = 1e9;                     // lowest fine road over the top part
+    };
+    const auto summarize = [](const Result &result) {
+        Summary out;
+        Vec3f previous = Vec3f::Zero();
+        for (const Move &move : result.facts.moves) {
+            const Vec3f from = previous;
+            previous = move.position;
+            if (!CadenceTest::model_road(move))
+                continue;
+            const double z = double(move.position.z());
+            // The road's midpoint, against the base's own corner.
+            const double x = 0.5 * double(move.position.x() + from.x()) - result.base_origin.x();
+            const double y = 0.5 * double(move.position.y() + from.y()) - result.base_origin.y();
+            const bool under_top = x > 5. && x < 11. && y > 5. && y < 11.;
+            if (move.physical_tool_id == 1) {
+                out.coarse_top = std::max(out.coarse_top, z);
+                if (under_top)
+                    out.coarse_top_under = std::max(out.coarse_top_under, z);
+            } else if (under_top && z > 2.)
+                out.fine_bottom_over = std::min(out.fine_bottom_over, z);
+            out.lengths[{int(std::lround(z * 1000.)), int(move.physical_tool_id), int(move.extrusion_role)}] +=
+                std::lround(10. * double((move.position.head<2>() - from.head<2>()).norm()));
+        }
+        return out;
+    };
+    const Summary side_last = summarize(slice_order(true));
+    const Summary top_last  = summarize(slice_order(false));
+    for (const Summary *summary : {&side_last, &top_last}) {
+        CAPTURE(summary == &side_last, summary->coarse_top, summary->coarse_top_under, summary->fine_bottom_over);
+        // The base ends at its own top everywhere, and the top part starts right on it.
+        CHECK(std::abs(summary->coarse_top - base_top) < 1e-3);
+        CHECK(std::abs(summary->coarse_top_under - base_top) < 1e-3);
+        CHECK(std::abs(summary->fine_bottom_over - (base_top + 0.1)) < 1e-3);
+    }
+    // The same layers, tools and features in both orders, with the same path lengths to within 1%.
+    std::set<std::tuple<int, int, int>> keys;
+    for (const auto &entry : side_last.lengths) keys.insert(entry.first);
+    for (const auto &entry : top_last.lengths) keys.insert(entry.first);
+    size_t differing = 0;
+    for (const auto &key : keys) {
+        const long a = side_last.lengths.count(key) ? side_last.lengths.at(key) : 0;
+        const long b = top_last.lengths.count(key) ? top_last.lengths.at(key) : 0;
+        if (std::abs(a - b) > std::max(2L, std::max(a, b) / 100))
+            ++differing;
+    }
+    CAPTURE(keys.size(), side_last.lengths.size(), top_last.lengths.size());
+    CHECK(differing == 0);
 }
 
 TEST_CASE("Body Split tower deposits at the planned footprint and stays on its physical tools", "[TestRebuild][BodySplit]")
@@ -810,5 +1034,134 @@ TEST_CASE("Body Split refuses unsafe settings with stable admission codes", "[Te
             CHECK(refusal.opt_key == row.key);
             CHECK(refusal.string.find(row.code) != std::string::npos);
         }
+    }
+}
+
+// Text sunk into a base: a fine part 1 mm tall sunk 0.2 mm into a coarse base. The smaller part keeps
+// the shared space at its own nozzle and layer height, the base loses it, and a warning names both
+// parts. The base's top stays at its own height around the text, and the result does not depend on
+// which part was added first.
+TEST_CASE("Body Split gives the overlap of a part sunk into a bigger one to the smaller part", "[TestRebuild][BodySplit]")
+{
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.20, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    constexpr double base_top = 3.;
+    constexpr double sink = 0.2;
+    for (const bool text_first : {false, true}) {
+        CAPTURE(text_first);
+        Model model;
+        Print print;
+        ModelObject *object = model.add_object();
+        object->name = "sunk-text";
+        const auto add_base = [&] {
+            ModelVolume *base = object->add_volume(make_cube(20., 20., base_top), ModelVolumeType::MODEL_PART, false);
+            base->name = "base";
+            base->config.set_key_value("extruder", new ConfigOptionInt(2));
+            base->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+        };
+        const auto add_text = [&] {
+            ModelVolume *text = object->add_volume(make_cube(8., 8., 1.), ModelVolumeType::MODEL_PART, false);
+            text->name = "text";
+            text->set_offset(Vec3d(4., 4., base_top - sink));
+            text->config.set_key_value("extruder", new ConfigOptionInt(1));
+            text->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+        };
+        if (text_first) { add_text(); add_base(); } else { add_base(); add_text(); }
+        object->add_instance();
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+        const CadenceTest::Facts facts = CadenceTest::slice(print);
+        INFO(facts.refusal.string);
+        REQUIRE(facts.refusal.string.empty());
+        REQUIRE_FALSE(facts.gcode.empty());
+
+        const PrintStateBase::StateWithWarnings state = print.objects().front()->step_state_with_warnings(posSlice);
+        const std::string expected =
+            "Part \"text\" overlaps part \"base\" by 0.2 mm; \"text\" was kept there, at its own nozzle and layer height.";
+        CHECK(std::any_of(state.warnings.begin(), state.warnings.end(), [&expected](const PrintStateBase::Warning &warning) {
+            return warning.message.find(expected) != std::string::npos;
+        }));
+
+        const Vec2d origin = model.objects.front()->instance_bounding_box(0).min.head<2>();
+        double coarse_top = 0., coarse_top_under = 0., fine_bottom_over = 1e9, fine_top = 0.;
+        size_t coarse_in_text = 0;
+        Vec3f previous = Vec3f::Zero();
+        for (const Move &move : facts.moves) {
+            const Vec3f from = previous;
+            previous = move.position;
+            if (!CadenceTest::model_road(move))
+                continue;
+            const double z = double(move.position.z());
+            const double x = 0.5 * double(move.position.x() + from.x()) - origin.x();
+            const double y = 0.5 * double(move.position.y() + from.y()) - origin.y();
+            // Well inside the text's footprint, clear of its walls.
+            const bool under_text = x > 5. && x < 11. && y > 5. && y < 11.;
+            if (move.physical_tool_id == 1) {
+                coarse_top = std::max(coarse_top, z);
+                if (under_text) {
+                    coarse_top_under = std::max(coarse_top_under, z);
+                    if (z > base_top - sink + 1e-3)
+                        ++coarse_in_text;
+                }
+            } else {
+                fine_top = std::max(fine_top, z);
+                if (under_text)
+                    fine_bottom_over = std::min(fine_bottom_over, z);
+            }
+        }
+        CAPTURE(coarse_top, coarse_top_under, fine_bottom_over, fine_top, coarse_in_text);
+        // The base keeps its own top around the text, neither raised nor lowered.
+        CHECK(std::abs(coarse_top - base_top) < 1e-3);
+        // Under the text the base stops where the text starts, and the text prints the overlap at 0.1.
+        CHECK(std::abs(coarse_top_under - (base_top - sink)) < 1e-3);
+        CHECK(coarse_in_text == 0);
+        CHECK(std::abs(fine_bottom_over - (base_top - sink + 0.1)) < 1e-3);
+        CHECK(std::abs(fine_top - (base_top - sink + 1.)) < 1e-3);
+    }
+}
+
+// Two parts that overlap heavily, or two parts of the same size, have no clear smaller part to keep
+// the shared space, so they are still refused as overlapping.
+TEST_CASE("Body Split still refuses a heavy overlap or an overlap of two parts of the same size", "[TestRebuild][BodySplit]")
+{
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.20, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    struct Row { const char *name; Vec3d coarse; Vec3d fine; Vec3d fine_offset; };
+    const Row rows[] = {
+        // Same size, overlapping by half.
+        {"half", Vec3d(10., 10., 3.), Vec3d(10., 10., 3.), Vec3d(5., 0., 0.)},
+        // Same size, overlapping by 0.5 mm only: neither part is the smaller one.
+        {"same size", Vec3d(10., 10., 3.), Vec3d(10., 10., 3.), Vec3d(9.5, 0., 0.)},
+        // A quarter-size part wholly inside the bigger one: a quarter of the bigger part is shared.
+        {"heavy", Vec3d(20., 20., 3.), Vec3d(10., 10., 3.), Vec3d(5., 5., 0.)},
+    };
+    for (const Row &row : rows) {
+        CAPTURE(row.name);
+        Model model;
+        Print print;
+        ModelObject *object = model.add_object();
+        object->name = row.name;
+        ModelVolume *coarse = object->add_volume(make_cube(row.coarse.x(), row.coarse.y(), row.coarse.z()),
+                                                 ModelVolumeType::MODEL_PART, false);
+        coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
+        coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
+        ModelVolume *fine = object->add_volume(make_cube(row.fine.x(), row.fine.y(), row.fine.z()),
+                                               ModelVolumeType::MODEL_PART, false);
+        fine->set_offset(row.fine_offset);
+        fine->config.set_key_value("extruder", new ConfigOptionInt(1));
+        fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+        object->add_instance();
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+        REQUIRE(print.validate().string.empty());
+        REQUIRE_THROWS_WITH(print.process(), Catch::Matchers::ContainsSubstring("SRL-B01"));
     }
 }

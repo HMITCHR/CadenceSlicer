@@ -332,8 +332,8 @@ struct BodySplitRegionAssignment {
 };
 
 // Per-body filament/cadence facts for Body Split, one per logical filament actually on each model
-// part (its extruder plus painted colours), from ModelVolume::get_extruders(). Printing regions
-// would also count painted-colour ghost regions.
+// part (its extruder plus painted colours), from ModelVolume::get_extruders(), and one per modifier
+// that names a filament. Printing regions would also count painted-colour ghost regions.
 std::vector<BodySplitRegionAssignment> collect_body_split_volume_assignments(
     const ModelObject &model_object, double base_cadence);
 
@@ -341,9 +341,18 @@ std::vector<BodySplitRegionAssignment> collect_body_split_volume_assignments(
 std::vector<BodySplitRegionAssignment> collect_body_split_body_assignments(
     const ModelObject &model_object, double base_cadence);
 
-// Whether Body Split synchronizes this object: two or more model parts, or one painted part,
-// printing on more than one physical tool. An unresolved filament keeps it on the Body Split
-// path so validation reports the missing mapping.
+// The layer height a painted colour or a modifier's filament prints at inside a Body Split body whose
+// own filament and cadence are given: the body's cadence while it stays on the body's nozzle, otherwise
+// the cadence of the bodies on its nozzle, or, with no such body, the base height when that pairs with
+// the body's cadence. Empty when no qualified height exists. Slicing and admission both ask this.
+std::optional<double> resolve_body_split_child_cadence(const PrintConfig &config,
+                                                       const std::vector<BodySplitRegionAssignment> &bodies,
+                                                       double base_cadence, size_t own_logical,
+                                                       double own_cadence, size_t target_logical);
+
+// Whether Body Split synchronizes this object: two or more model parts, or one part that is painted
+// or has a modifier naming a filament, printing on more than one physical tool. An unresolved
+// filament keeps it on the Body Split path so validation reports the missing mapping.
 bool is_body_split_object(const PrintConfig &config, const ModelObject &model_object);
 
 // Validation code a GUI caller raises itself.

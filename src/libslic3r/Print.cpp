@@ -2176,8 +2176,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return is_body_split_object(m_config, *object->model_object());
             }))
             return reject(m_objects.front(), "SRL-A06", "mixed_nozzle_slicing_mode",
-                          "Body Split needs at least one object whose parts or painted colours print on both nozzles. "
-                          "Assign a part or a painted colour to the other nozzle, or turn Body Split off for this plate.");
+                          "Body Split needs at least one object whose parts, painted colours or modifiers print on both nozzles. "
+                          "Assign a part, a painted colour or a modifier to the other nozzle, or turn Body Split off for this plate.");
 
         // A plain object on a Body Split plate is sliced as with the mode off, so the native-grid checks
         // below do not apply. It still gets Feature Split's checks: support and raft must name tools that
@@ -2270,7 +2270,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return *refusal;
             continue;
         }
-        // is_body_split_object() admits a lone model part only when it is painted.
+        // is_body_split_object() admits a lone model part only when it is painted or a modifier names a
+        // filament on the other nozzle.
         const bool single_painted_body = std::count_if(model_object->volumes.begin(), model_object->volumes.end(),
             [](const ModelVolume *volume) { return volume->is_model_part(); }) == 1;
         // A support blocker or enforcer is not sliced into any region, so it only shapes support.
@@ -2398,6 +2399,46 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject(object, "SRL-A44", region.separated_infills.value ? "separated_infills" : "center_of_surface_pattern",
                               "Separated infill, or infill centred on each model, is not supported by Body Split.");
         }
+        // A colour painted onto a body, or a modifier's area, prints at the cadence slicing gives it, not at
+        // the layer height its region copies from the body: fine paint on a coarse body is laid at the fine
+        // height.
+        {
+            const double base_height = object->config().layer_height.value;
+            const std::vector<BodySplitRegionAssignment> bodies =
+                collect_body_split_body_assignments(*model_object, base_height);
+            const auto resolve_child = [&](const PrintObjectRegions::VolumeRegion &body, const PrintRegion *child) {
+                if (child == nullptr || body.region == nullptr || body.model_volume == nullptr ||
+                    !body.model_volume->is_model_part() || body.model_volume->extruder_id() <= 0)
+                    return;
+                const size_t region_id = size_t(child->print_object_region_id());
+                if (region_id >= regional_cadences.size() || region_id == size_t(body.region->print_object_region_id()))
+                    return;
+                const double own_height = body.model_volume->config.has("regional_layer_height") ?
+                    body.model_volume->config.opt_float("regional_layer_height") : 0.;
+                if (const std::optional<double> cadence = resolve_body_split_child_cadence(
+                        m_config, bodies, base_height, size_t(body.model_volume->extruder_id() - 1),
+                        own_height != 0. ? own_height : base_height, region_logical_filaments[region_id]))
+                    regional_cadences[region_id] = *cadence;
+            };
+            for (const PrintObjectRegions::LayerRangeRegions &layer_range : object->shared_regions()->layer_ranges) {
+                const std::vector<PrintObjectRegions::VolumeRegion> &volume_regions = layer_range.volume_regions;
+                for (const PrintObjectRegions::PaintedRegion &painted : layer_range.painted_regions)
+                    if (painted.parent >= 0 && size_t(painted.parent) < volume_regions.size())
+                        resolve_child(volume_regions[size_t(painted.parent)], painted.region);
+                // A modifier's area belongs to the body it sits in, through any nested modifiers.
+                for (const PrintObjectRegions::VolumeRegion &modifier : volume_regions) {
+                    if (modifier.model_volume == nullptr || !modifier.model_volume->is_modifier())
+                        continue;
+                    int parent = modifier.parent;
+                    while (parent >= 0 && size_t(parent) < volume_regions.size() &&
+                           volume_regions[size_t(parent)].model_volume != nullptr &&
+                           !volume_regions[size_t(parent)].model_volume->is_model_part())
+                        parent = volume_regions[size_t(parent)].parent;
+                    if (parent >= 0 && size_t(parent) < volume_regions.size())
+                        resolve_child(volume_regions[size_t(parent)], modifier.region);
+                }
+            }
+        }
         // The per-region filament sets above are inflated by PrintApply.cpp's ghost painted regions.
         // Filament, tool and cadence facts below come from each body's own ModelVolume, which reports
         // no ghosts.
@@ -2438,8 +2479,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         std::vector<BodySplitRegionAssignment> body_cadence_assignments =
             collect_body_split_body_assignments(*model_object, base_cadence);
         // The native painting projector can create a base-height fine region inside one
-        // coarse body. Qualify only actually painted colours with the same resolver used by
-        // the projector and PrintRegion::flow; a ghost region is not evidence of fine usage.
+        // coarse body, and so can a modifier on the fine filament. Qualify only actually painted
+        // colours and modifier filaments with the same resolver used by the projector and
+        // PrintRegion::flow; a ghost region is not evidence of fine usage.
         if (single_painted_body && body_cadence_assignments.size() == 1) {
             const BodySplitRegionAssignment coarse = body_cadence_assignments.front();
             for (const BodySplitRegionAssignment &painted : body_assignments)

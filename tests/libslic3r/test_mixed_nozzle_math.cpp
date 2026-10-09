@@ -296,6 +296,69 @@ TEST_CASE("Declared later-volume precedence resolves a narrow overlap", "[TestRe
     CHECK_THAT(area_mm2(ownership.resolved[0]), WithinAbs(47.976, 2e-4));
 }
 
+// A flush inlay part in its pocket shares a rounding sliver with the pocket's walls: 0.017 mm2 on one
+// layer in a measured text inlay, wider than the 0.01 mm opening removes. Under one dot of the finest
+// nozzle it is not an overlap; a part sunk 0.3 mm into another still is.
+TEST_CASE("A sliver smaller than one dot of the finest nozzle is not a Body Split overlap", "[TestRebuild][RegionalMath]")
+{
+    const double sliver = body_split_overlap_sliver_mm2(0.2);
+    CHECK_THAT(sliver, WithinAbs(0.25 * M_PI * 0.04, 1e-9));
+
+    // 0.025 mm by 0.67 mm shared: about 0.017 mm2.
+    const std::vector<ExPolygons> inlay{
+        rectangle(0., 0., 8., 6.),
+        rectangle(7.975, 2., 12., 2.67)
+    };
+    const RegionalOwnershipResolution flush = resolve_regional_ownership(inlay, {0, 1}, 0.01, sliver);
+    CHECK_FALSE(flush.b01_overlap);
+    // The sliver still goes to the later part, so the two never share a road.
+    CHECK_THAT(area_mm2(intersection_ex(flush.resolved[0], flush.resolved[1])), WithinAbs(0., 1e-9));
+    // Without the threshold it is reported, as before.
+    CHECK(resolve_regional_ownership(inlay, {0, 1}, 0.01).b01_overlap);
+
+    const std::vector<ExPolygons> sunk{
+        rectangle(0., 0., 8., 6.),
+        rectangle(7.7, 0., 16., 6.)
+    };
+    const RegionalOwnershipResolution overlap = resolve_regional_ownership(sunk, {0, 1}, 0.01, sliver);
+    CHECK(overlap.b01_overlap);
+    CHECK_THAT(overlap.b01_overlap_mm2, WithinAbs(1.8, 1e-3));
+}
+
+// A smaller part sunk into a bigger one keeps the shared space only when the overlap is a minor part
+// of the bigger one and the smaller part is clearly the smaller. Text sunk 0.2 mm into a 60 x 40 x 10
+// base (237 mm2 of letters) shares about 47 mm3 of 24000.
+TEST_CASE("Body Split keeps a minor overlap for the smaller part and refuses the rest", "[TestRebuild][RegionalMath]")
+{
+    CHECK(body_split_smaller_part_keeps_overlap(450., 24000., 47.));
+    // A part wholly inside the bigger one, if small enough, is fine too.
+    CHECK(body_split_smaller_part_keeps_overlap(300., 24000., 300.));
+    // Over 10% of the bigger part shared.
+    CHECK_FALSE(body_split_smaller_part_keeps_overlap(300., 1200., 300.));
+    CHECK(body_split_smaller_part_keeps_overlap(300., 1200., 120.));
+    // Not clearly the smaller part.
+    CHECK_FALSE(body_split_smaller_part_keeps_overlap(300., 300., 15.));
+    CHECK(body_split_smaller_part_keeps_overlap(150., 300., 15.));
+    CHECK_FALSE(body_split_smaller_part_keeps_overlap(0., 0., 0.));
+
+    // The winner goes after its loser; other regions keep their order.
+    CHECK(*precedence_with_kept_overlaps({0, 1, 2}, {{0, 1}}) == std::vector<size_t>{0, 1, 2});
+    CHECK(*precedence_with_kept_overlaps({1, 0, 2}, {{0, 1}}) == std::vector<size_t>{0, 1, 2});
+    CHECK(*precedence_with_kept_overlaps({2, 1, 0}, {{0, 2}, {1, 2}}) == std::vector<size_t>{1, 0, 2});
+    CHECK_FALSE(precedence_with_kept_overlaps({0, 1}, {{0, 1}, {1, 0}}).has_value());
+
+    // A kept pair is not reported, and its shared area goes to the later region.
+    const std::vector<ExPolygons> sunk{
+        rectangle(0., 0., 20., 20.),
+        rectangle(4., 4., 12., 12.)
+    };
+    CHECK(resolve_regional_ownership(sunk, {0, 1}, 0.01).b01_overlap);
+    const RegionalOwnershipResolution kept = resolve_regional_ownership(sunk, {0, 1}, 0.01, 0., {{0, 1}});
+    CHECK_FALSE(kept.b01_overlap);
+    CHECK_THAT(area_mm2(kept.resolved[1]), WithinAbs(64., 1e-3));
+    CHECK_THAT(area_mm2(kept.resolved[0]), WithinAbs(336., 1e-3));
+}
+
 TEST_CASE("Native regional planner assigns cells to two disjoint coarse regions",
           "[TestRebuild][RegionalMath]")
 {

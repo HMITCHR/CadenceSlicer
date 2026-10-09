@@ -329,9 +329,11 @@ RegionalGridPlan plan_regional_grid(
 }
 
 RegionalOwnershipResolution resolve_regional_ownership(
-    const std::vector<ExPolygons> &raw_samples,
-    const std::vector<size_t>     &precedence,
-    coordf_t                       b01_hairline_mm)
+    const std::vector<ExPolygons>                &raw_samples,
+    const std::vector<size_t>                    &precedence,
+    coordf_t                                      b01_hairline_mm,
+    double                                        b01_sliver_mm2,
+    const std::vector<std::pair<size_t, size_t>> &kept_overlaps)
 {
     // Empty painted-region ghosts retain indexed metadata without participating in
     // precedence. Every nonempty owner must still occur exactly once.
@@ -350,13 +352,17 @@ RegionalOwnershipResolution resolve_regional_ownership(
 
     for (size_t i = 0; i < raw_samples.size(); ++i)
         for (size_t j = i + 1; j < raw_samples.size(); ++j) {
+            if (std::any_of(kept_overlaps.begin(), kept_overlaps.end(), [i, j](const std::pair<size_t, size_t> &pair) {
+                    return (pair.first == i && pair.second == j) || (pair.first == j && pair.second == i);
+                }))
+                continue;
             ExPolygons shared = intersection_ex(raw_samples[i], raw_samples[j], ApplySafetyOffset::Yes);
             if (b01_hairline_mm > 0.)
                 shared = opening_ex(shared, scaled<float>(b01_hairline_mm));
-            if (!shared.empty()) {
+            const double shared_mm2 = unscale<double>(unscale<double>(std::abs(area(shared))));
+            if (!shared.empty() && shared_mm2 >= b01_sliver_mm2) {
                 out.b01_overlap = true;
-                out.b01_overlap_mm2 = std::max(out.b01_overlap_mm2,
-                    unscale<double>(unscale<double>(std::abs(area(shared)))));
+                out.b01_overlap_mm2 = std::max(out.b01_overlap_mm2, shared_mm2);
             }
         }
 
@@ -370,6 +376,41 @@ RegionalOwnershipResolution resolve_regional_ownership(
         }
     }
     return out;
+}
+
+bool body_split_smaller_part_keeps_overlap(double smaller_mm3, double bigger_mm3, double shared_mm3)
+{
+    return bigger_mm3 > 0. && smaller_mm3 <= body_split_kept_part_max_share * bigger_mm3 &&
+           shared_mm3 <= body_split_kept_overlap_max_share * bigger_mm3;
+}
+
+std::optional<std::vector<size_t>> precedence_with_kept_overlaps(
+    const std::vector<size_t>                    &precedence,
+    const std::vector<std::pair<size_t, size_t>> &loser_winner)
+{
+    // Repeatedly take the first remaining region that no remaining region has to precede.
+    std::vector<size_t> remaining = precedence;
+    std::vector<size_t> out;
+    out.reserve(precedence.size());
+    while (!remaining.empty()) {
+        const auto next = std::find_if(remaining.begin(), remaining.end(), [&](size_t region) {
+            return std::none_of(loser_winner.begin(), loser_winner.end(), [&](const std::pair<size_t, size_t> &pair) {
+                return pair.second == region &&
+                       std::find(remaining.begin(), remaining.end(), pair.first) != remaining.end();
+            });
+        });
+        if (next == remaining.end())
+            return std::nullopt;
+        out.push_back(*next);
+        remaining.erase(next);
+    }
+    return out;
+}
+
+double body_split_overlap_sliver_mm2(double finest_nozzle_diameter)
+{
+    return std::isfinite(finest_nozzle_diameter) && finest_nozzle_diameter > 0. ?
+        0.25 * M_PI * finest_nozzle_diameter * finest_nozzle_diameter : 0.;
 }
 
 namespace {
@@ -467,6 +508,24 @@ std::vector<RegionalForcedPlane> detect_forced_planes(const NativeRegionalPlanni
                     max_width = std::max(max_width, contact_width_mm(contact));
                 }
             }
+        // A kept overlap removed the bigger part under the smaller one, so its owned rows no longer
+        // show where its own top (or bottom) meets the smaller part. Its raw rows still do.
+        for (const auto &[bigger, smaller] : input.kept_overlaps) {
+            if (bigger >= input.kept_overlap_raw_rows.size() || smaller >= regions ||
+                input.kept_overlap_raw_rows[bigger].size() != rows || regions_share_grid(input, bigger, smaller))
+                continue;
+            const ExPolygons changed = xor_ex(input.kept_overlap_raw_rows[bigger][plane],
+                                              input.kept_overlap_raw_rows[bigger][plane + 1], ApplySafetyOffset::Yes);
+            ExPolygons other_union = input.lattice_ownership[smaller][plane];
+            other_union.insert(other_union.end(), input.lattice_ownership[smaller][plane + 1].begin(),
+                               input.lattice_ownership[smaller][plane + 1].end());
+            other_union = union_ex(other_union);
+            const ExPolygons contact = intersection_ex(changed, other_union, ApplySafetyOffset::Yes);
+            if (survives_contact_tolerance(contact, input.interface_tolerance)) {
+                is_forced = true;
+                max_width = std::max(max_width, contact_width_mm(contact));
+            }
+        }
         if (is_forced)
             forced.push_back({input.lattice_planes[plane], RegionalRendezvousReason::StackedContact,
                               input.precedence, max_width});
