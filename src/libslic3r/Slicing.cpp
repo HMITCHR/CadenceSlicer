@@ -169,18 +169,6 @@ bool mixed_nozzle_support_on_coarse_nozzle(const PrintConfig &print_config, cons
     return std::isfinite(minimum) && minimum > object_config.layer_height.value + EPSILON;
 }
 
-bool mixed_nozzle_tree_support_drawn_as_organic(const PrintConfig &print_config, const PrintObjectConfig &object_config)
-{
-    if (!is_tree(object_config.support_type.value))
-        return false;
-    const SupportMaterialStyle style = object_config.support_style.value;
-    if (style != smsTreeSlim && style != smsTreeStrong && style != smsTreeHybrid)
-        return false;
-    // Organic support always follows the object's layers.
-    return mixed_nozzle_support_body_banded(print_config, object_config, true) ||
-           mixed_nozzle_support_on_coarse_nozzle(print_config, object_config, true);
-}
-
 SlicingParameters SlicingParameters::create_from_config(
     const PrintConfig               &print_config,
     const PrintObjectConfig         &object_config,

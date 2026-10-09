@@ -1770,6 +1770,54 @@ static std::vector<MixedNozzleRaftStep> mixed_nozzle_raft_steps(const PrintConfi
 
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
+// Why a support whose filaments are on different nozzles cannot be laid, without the code, or an empty reason when
+// it can. Organic tree support (and Default, Snug or Grid, which a tree draws as Organic) on a coarser nozzle than
+// its interface is laid in bands that nozzle can lay (mixed_nozzle_band_support_body()). Slim, Strong and Hybrid
+// trees use their own generator, which never hands its layers to the banding, and with the interface on the base's
+// nozzle too the interface itself would have to be laid at coarse rows. Under a banded body the fine nozzle lays
+// some body (the bed layer it cannot lay, thin tree parts, the dense layer under a dissimilar interface), which
+// needs a filament there other than an interface filament of another material.
+struct MixedNozzleSupportRefusal {
+    std::string why;
+    std::string opt_key;
+    bool        tree = true;
+};
+static MixedNozzleSupportRefusal mixed_nozzle_support_refusal(const PrintConfig &print_config, const PrintObjectConfig &config,
+                                                              double base_dmr, double interface_dmr, bool via_support)
+{
+    const SupportMaterialStyle style = config.support_style.value;
+    const bool tree          = via_support && is_tree(config.support_type.value);
+    const bool own_generator = style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid;
+    const double finest      = *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end());
+    if (tree && base_dmr > finest + EPSILON) {
+        if (own_generator)
+            return { Slic3r::format("Slim, Strong and Hybrid tree support cannot have its base on the %1% mm nozzle. Use Organic tree "
+                                    "support or Normal support, or put Support/raft base on a filament on the fine nozzle.", base_dmr),
+                     "support_style" };
+        if (interface_dmr > base_dmr - EPSILON)
+            return { Slic3r::format("Tree support cannot have its interface on the %1% mm nozzle with its base. Put Support/raft "
+                                    "interface on a filament on the fine nozzle, or use Normal support.", base_dmr),
+                     "support_interface_filament" };
+    }
+    // Both support filaments on a nozzle that cannot lay the object's layers: Organic trees are laid on rows that
+    // nozzle can lay (mixed_nozzle_coarsen_shared_support()); the other tree generators cannot be.
+    if (tree && own_generator && mixed_nozzle_support_on_coarse_nozzle(print_config, config, true))
+        return { Slic3r::format("Slim, Strong and Hybrid tree support cannot be laid by the %1% mm nozzle, whose thinnest layer is "
+                                "thicker than the object's layers. Use Organic tree support or Normal support.", base_dmr),
+                 "support_style" };
+    if (interface_dmr < base_dmr - EPSILON && ! mixed_nozzle_interface_nozzle_body_filament(print_config, config, {})) {
+        const auto type_of = [&print_config](int filament) {
+            return filament > 0 && size_t(filament) <= print_config.filament_type.values.size() ? print_config.filament_type.values[size_t(filament - 1)] : std::string();
+        };
+        return { Slic3r::format("The %1% mm nozzle lays part of the support body next to the interface, and its only filament for that "
+                                "is the interface filament (%2%), not the base's %3%. Map a %3% filament to the %1% mm nozzle, or use "
+                                "a %3% interface filament.", interface_dmr, type_of(config.support_interface_filament.value),
+                                type_of(config.support_filament.value)),
+                 "support_interface_filament", false };
+    }
+    return {};
+}
+
 StringObjectException Print::validate(std::vector<StringObjectException> *warnings, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     auto add_warning = [warnings](StringObjectException w) {
@@ -1862,14 +1910,13 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     error.opt_key = "support_filament";
                     return error;
                 }
-                // Tree support is admitted only with its base on the fine tool: trees cut at fine layers do not
-                // band into roads the coarse nozzle can lay.
-                if (via_support && is_tree(object->config().support_type.value) &&
-                    base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON) {
+                // Tree styles and filaments the nozzles can lay the support with (mixed_nozzle_support_refusal()).
+                if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
+                    ! refusal.why.empty()) {
                     StringObjectException error;
-                    error.string  = Slic3r::format("[SRL-F14] Tree support cannot have its base on the %1% mm nozzle yet. Put Support/raft base on a filament on the fine nozzle, or use Normal support.", base_dmr);
+                    error.string  = (refusal.tree ? "[SRL-F14] " : "[SRL-F15] ") + refusal.why;
                     error.object  = object->model_object();
-                    error.opt_key = "support_filament";
+                    error.opt_key = refusal.opt_key;
                     return error;
                 }
                 // With a prime tower the tower stands beside the raft and follows its steps, so a raft step
@@ -2048,16 +2095,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
         }
     }
-
-    // Under either mode, a Slim, Strong or Hybrid tree whose body is on the coarser nozzle is drawn by
-    // the organic generator, so its body can be laid in bands that nozzle can lay (SupportParameters).
-    // Report it on the key the user chose.
-    if (is_mixed_nozzle_feature_split(m_config) || is_mixed_nozzle_body_split(m_config))
-        for (const PrintObject *object : m_objects)
-            if (object->has_support() && mixed_nozzle_tree_support_drawn_as_organic(m_config, object->config()))
-                warn(L("The support body is on the coarser nozzle, so this tree is drawn as an Organic tree. That is the only tree "
-                       "style that can lay its body in layers the coarser nozzle can print."),
-                     "support_style", object->model_object());
 
     // Every synchronized refusal has a stable code. The sentence explains it to a person; the code is
     // what tests, logs and the plan export match on. Defined above both mode branches because the
@@ -2271,10 +2308,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 if (object->has_raft() && base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
                     return reject(object, "SRL-A52", "support_filament", Slic3r::format(
                         "The raft would lay the print's first layer with the %1% mm nozzle, and the first layer belongs to the fine nozzle. Put Support/raft base on a filament on the fine nozzle, or set Raft layers to 0.", base_dmr));
-                if (via_support && is_tree(object->config().support_type.value) &&
-                    base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
-                    return reject(object, "SRL-A53", "support_filament", Slic3r::format(
-                        "Tree support cannot have its base on the %1% mm nozzle yet. Put Support/raft base on a filament on the fine nozzle, or use Normal support.", base_dmr));
+                if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
+                    ! refusal.why.empty())
+                    return reject(object, refusal.tree ? "SRL-A53" : "SRL-A55", refusal.opt_key, refusal.why);
                 if (m_config.enable_prime_tower.value || this->has_wipe_tower())
                     for (const MixedNozzleRaftStep &step : mixed_nozzle_raft_steps(m_config, *object))
                         if (! mixed_nozzle_raft_step_carriable(m_config, step.height, step.nozzle))
@@ -2686,10 +2722,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject(object, "SRL-A52", "support_filament", Slic3r::format(
                     "The raft would lay the print's first layer with the %1% mm nozzle, and the first layer belongs to the fine nozzle. Put Support/raft base on a filament on the fine nozzle, or set Raft layers to 0.", base_dmr));
             // Same tree support admission as the Feature Split block above.
-            if (via_support && is_tree(object->config().support_type.value) &&
-                base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
-                return reject(object, "SRL-A53", "support_filament", Slic3r::format(
-                    "Tree support cannot have its base on the %1% mm nozzle yet. Put Support/raft base on a filament on the fine nozzle, or use Normal support.", base_dmr));
+            if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
+                ! refusal.why.empty())
+                return reject(object, refusal.tree ? "SRL-A53" : "SRL-A55", refusal.opt_key, refusal.why);
             // Body Split plans each body's layers from the bed. On a raft the first coarse layers, the
             // plan block and the prime tower levels do not line up with the raised object, and the slice
             // failed later with an internal message (SRL-A38, SRL-C02 code 10, SRL-TOWER-STRUCTURE or
@@ -4547,6 +4582,7 @@ void Print::_make_skirt()
             if (generate_skirt && layer->print_z > skirt_height_z)
                 break;
             layer->support_fills.collect_points(object_points);
+            layer->fine_body_fills.collect_points(object_points);
         }
 
         object_convex_hulls.push_back({ object, Slic3r::Geometry::convex_hull(object_points) });
@@ -8757,6 +8793,9 @@ const std::string PrintStatistics::TotalFilamentUsedWipeTowerValueMask = "; tota
 #define JSON_SUPPORT_LAYER_FILLS                    "support_fills"
 #define JSON_SUPPORT_LAYER_INTERFACE_ID             "interface_id"
 #define JSON_SUPPORT_LAYER_TYPE                     "support_type"
+#define JSON_SUPPORT_LAYER_FINE_BODY_FILLS          "fine_body_fills"
+#define JSON_SUPPORT_LAYER_BASE_ON_INTERFACE_NOZZLE "base_on_interface_nozzle"
+#define JSON_SUPPORT_LAYER_FINE_BODY_FILAMENT       "interface_nozzle_body_filament"
 
 #define JSON_LAYER_REGION_CONFIG_HASH             "config_hash"
 #define JSON_LAYER_REGION_SLICES                  "slices"
@@ -9439,6 +9478,16 @@ void extract_support_layer(const json& support_layer_json, SupportLayer& support
         }
     }
 
+    // The body the fine nozzle lays and the filament it uses (mixed-nozzle support).
+    if (support_layer_json.contains(JSON_SUPPORT_LAYER_BASE_ON_INTERFACE_NOZZLE))
+        support_layer.base_on_interface_nozzle = support_layer_json[JSON_SUPPORT_LAYER_BASE_ON_INTERFACE_NOZZLE];
+    if (support_layer_json.contains(JSON_SUPPORT_LAYER_FINE_BODY_FILAMENT))
+        support_layer.interface_nozzle_body_filament = support_layer_json[JSON_SUPPORT_LAYER_FINE_BODY_FILAMENT];
+    if (support_layer_json.contains(JSON_SUPPORT_LAYER_FINE_BODY_FILLS))
+        for (const json &extrusion_entity_json : support_layer_json[JSON_SUPPORT_LAYER_FINE_BODY_FILLS])
+            if (! convert_extrusion_from_json(extrusion_entity_json, support_layer.fine_body_fills))
+                throw Slic3r::FileIOError("Error while parsing the fine support body at a support layer");
+
     return;
 }
 
@@ -9617,6 +9666,17 @@ int Print::export_cached_data(const std::string& directory, bool with_space)
                         }
                         support_fills_json[JSON_EXTRUSION_ENTITIES] = std::move(supportfills_entities_json);
                         support_layer_json[JSON_SUPPORT_LAYER_FILLS] = std::move(support_fills_json);
+
+                        // The body the fine nozzle lays and the filament it uses (mixed-nozzle support).
+                        support_layer_json[JSON_SUPPORT_LAYER_BASE_ON_INTERFACE_NOZZLE] = support_layer->base_on_interface_nozzle;
+                        support_layer_json[JSON_SUPPORT_LAYER_FINE_BODY_FILAMENT] = support_layer->interface_nozzle_body_filament;
+                        json fine_body_json = json::array();
+                        for (const ExtrusionEntity *extrusion_entity : support_layer->fine_body_fills.entities) {
+                            json entity_json, entity_paths_json = json::array();
+                            if (convert_extrusion_to_json(entity_json, entity_paths_json, extrusion_entity))
+                                fine_body_json.push_back(std::move(entity_json));
+                        }
+                        support_layer_json[JSON_SUPPORT_LAYER_FINE_BODY_FILLS] = std::move(fine_body_json);
 
                         support_layers_json_vector[s_layer_index] = std::move(support_layer_json);
                     }

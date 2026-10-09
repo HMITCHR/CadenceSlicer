@@ -1195,6 +1195,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             }
         }
         if (has_interface) layer_tools.extruders.push_back(extruder_interface);
+        // Body the interface nozzle lays beside coarse body roads has its own filament on this layer.
+        if (! support_layer->fine_body_fills.empty()) {
+            layer_tools.extruders.push_back(support_layer->interface_nozzle_body_filament + 1);
+            has_support = true;
+        }
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);

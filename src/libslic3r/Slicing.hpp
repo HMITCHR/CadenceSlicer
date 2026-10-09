@@ -68,12 +68,6 @@ std::optional<unsigned int> mixed_nozzle_interface_nozzle_body_filament(const Pr
 bool mixed_nozzle_support_on_coarse_nozzle(const PrintConfig &print_config, const PrintObjectConfig &object_config,
                                            bool synchronized_support);
 
-// The Slim, Strong and Hybrid tree styles plan their own support layers and write their own
-// toolpaths, and neither can hold a band. When the body is on a coarser nozzle than the interface,
-// or body and interface share a nozzle that cannot lay the object's layers, under a mode, such a
-// tree is drawn by the organic generator instead. True exactly when that substitution applies.
-bool mixed_nozzle_tree_support_drawn_as_organic(const PrintConfig &print_config, const PrintObjectConfig &object_config);
-
 // Parameters to guide object slicing and support generation.
 // The slicing parameters account for a raft and whether the 1st object layer is printed with a normal or a bridging flow
 // (using a normal flow over a soluble support, using a bridging flow over a non-soluble support).

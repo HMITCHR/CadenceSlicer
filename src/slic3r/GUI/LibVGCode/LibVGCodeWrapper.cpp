@@ -779,6 +779,11 @@ static void convert_object_to_vertices(const Slic3r::PrintObject& object, const 
                                         is_support_material ? EGCodeExtrusionRole::SupportMaterial : EGCodeExtrusionRole::SupportMaterialInterface,
                                         copy, data.vertices);
                 }
+                const size_t fine_body_extruder = support_layer->interface_nozzle_body_filament;
+                for (const Slic3r::ExtrusionEntity* extrusion_entity : support_layer->fine_body_fills.entities)
+                    convert_to_vertices(*extrusion_entity, layer_z, layer_id, fine_body_extruder,
+                                        object_helper.color_id(layer_z, fine_body_extruder), EGCodeExtrusionRole::SupportMaterial,
+                                        copy, data.vertices);
             }
         }
         // filter out empty layers

@@ -229,11 +229,6 @@ struct SupportParameters {
                 support_style = smsGrid;
             }
         }
-        // A Slim, Strong or Hybrid tree whose body is on the coarser nozzle is drawn by the organic
-        // generator, the only tree generator that can band the body.
-        if (mixed_nozzle_tree_support_drawn_as_organic(print_config, object_config))
-            support_style = smsTreeOrganic;
-
         // When a mixed-nozzle mode puts the support body on a coarser nozzle than the interface, the body
         // is laid in bands the coarse nozzle can lay (see mixed_nozzle_band_support_body). Two kinds of
         // body road sit next to the part and are only one object layer tall, so they cannot be banded: the

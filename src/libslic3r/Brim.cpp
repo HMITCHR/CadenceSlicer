@@ -610,6 +610,13 @@ static ExPolygons outer_inner_brim_area(const Print& print,
                 else
                     support_material_extruder = printExtruders.front() + 1;
             }
+            // Support body the fine nozzle lays beside a coarse first-layer road prints with that nozzle's body
+            // filament, and keeps that filament's brim off it the same way.
+            if (!object->support_layers().empty() && brimToWrite.at(object->id()).sup &&
+                !object->support_layers().front()->fine_body_fills.empty() &&
+                object->support_layers().front()->interface_nozzle_body_filament + 1 == extruderNo)
+                for (const Polygon &support_contour : object->support_layers().front()->fine_body_fills.polygons_covered_by_spacing())
+                    no_brim_area_support.emplace_back(support_contour);
             if (support_material_extruder == extruderNo && brimToWrite.at(object->id()).sup) {
                 if (!object->support_layers().empty() && object->support_layers().front()->support_type==stInnerNormal) {
                     for (const Polygon& support_contour : object->support_layers().front()->support_fills.polygons_covered_by_spacing()) {
@@ -918,7 +925,8 @@ void make_brim(const Print& print, PrintTryCancel try_cancel, Polygons& islands_
                 bbx.merge(get_extents(ex_poly_translated.contour));
             }
         if (!object->support_layers().empty())
-        for (const Polygon& support_contour : object->support_layers().front()->support_fills.polygons_covered_by_spacing())
+        for (const Polygon& support_contour : union_(object->support_layers().front()->support_fills.polygons_covered_by_spacing(),
+                                                     object->support_layers().front()->fine_body_fills.polygons_covered_by_spacing()))
             for (const PrintInstance& instance : object->instances()) {
                 auto ex_poly_translated = support_contour;
                 ex_poly_translated.translate(instance.shift_without_plate_offset());

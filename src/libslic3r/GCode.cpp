@@ -3124,8 +3124,11 @@ namespace DoExport {
 	        }
 	        if (object->config().get_abs_value("support_speed") == 0 ||
 	            object->config().get_abs_value("support_interface_speed") == 0)
-	            for (auto layer : object->support_layers())
+	            for (auto layer : object->support_layers()) {
 	                mm3_per_mm.push_back(layer->support_fills.min_mm3_per_mm());
+	                if (! layer->fine_body_fills.empty())
+	                    mm3_per_mm.push_back(layer->fine_body_fills.min_mm3_per_mm());
+	            }
 	    }
 	    // filter out 0-width segments
 	    mm3_per_mm.erase(std::remove_if(mm3_per_mm.begin(), mm3_per_mm.end(), [](double v) { return v < 0.000001; }), mm3_per_mm.end());
@@ -5873,6 +5876,12 @@ void GCode::compute_farthest_point(const std::vector<LayerToPrint> &layers, int 
                                           path, shift, eid);
                     }, for_each_path);
                 }
+                const int fine_body_eid = (int)get_extruder_id(ltp.support_layer->interface_nozzle_body_filament);
+                for (const ExtrusionEntity *entity : ltp.support_layer->fine_body_fills.entities)
+                    for_each_path(entity, [&](const ExtrusionPath &path) {
+                        collect_from_path(max_dist_sq_fallback, farthest_point_fallback, farthest_extruder_fallback,
+                                          path, shift, fine_body_eid);
+                    }, for_each_path);
             }
         }
     }
@@ -6588,6 +6597,11 @@ LayerResult GCode::process_layer(
                     obj_interface.support_extrusion_role = erSupportMaterialInterface;
                 }
             }
+            if (! support_layer.fine_body_fills.entities.empty()) {
+                const unsigned int fine_body_extruder = support_layer.interface_nozzle_body_filament;
+                object_by_extruder(by_extruder, fine_body_extruder, &layer_to_print - layers.data(), layers.size())
+                    .fine_body_support = &support_layer.fine_body_fills;
+            }
         }
 
         if (layer_to_print.object_layer != nullptr) {
@@ -6777,7 +6791,8 @@ LayerResult GCode::process_layer(
                 return Point(q(pt.x()), q(pt.y()));
             };
             for (ObjectByExtruder &object_by_extruder : objects_by_extruder) {
-                if (object_by_extruder.islands.empty() && (object_by_extruder.support == nullptr || object_by_extruder.support->empty())) continue;
+                if (object_by_extruder.islands.empty() && (object_by_extruder.support == nullptr || object_by_extruder.support->empty()) &&
+                    object_by_extruder.fine_body_support == nullptr) continue;
 
                 const size_t       layer_id     = &object_by_extruder - objects_by_extruder.data();
                 const PrintObject *print_object = layers[layer_id].original_object;
@@ -7093,7 +7108,8 @@ LayerResult GCode::process_layer(
                     m_avoid_crossing_perimeters.use_external_mp_once();
                 m_last_obj_copy = this_object_copy;
                 this->set_origin(unscale(offset));
-                if (visit.first_visit && instance_to_print.object_by_extruder.support != nullptr) {
+                if (visit.first_visit && (instance_to_print.object_by_extruder.support != nullptr ||
+                                          instance_to_print.object_by_extruder.fine_body_support != nullptr)) {
                     m_layer = layers[instance_to_print.layer_id].support_layer;
                     m_object_layer_over_raft = false;
 
@@ -7113,7 +7129,7 @@ LayerResult GCode::process_layer(
 
                     ExtrusionRole support_extrusion_role = instance_to_print.object_by_extruder.support_extrusion_role;
                     bool is_overridden = support_extrusion_role == erSupportMaterialInterface ? support_intf_overridden : support_overridden;
-                    if (is_overridden == (print_wipe_extrusions != 0)) {
+                    if (instance_to_print.object_by_extruder.support != nullptr && is_overridden == (print_wipe_extrusions != 0)) {
                         gcode += this->extrude_support(
                             // support_extrusion_role is erSupportMaterial, erSupportTransition, erSupportMaterialInterface or erMixed for all extrusion paths.
                             *instance_to_print.object_by_extruder.support, support_extrusion_role);
@@ -7123,6 +7139,8 @@ LayerResult GCode::process_layer(
                             gcode += this->extrude_support(*instance_to_print.object_by_extruder.support, erIroning);
                         }
                     }
+                    if (instance_to_print.object_by_extruder.fine_body_support != nullptr && print_wipe_extrusions == 0)
+                        gcode += this->extrude_support(*instance_to_print.object_by_extruder.fine_body_support, erSupportMaterial);
 
                     m_layer = layer_to_print.layer();
                     m_object_layer_over_raft = object_layer_over_raft;

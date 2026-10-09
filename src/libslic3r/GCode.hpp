@@ -505,6 +505,8 @@ private:
         const ExtrusionEntityCollection  *support;
         // erSupportMaterial / erSupportMaterialInterface / erSupportTransition or erMixed.
         ExtrusionRole                     support_extrusion_role;
+        // SupportLayer::fine_body_fills, printed after support with this filament.
+        const ExtrusionEntityCollection  *fine_body_support = nullptr;
 
         struct Island
         {

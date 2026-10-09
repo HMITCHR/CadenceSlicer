@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
 #include <iomanip>
 #include <set>
@@ -1342,6 +1343,158 @@ static void modulate_extrusion_by_overlapping_layers(
         extrusion_entities_append_paths(extrusions_in_out, std::move(it_fragment->polylines), extrusion_role, it_fragment->mm3_per_mm, it_fragment->width, it_fragment->height);
 }
 
+// How organic tree support on a coarse base is laid in bands, for one run of base layers that stack
+// without a gap. The tree is planned and sliced on the object's layers; each slice is a cut through
+// the branches' tubes at that layer's middle.
+struct TreeBandRules {
+    std::function<bool(coordf_t)>                     legal;
+    coordf_t                                          body_min = 0.;
+    coordf_t                                          body_max = 0.;
+    coordf_t                                          target   = 0.;
+    // The fine nozzle has a filament of the base's material for the bed layer. A tree's bed layer then always goes
+    // to it: roots on the bed are often thinner than a coarse road, and one nozzle lays the support's first layer.
+    bool                                              bed_layer_on_interface_nozzle = false;
+    // The part, grown by the XY distance, and the contacts and interfaces, grown by a road's width,
+    // anywhere inside a band's Z span.
+    std::function<Polygons(coordf_t, coordf_t)>       part_between;
+    std::function<Polygons(coordf_t, coordf_t)>       interface_areas_between;
+    // Half the sideways move a branch makes per mm of height at the steepest branch angle, and its cap.
+    double                                            lean_per_mm = 0.;
+    float                                             lean_cap    = 0.;
+    // Parts of a band road narrower than twice this go to the interface nozzle.
+    float                                             thin_radius = 0.;
+    // Pieces narrower than twice this are too thin for the interface nozzle's road.
+    float                                             sliver      = 0.;
+};
+
+// A band is one coarse layer, so it takes the cut nearest its own middle, as stock does at that layer
+// height, and keeps only what also stands on the band's bottom slice and holds up its top slice,
+// within the distance a branch leans over the band. It keeps clear of the part and of every contact
+// and interface over its whole height, and leaves anything thinner than the coarse road can draw.
+// What no band takes is laid by the interface nozzle at its own layer's height, or, where enough of
+// it stacks up, in a smaller band of its own. It never joins a band road.
+static void band_tree_run(std::vector<SupportGeneratorLayer*> &run, const TreeBandRules &rules, size_t &num_bands, size_t &num_fine_layers)
+{
+    // A morphological opening that stays inside its input: the mitred dilation of an opening can poke out
+    // past a rounded outline.
+    const auto open_inside = [](const Polygons &polygons, float radius) { return intersection(opening(polygons, radius), polygons); };
+    const size_t n = run.size();
+    std::vector<coordf_t> height(n);
+    // What no band has taken yet, per layer.
+    std::vector<Polygons> left(n);
+    for (size_t k = 0; k < n; ++ k) {
+        height[k] = run[k]->height;
+        left[k]   = union_(run[k]->polygons);
+        run[k]->polygons.clear();
+    }
+    std::vector<bool> hosts_band(n, false);
+
+    const auto make_band = [&](size_t first, size_t last) {
+        if (left[first].empty() || left[last].empty())
+            return;
+        const coordf_t bottom_z = run[first]->bottom_z;
+        const coordf_t top_z    = run[last]->print_z;
+        const coordf_t mid      = 0.5 * (bottom_z + top_z);
+        const auto     mid_of   = [&](size_t k) { return run[k]->print_z - 0.5 * height[k]; };
+        size_t cut = first;
+        for (size_t k = first + 1; k <= last; ++ k)
+            if (std::abs(mid_of(k) - mid) < std::abs(mid_of(cut) - mid))
+                cut = k;
+        const float lean = std::min(rules.lean_cap, float(scale_((top_z - bottom_z) * rules.lean_per_mm)) + float(SCALED_EPSILON));
+        Polygons road = intersection(left[cut], expand(left[first], lean));
+        if (! road.empty())
+            road = intersection(road, expand(left[last], lean));
+        if (! road.empty())
+            if (Polygons part = rules.part_between(bottom_z, top_z); ! part.empty())
+                road = diff(road, part);
+        if (! road.empty())
+            if (Polygons keepout = rules.interface_areas_between(bottom_z, top_z); ! keepout.empty())
+                road = diff(road, keepout);
+        if (! road.empty())
+            road = open_inside(road, rules.thin_radius);
+        if (road.empty())
+            return;
+        const Polygons taken = expand(road, lean);
+        for (size_t k = first; k <= last; ++ k)
+            left[k] = diff(left[k], taken);
+        run[last]->polygons = std::move(road);
+        run[last]->bottom_z = bottom_z;
+        run[last]->height   = top_z - bottom_z;
+        hosts_band[last]    = true;
+        ++ num_bands;
+    };
+
+    for (size_t i = 0; i < n;) {
+        if (run[i]->bottom_z < EPSILON && rules.bed_layer_on_interface_nozzle) {
+            ++ i;
+            continue;
+        }
+        // Band heights as for normal support: the smallest legal band on the bed, above it as close to
+        // the coarse cadence as whole layers get.
+        size_t   j   = i;
+        coordf_t sum = height[i];
+        if (run[i]->bottom_z < EPSILON) {
+            while (sum < rules.body_min - EPSILON && j + 1 < n && sum + height[j + 1] < rules.body_max + EPSILON)
+                sum += height[++ j];
+        } else {
+            while (j + 1 < n && sum + height[j + 1] < rules.target + EPSILON)
+                sum += height[++ j];
+        }
+        if (j > i && rules.legal(sum))
+            make_band(i, j);
+        // What that band left, where enough of it stacks up, in the smallest bands the nozzle can lay.
+        // The band's own top layer is taken.
+        const size_t end_free = hosts_band[j] ? j : j + 1;
+        for (size_t k = i; k < end_free;) {
+            size_t   m = k;
+            coordf_t s = height[k];
+            while (s < rules.body_min - EPSILON && m + 1 < end_free)
+                s += height[++ m];
+            if (m > k && rules.legal(s))
+                make_band(k, m);
+            k = m + 1;
+        }
+        i = j + 1;
+    }
+
+    for (size_t k = 0; k < n; ++ k) {
+        SupportGeneratorLayer &layer = *run[k];
+        Polygons fine = std::move(left[k]);
+        // A layer the coarse nozzle can lay at its own height keeps what is wide enough for its road.
+        if (! hosts_band[k] && rules.legal(height[k]) && ! fine.empty() &&
+            ! (layer.bottom_z < EPSILON && rules.bed_layer_on_interface_nozzle)) {
+            Polygons road = open_inside(fine, rules.thin_radius);
+            if (! road.empty()) {
+                fine           = diff(fine, road);
+                layer.polygons = std::move(road);
+            }
+        }
+        if (! fine.empty())
+            fine = open_inside(fine, rules.sliver);
+        if (! fine.empty()) {
+            layer.fine_body_polygons = std::move(fine);
+            layer.fine_body_height   = height[k];
+            ++ num_fine_layers;
+        }
+    }
+}
+
+size_t mixed_nozzle_thin_coarse_body_to_fine(SupportGeneratorLayersPtr &base_layers, coordf_t body_min, const SlicingParameters &slicing_params)
+{
+    size_t moved = 0;
+    for (SupportGeneratorLayer *layer : base_layers)
+        if (layer != nullptr && ! layer->polygons.empty() && layer->bottom_z > EPSILON && layer->height < body_min - EPSILON &&
+            ! (slicing_params.has_raft() && layer->print_z < slicing_params.raft_contact_top_z + EPSILON)) {
+            // Only a layer that hosts no band can be this thin, and its fine body already has its own height.
+            polygons_append(layer->fine_body_polygons, std::move(layer->polygons));
+            layer->fine_body_polygons = union_(layer->fine_body_polygons);
+            layer->fine_body_height   = layer->height;
+            layer->polygons.clear();
+            ++ moved;
+        }
+    return moved;
+}
+
 void mixed_nozzle_band_support_body(
     const PrintObject               &object,
     const SupportParameters         &support_params,
@@ -1468,7 +1621,52 @@ void mixed_nozzle_band_support_body(
 
     size_t num_bands       = 0;
     size_t num_fine_layers = 0;
+    const bool organic_tree = support_params.support_style == smsTreeOrganic;
+    TreeBandRules tree_rules;
+    const auto object_layers = object.layers();
+    std::vector<Polygons> part_grown;
+    if (organic_tree) {
+        // Each object layer's outline, grown by the distance the tree keeps from the part (as TreeSupportSettings
+        // has it: the XY distance, or under an overhang half the outer wall's width when that is less), for
+        // the band keepout.
+        coordf_t external_perimeter_width = 0.;
+        for (size_t region_id = 0; region_id < object.num_printing_regions(); ++ region_id)
+            external_perimeter_width = std::max<coordf_t>(external_perimeter_width,
+                object.printing_region(region_id).flow(object, frExternalPerimeter, object_config.layer_height.value).width());
+        coordf_t tree_gap = std::min(support_params.gap_xy, 0.5 * external_perimeter_width);
+        if (slicing_params.gap_support_object < EPSILON)
+            tree_gap = std::max(tree_gap, 0.1);
+        part_grown.assign(object_layers.size(), Polygons());
+        const float gap_xy = float(scale_(tree_gap));
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, object_layers.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t l = range.begin(); l < range.end(); ++ l)
+                part_grown[l] = expand(object_layers[l]->lslices, gap_xy);
+        });
+        const coordf_t road_width = support_params.support_material_flow.width();
+        tree_rules.legal        = legal;
+        tree_rules.body_min     = body_min;
+        tree_rules.body_max     = body_max;
+        tree_rules.target       = target;
+        tree_rules.bed_layer_on_interface_nozzle = bed_layer_on_interface_nozzle;
+        tree_rules.part_between = [&object_layers, &part_grown](coordf_t bottom_z, coordf_t top_z) {
+            auto it = std::lower_bound(object_layers.begin(), object_layers.end(), bottom_z + EPSILON,
+                [](const Layer *layer, coordf_t z) { return layer->print_z < z; });
+            Polygons out;
+            for (; it != object_layers.end() && (*it)->bottom_z() < top_z - EPSILON; ++ it)
+                polygons_append(out, part_grown[it - object_layers.begin()]);
+            return out;
+        };
+        tree_rules.interface_areas_between = interface_areas_between;
+        tree_rules.lean_per_mm  = 0.5 * std::tan(std::clamp(object_config.tree_support_branch_angle_organic.value, 0., 85.) * M_PI / 180.);
+        tree_rules.lean_cap     = float(scale_(0.5 * road_width));
+        tree_rules.thin_radius  = float(scale_(0.75 * road_width));
+        tree_rules.sliver       = float(scale_(0.5 * support_params.mixed_nozzle_fine_body_flow.width()));
+    }
     for (std::vector<SupportGeneratorLayer*> &run : runs) {
+        if (organic_tree) {
+            band_tree_run(run, tree_rules, num_bands, num_fine_layers);
+            continue;
+        }
         const size_t n = run.size();
         std::vector<coordf_t> height(n);
         for (size_t k = 0; k < n; ++ k)
@@ -1571,6 +1769,10 @@ void mixed_nozzle_band_support_body(
             }
         }
     }
+
+    if (const size_t num_guarded = mixed_nozzle_thin_coarse_body_to_fine(base_layers, body_min, slicing_params); num_guarded > 0)
+        BOOST_LOG_TRIVIAL(warning) << "SupportCadence: object " << object.id().id << ": " << num_guarded
+                                   << " support layers thinner than the coarse nozzle's minimum went to the interface nozzle";
 
     BOOST_LOG_TRIVIAL(info) << "SupportCadence: object " << object.id().id << ": support body laid in " << num_bands
                             << " bands of " << body_min << " to " << body_max << " mm on nozzle " << body_tool + 1
@@ -1857,28 +2059,6 @@ void mixed_nozzle_coarsen_shared_support(
                             << " (aiming for " << target << " mm); " << lowered.size() << " contacts lowered to the row below";
 }
 
-// A body road the interface nozzle lays carries the interface role, which is what routes an
-// extrusion to the interface filament.
-static void retag_extrusion_role(ExtrusionEntitiesPtr &entities, ExtrusionRole from, ExtrusionRole to)
-{
-    for (ExtrusionEntity *entity : entities) {
-        if (auto *path = dynamic_cast<ExtrusionPath*>(entity)) {
-            if (path->role() == from)
-                path->set_extrusion_role(to);
-        } else if (auto *multipath = dynamic_cast<ExtrusionMultiPath*>(entity)) {
-            for (ExtrusionPath &path : multipath->paths)
-                if (path.role() == from)
-                    path.set_extrusion_role(to);
-        } else if (auto *loop = dynamic_cast<ExtrusionLoop*>(entity)) {
-            for (ExtrusionPath &path : loop->paths)
-                if (path.role() == from)
-                    path.set_extrusion_role(to);
-        } else if (auto *collection = dynamic_cast<ExtrusionEntityCollection*>(entity)) {
-            retag_extrusion_role(collection->entities, from, to);
-        }
-    }
-}
-
 // Support layer that is covered by some form of dense interface.
 static constexpr const std::initializer_list<SupporLayerType> support_types_interface{
     SupporLayerType::RaftInterface, SupporLayerType::BottomContact, SupporLayerType::BottomInterface, SupporLayerType::TopContact, SupporLayerType::TopInterface
@@ -2099,6 +2279,8 @@ void generate_support_toolpaths(
         boost::container::static_vector<LayerCacheItem, 5>  nonempty;
         // Body roads the interface nozzle lays, see mixed_nozzle_band_support_body().
         ExtrusionEntitiesPtr                                fine_body_extrusions;
+        // They share the layer with coarse body roads, so they go to SupportLayer::fine_body_fills.
+        bool                                                fine_body_beside_coarse = false;
 
         float    ironing_angle;
         Polygons polys_to_iron;
@@ -2449,26 +2631,29 @@ void generate_support_toolpaths(
                         filler, density, ExtrusionRole::erSupportMaterial, flow, support_params,
                         on_bed || support_params.with_sheath, on_bed);
             }
-            // Where the coarse nozzle lays no body at this height, the body the interface nozzle lays (the
-            // fine body above and a contact printed with the base pattern) keeps the base role and the
-            // G-code gives it a body filament on the interface nozzle (PrintObject::assign_interface_nozzle_body_filament()),
-            // so an interface filament of another material never prints body, on the bed or under a
-            // contact. Next to a coarse band road the layer has one base filament, so it goes to the
-            // interface filament as before.
+            // The body the interface nozzle lays (the fine body above and a contact printed with the base
+            // pattern) keeps the base role and the G-code gives it a body filament on the interface nozzle
+            // (PrintObject::assign_interface_nozzle_body_filament()), so an interface filament of another
+            // material never prints body, on the bed, under a contact or beside a coarse band road. Where
+            // the coarse nozzle lays no body at this height that filament prints the layer's whole body;
+            // beside a coarse road, on the bed too, the fine body is kept apart in fine_body_fills, so the coarse
+            // road keeps its own nozzle.
             if (! layer_cache.fine_body_extrusions.empty()) {
-                const bool on_bed = fine_body_layer != nullptr && fine_body_layer->print_z - fine_body_layer->fine_body_height < EPSILON;
-                if (on_bed || base_layer.extrusions.empty())
-                    support_layer.base_on_interface_nozzle = true;
-                else
-                    retag_extrusion_role(layer_cache.fine_body_extrusions, ExtrusionRole::erSupportMaterial, ExtrusionRole::erSupportMaterialInterface);
-            }
-            // The dense base-material layer under a dissimilar interface goes to the interface nozzle the same way.
-            // Banding keeps coarse roads off its height, so the retag below is only a fallback.
-            if (support_params.mixed_nozzle_banded_body && ! base_interface_layer.extrusions.empty()) {
                 if (base_layer.extrusions.empty())
                     support_layer.base_on_interface_nozzle = true;
                 else
-                    retag_extrusion_role(base_interface_layer.extrusions, ExtrusionRole::erSupportMaterial, ExtrusionRole::erSupportMaterialInterface);
+                    layer_cache.fine_body_beside_coarse = true;
+            }
+            // The dense base-material layer under a dissimilar interface goes to the interface nozzle the same way.
+            // Banding keeps coarse roads off its height, so the second branch is only a fallback.
+            if (support_params.mixed_nozzle_banded_body && ! base_interface_layer.extrusions.empty()) {
+                if (base_layer.extrusions.empty())
+                    support_layer.base_on_interface_nozzle = true;
+                else {
+                    append(layer_cache.fine_body_extrusions, std::move(base_interface_layer.extrusions));
+                    base_interface_layer.extrusions.clear();
+                    layer_cache.fine_body_beside_coarse = true;
+                }
             }
 
             // Merge base_interface_layers to base_layers to avoid unneccessary retractions
@@ -2536,7 +2721,8 @@ void generate_support_toolpaths(
                 support_layer.support_fills.append(std::move(layer_cache_item.layer_extruded->extrusions));
             }
             if (! layer_cache.fine_body_extrusions.empty())
-                support_layer.support_fills.append(std::move(layer_cache.fine_body_extrusions));
+                (layer_cache.fine_body_beside_coarse ? support_layer.fine_body_fills : support_layer.support_fills)
+                    .append(std::move(layer_cache.fine_body_extrusions));
 
             // Orca: Generate iron toolpath for contact layer
             if (!layer_cache.polys_to_iron.empty()) {

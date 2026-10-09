@@ -54,6 +54,12 @@ SupportGeneratorLayersPtr generate_raft_base(
 // fine_body_polygons, for the interface nozzle. So does the body at the height of a base interface,
 // which that nozzle lays too. On the first layer that body, and an interface layer there, is printed
 // with the part's own filament on that nozzle, never the interface filament.
+// The last check of mixed_nozzle_band_support_body(): the coarse nozzle never lays a body road thinner than its
+// minimum above the bed. Banding only makes legal bands, so this should never move anything; should a planner bug
+// leave such a layer, its body goes to the interface nozzle at that height instead of a squashed coarse road.
+// Returns how many layers it moved. Raft layers are left alone.
+size_t mixed_nozzle_thin_coarse_body_to_fine(SupportGeneratorLayersPtr &base_layers, coordf_t body_min, const SlicingParameters &slicing_params);
+
 // Raft layers are left alone.
 // Call after generate_interface_layers() and generate_raft_base(), before generate_support_layers().
 void mixed_nozzle_band_support_body(

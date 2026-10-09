@@ -395,18 +395,24 @@ public:
     // once per object with mixed_nozzle_interface_nozzle_body_filament().
     bool                        base_on_interface_nozzle = false;
     unsigned int                interface_nozzle_body_filament = 0;
+    // Body the interface nozzle lays on a layer where the coarse nozzle lays body too. It prints with
+    // interface_nozzle_body_filament, so a layer can carry two body filaments, one per nozzle.
+    ExtrusionEntityCollection   fine_body_fills;
 
     // for tree supports
     ExPolygons base_areas;
 
 
     // Is there any valid extrusion assigned to this LayerRegion?
-    virtual bool                has_extrusions() const { return ! support_fills.empty(); }
+    virtual bool                has_extrusions() const { return ! support_fills.empty() || ! fine_body_fills.empty(); }
 
     // Zero based index of an interface layer, used for alternating direction of interface / contact layers.
     size_t                      interface_id() const { return m_interface_id; }
 
-    void simplify_support_extrusion_path() { this->simplify_support_entity_collection(&support_fills); }
+    void simplify_support_extrusion_path() {
+        this->simplify_support_entity_collection(&support_fills);
+        this->simplify_support_entity_collection(&fine_body_fills);
+    }
 
 protected:
     friend class PrintObject;

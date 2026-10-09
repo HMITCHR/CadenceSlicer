@@ -120,8 +120,9 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
         }
         const SupportLayer *support_layer = dynamic_cast<const SupportLayer*>(layer);
         if (support_layer)
-            for (const ExtrusionEntity *extrusion_entity : support_layer->support_fills.entities)
-                bbox_this.merge(extrusionentity_extents(extrusion_entity));
+            for (const ExtrusionEntityCollection *fills : { &support_layer->support_fills, &support_layer->fine_body_fills })
+                for (const ExtrusionEntity *extrusion_entity : fills->entities)
+                    bbox_this.merge(extrusionentity_extents(extrusion_entity));
         for (const PrintInstance &instance : print_object.instances()) {
             BoundingBoxf bbox_translated(bbox_this);
             bbox_translated.translate(unscale(instance.shift));

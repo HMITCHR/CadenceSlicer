@@ -1263,7 +1263,7 @@ void PrintObject::assign_interface_nozzle_body_filament()
 {
     std::vector<SupportLayer*> flagged;
     for (SupportLayer *layer : m_support_layers)
-        if (layer->base_on_interface_nozzle)
+        if (layer->base_on_interface_nozzle || ! layer->fine_body_fills.empty())
             flagged.push_back(layer);
     if (flagged.empty())
         return;

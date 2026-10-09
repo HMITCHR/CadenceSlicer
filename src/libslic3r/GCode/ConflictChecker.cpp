@@ -177,6 +177,7 @@ ExtrusionLayer getExtrusionPathsFromSupportLayer(SupportLayer *supportLayer)
 {
     ExtrusionLayer el;
     getExtrusionPathsFromEntity(&supportLayer->support_fills, el.paths);
+    getExtrusionPathsFromEntity(&supportLayer->fine_body_fills, el.paths);
     el.layer    = supportLayer;
     el.bottom_z = supportLayer->bottom_z();
     el.height   = supportLayer->height;

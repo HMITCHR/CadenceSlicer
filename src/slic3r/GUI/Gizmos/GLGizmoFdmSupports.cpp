@@ -879,10 +879,9 @@ void GLGizmoFdmSupports::run_thread()
         init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
         for (const SupportLayer *support_layer : m_print_instance.print_object->support_layers())
         {
-            for (const ExtrusionEntity *extrusion_entity : support_layer->support_fills.entities)
-            {
-                _3DScene::extrusionentity_to_verts(extrusion_entity, float(support_layer->print_z), m_print_instance.shift, init_data);
-            }
+            for (const ExtrusionEntityCollection *fills : { &support_layer->support_fills, &support_layer->fine_body_fills })
+                for (const ExtrusionEntity *extrusion_entity : fills->entities)
+                    _3DScene::extrusionentity_to_verts(extrusion_entity, float(support_layer->print_z), m_print_instance.shift, init_data);
         }
         m_support_volume->model.init_from(std::move(init_data));
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", finished extrusionentity_to_verts, update status to 100%";
