@@ -273,7 +273,7 @@ TEST_CASE("Feature Split support and raft retain their recommended object-grid Z
     SECTION("four-layer raft rounds 0.35 mm to the next 0.10 mm object row") {
         DynamicPrintConfig config = coarse_base_support_config(MixedNozzleSlicingMode::FeatureSplit);
         config.set_key_value("raft_layers", new ConfigOptionInt(4));
-        // A raft's base is on the fine nozzle: the coarse one may not lay the print's first layer (SRL-F13).
+        // The raft's base on the fine nozzle, so the first layer keeps its 0.10 mm height.
         // The 0.4 mm contact gap is more than one level of the fine nozzle's tower can carry.
         config.set_key_value("support_filament", new ConfigOptionInt(1));
         config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));

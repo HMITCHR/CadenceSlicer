@@ -183,7 +183,7 @@ TEST_CASE("Body Split on a raft is refused, naming Raft layers", "[TestRebuild][
         CHECK(plain.string.empty());
     }
     scene.config.set_key_value("raft_layers", new ConfigOptionInt(2));
-    // The raft's base on the fine nozzle, so the coarse-base refusal (SRL-A52) is not what answers.
+    // The raft's base on the fine nozzle.
     scene.config.set_key_value("support_filament", new ConfigOptionInt(1));
     scene.config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
     const StringObjectException refused = validate(scene);

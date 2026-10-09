@@ -2357,28 +2357,13 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
             const bool same_pair = mixed_nozzle_project_nozzle_pair_valid(machine_pair) &&
                 std::equal(machine_pair.begin(), machine_pair.end(), pair.begin(),
                     [](double machine, double project) { return std::abs(machine - project) < EPSILON; });
-            bool adopted = false;
-            if (mixed_nozzle_project_nozzle_pair_valid(machine_pair) && !same_pair) {
-                MessageDialog dlg(this->plater,
-                    _L("The connected printer's nozzles differ from this project's nozzle pair. Review project setup to adopt the printer's nozzles."),
-                    _L("Printer nozzle mismatch"), 0);
-                dlg.AddButton(wxID_YES, _L("Adopt printer nozzles..."));
-                dlg.AddButton(wxID_NO, _L("Keep project nozzles"), true);
-                if (dlg.ShowModal() == wxID_YES) {
-                    offer_filament_sync_before_setup();
-                    if (!plater->open_mixed_nozzle_wizard(false, -1, nullptr,
-                            MixedNozzleWizardPage::ModeAndScope, machine_pair))
-                        return false;
-                    // The printer's pair is now the project's; its flow types come with it below.
-                    adopted = true;
-                    pair = mixed_nozzle_project_owned_pair(bundle.project_config);
-                    if (pair.size() != 2) return true;
-                }
-            }
             // A matching diameter is not a matching hotend. Review flow separately, without
-            // silently adopting telemetry or replacing the project's nozzle pair.
-            const auto *project_flows = bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-            if ((same_pair || adopted) && obj->is_nozzle_flow_type_supported() && project_flows && project_flows->size() == 2) {
+            // silently adopting telemetry or replacing the project's nozzle pair. FLOW_PAIR is the pair
+            // the flow types are for. False when the project changed under the review.
+            auto review_flows = [&](bool adopted, const std::vector<double> &flow_pair) {
+                const auto *project_flows = bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                if (!obj->is_nozzle_flow_type_supported() || !project_flows || project_flows->size() != 2)
+                    return true;
                 const std::vector<int> before = project_flows->values;
                 std::vector<NozzleVolumeType> machine_flows(2);
                 bool complete = true;
@@ -2390,7 +2375,7 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
                     }
                     machine_flows[slot] = DevNozzle::ToNozzleVolumeType(flow);
                     // The native 0.2 mm path supports Standard only.
-                    if (std::abs(pair[slot] - 0.2) < EPSILON && machine_flows[slot] != nvtStandard)
+                    if (std::abs(flow_pair[slot] - 0.2) < EPSILON && machine_flows[slot] != nvtStandard)
                         complete = false;
                 }
                 wxString changes;
@@ -2402,34 +2387,70 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
                             " → " + from_u8(get_nozzle_volume_type_string(machine_flows[slot]));
                     }
                 }
-                if (!changes.empty()) {
-                    MessageDialog dlg(this->plater,
-                        _L("The printer reports different nozzle flow types. Confirm these match the installed hotends before adopting them:") +
-                        changes + "\n\n" + _L("Adopting updates this project's flow types and material mappings. Re-slice before sending."),
-                        _L("Printer nozzle flow mismatch"), 0);
-                    dlg.AddButton(wxID_YES, _L("Use printer flow types"));
-                    dlg.AddButton(wxID_NO, _L("Keep project settings"), true);
-                    // Adopting the printer's nozzles already said yes to its flow types, except a
-                    // Standard reading over one the project has (plan_adopted_flows).
-                    const AdoptedFlowPlan flow_plan = plan_adopted_flows(before, machine_flows, adopted);
-                    if (flow_plan.writes_apply(flow_plan.ask && dlg.ShowModal() == wxID_YES)) {
-                        auto *printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
-                        if (printer_tab == nullptr) return false;
-                        const auto *current_flows = bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-                        if (!current_flows || current_flows->values != before ||
-                            mixed_nozzle_project_owned_pair(bundle.project_config) != pair)
-                            return false;
-                        for (const auto &[slot, type] : flow_plan.writes) {
-                            printer_tab->set_extruder_volume_type(int(slot), type);
-                            plater->update_filament_volume_map(int(slot), int(type));
-                        }
-                        // The nozzle cards were drawn before these writes; show what Slice will use.
-                        if (flow_plan.redraw_cards(true))
-                            plater->sidebar().update_presets(Preset::TYPE_PRINTER, true);
-                        plater->update_machine_sync_status();
-                    }
+                if (changes.empty())
+                    return true;
+                MessageDialog dlg(this->plater,
+                    _L("The printer reports different nozzle flow types. Confirm these match the installed hotends before adopting them:") +
+                    changes + "\n\n" + _L("Adopting updates this project's flow types and material mappings. Re-slice before sending."),
+                    _L("Printer nozzle flow mismatch"), 0);
+                dlg.AddButton(wxID_YES, _L("Use printer flow types"));
+                dlg.AddButton(wxID_NO, _L("Keep project settings"), true);
+                // Adopting the printer's nozzles already said yes to its flow types, except a
+                // Standard reading over one the project has (plan_adopted_flows).
+                const AdoptedFlowPlan flow_plan = plan_adopted_flows(before, machine_flows, adopted);
+                if (!flow_plan.writes_apply(flow_plan.ask && dlg.ShowModal() == wxID_YES))
+                    return true;
+                auto *printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
+                if (printer_tab == nullptr) return false;
+                const auto *current_flows = bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                if (!current_flows || current_flows->values != before ||
+                    mixed_nozzle_project_owned_pair(bundle.project_config) != pair)
+                    return false;
+                for (const auto &[slot, type] : flow_plan.writes) {
+                    printer_tab->set_extruder_volume_type(int(slot), type);
+                    plater->update_filament_volume_map(int(slot), int(type));
                 }
+                // The nozzle cards were drawn before these writes; show what Slice will use.
+                if (flow_plan.redraw_cards(true))
+                    plater->sidebar().update_presets(Preset::TYPE_PRINTER, true);
+                plater->update_machine_sync_status();
+                return true;
+            };
+            if (mixed_nozzle_project_nozzle_pair_valid(machine_pair) && !same_pair) {
+                MessageDialog dlg(this->plater,
+                    _L("The connected printer's nozzles differ from this project's nozzle pair. Review project setup to adopt the printer's nozzles."),
+                    _L("Printer nozzle mismatch"), 0);
+                dlg.AddButton(wxID_YES, _L("Adopt printer nozzles..."));
+                dlg.AddButton(wxID_NO, _L("Keep project nozzles"), true);
+                if (dlg.ShowModal() != wxID_YES)
+                    return true;
+                offer_filament_sync_before_setup();
+                // Setup describes the nozzles it applies, flow types included, so the printer's flow
+                // types are reviewed before it opens. Leaving setup without applying puts them back.
+                const std::vector<int> flows_before =
+                    bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values;
+                if (!review_flows(true, machine_pair))
+                    return false;
+                if (!plater->open_mixed_nozzle_wizard(false, -1, nullptr,
+                        MixedNozzleWizardPage::ModeAndScope, machine_pair)) {
+                    auto *flows = bundle.project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                    auto *printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
+                    if (flows != nullptr && printer_tab != nullptr && flows->values != flows_before &&
+                        flows->values.size() == flows_before.size()) {
+                        for (size_t slot = 0; slot < flows_before.size(); ++slot) {
+                            printer_tab->set_extruder_volume_type(int(slot), NozzleVolumeType(flows_before[slot]));
+                            plater->update_filament_volume_map(int(slot), flows_before[slot]);
+                        }
+                        plater->sidebar().update_presets(Preset::TYPE_PRINTER, true);
+                    }
+                    return false;
+                }
+                // The printer's pair is now the project's.
+                pair = mixed_nozzle_project_owned_pair(bundle.project_config);
+                return pair.size() != 2 || review_flows(true, pair);
             }
+            if (same_pair && !review_flows(false, pair))
+                return false;
         }
         return true;
     }
@@ -2553,6 +2574,20 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
     int main_index = obj->is_main_extruder_on_left() ? 0 : 1;
     int deputy_index = obj->is_main_extruder_on_left() ? 1 : 0;
 
+    auto printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
+    // The printer's flow types, with the material mappings that follow them. The nozzle cards were
+    // drawn before, so they are redrawn to show what Slice will use.
+    auto write_printer_flows = [&]() {
+        for (size_t idx = 0; idx < target_types.size(); ++idx) {
+            printer_tab->set_extruder_volume_type(idx, target_types[idx]);
+            plater->update_filament_volume_map(int(idx), int(target_types[idx]));
+        }
+        plater->sidebar().update_presets(Preset::TYPE_PRINTER, true);
+    };
+    // Written before the diameters too: two different nozzles can open setup from switch_diameter(),
+    // and setup describes the flow types it applies.
+    write_printer_flows();
+
     if (extruder_nums > 1) {
         int left_index  = left_extruder->combo_diameter->FindString(get_diameter_string(nozzle_diameters[0]));
         int right_index = left_extruder->combo_diameter->FindString(get_diameter_string(nozzle_diameters[1]));
@@ -2575,11 +2610,8 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
         is_switching_diameter = false;
     }
 
-    // set nozzle volume type after switching prset, so this value can override the old value stored in conf
-    auto printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
-    for (size_t idx = 0; idx < target_types.size(); ++idx) {
-        printer_tab->set_extruder_volume_type(idx, target_types[idx]);
-    }
+    // And again after switching preset, so this value can override the old value stored in conf.
+    write_printer_flows();
 
     if (extruder_nums > 1) {
         auto fila_switch = obj->GetFilaSwitch();
@@ -5976,6 +6008,8 @@ struct Plater::priv
     std::string m_broken_shown_sig;
     bool auto_reslice_pending {false};
     bool auto_reslice_after_cancel {false};
+    // Set while the slice started for a filament map the previous slice chose is running.
+    bool reslice_for_filament_map {false};
     bool m_is_publishing {false};
     int m_is_RightClickInLeftUI{-1};
     int m_cur_slice_plate;
@@ -11601,6 +11635,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
     //BBS: add project slice logic
     bool is_finished = !m_slice_all || (m_cur_slice_plate == (partplate_list.get_plate_count() - 1));
+    const bool was_exporting = exporting_status != ExportingStatus::NOT_EXPORTING;
+    const bool was_filament_map_reslice = reslice_for_filament_map;
+    reslice_for_filament_map = false;
 
     //BBS: slice .gcode.3mf file related logic, assign is_finished again
     bool only_has_gcode_need_preview = false;
@@ -11807,6 +11844,27 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     if (auto_reslice_after_cancel) {
         auto_reslice_after_cancel = false;
         schedule_auto_reslice_if_needed();
+    }
+
+    // A project that owns two different nozzles gives each material the settings of the nozzle it
+    // is mapped to. An automatic filament map can move a material to the other nozzle during
+    // slicing, after those settings were taken, so the G-code would print it with the other
+    // nozzle's limits (a 0.6 mm High Flow nozzle at a 0.2 mm nozzle's flow). Apply the map the slice
+    // chose and slice once more with the right settings.
+    PartPlate *sliced_plate = partplate_list.get_curr_plate();
+    if (evt.success() && is_finished && !m_slice_all && !was_exporting && sliced_plate != nullptr &&
+        sliced_plate->get_real_filament_map_mode(wxGetApp().preset_bundle->project_config) < fmmManual &&
+        mixed_nozzle_project_owned_pair(wxGetApp().preset_bundle->project_config).size() == 2) {
+        update_background_process(false);
+        if (!sliced_plate->is_slice_result_valid()) {
+            if (was_filament_map_reslice) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the filament map changed again on the second slice; not slicing a third time";
+            } else {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": the slice moved a material to the other nozzle; slicing again with that nozzle's settings";
+                reslice_for_filament_map = true;
+                q->CallAfter([this]() { q->reslice(); });
+            }
+        }
     }
 
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", exit.");

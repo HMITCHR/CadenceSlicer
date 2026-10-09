@@ -3811,6 +3811,20 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     this->placeholder_parser().set("initial_nozzle_id", first_nozzle_id_for_gcode_placeholder(group_result, (int) initial_extruder_id, extruder_id));
     this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(get_nozzle_diameters_by_nozzle_id(group_result.get())));
     this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionStrings(get_nozzle_volume_types_by_nozzle_id(group_result.get())));
+    // The printer's G-code indexes nozzle_diameter by filament (nozzle_diameter[initial_no_support_extruder], and
+    // [nozzle_diameter] for the current filament), which only matches the nozzle while filament ids and nozzles
+    // coincide. Under a mixed-nozzle mode a filament on the coarse nozzle would read the fine nozzle's diameter,
+    // so the placeholder holds each filament's own nozzle diameter. Off mode keeps the printer's vector.
+    if (is_mixed_nozzle_slicing_enabled(m_config)) {
+        const size_t filaments = m_config.filament_diameter.values.size();
+        std::vector<double> by_filament(filaments, 0.);
+        for (size_t filament = 0; filament < filaments; ++ filament) {
+            const std::optional<size_t> nozzle = physical_extruder_for_filament(m_config, unsigned(filament));
+            by_filament[filament] = m_config.nozzle_diameter.get_at(nozzle ? *nozzle : filament);
+        }
+        this->placeholder_parser().set("nozzle_diameter", new ConfigOptionFloats(by_filament));
+        this->placeholder_parser().set("nozzle_diameter_by_filament", true);
+    }
     //Orca: set the key for compatibilty, scalar values for the initial extruder (variant-aware)
     {
         size_t fi = get_filament_config_index(initial_extruder_id);

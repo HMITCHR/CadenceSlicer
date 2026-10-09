@@ -490,6 +490,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SingleChoiceDialog.hpp
     GUI/TestMode.cpp
     GUI/TestMode.hpp
+    GUI/TestModePrinter.cpp
+    GUI/TestModePrinter.hpp
     GUI/MixedNozzleSetupDialog.cpp
     GUI/MixedNozzleSetupDialog.hpp
     GUI/MixedNozzleNativeEntry.hpp

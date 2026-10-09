@@ -181,6 +181,24 @@ bool mixed_nozzle_support_on_coarse_nozzle(const PrintConfig &print_config, cons
     return std::isfinite(minimum) && minimum > object_config.layer_height.value + EPSILON;
 }
 
+coordf_t mixed_nozzle_raft_first_layer_height(const PrintConfig &print_config, const PrintObjectConfig &object_config)
+{
+    const coordf_t first_layer = print_config.initial_layer_print_height.value <= 0 ?
+        object_config.layer_height.value : print_config.initial_layer_print_height.value;
+    if (!is_mixed_nozzle_feature_split(print_config) || object_config.raft_layers.value <= 0)
+        return first_layer;
+    const int filament = object_config.raft_layers.value == 1 ?
+        object_config.support_interface_filament.value : object_config.support_filament.value;
+    const int idx_nozzle = resolved_support_filament_nozzle_idx(print_config, filament);
+    if (filament <= 0 || idx_nozzle <= 0 || size_t(idx_nozzle) > print_config.nozzle_diameter.values.size())
+        return first_layer;
+    const coordf_t minimum = resolved_min_layer_height(print_config, size_t(idx_nozzle - 1));
+    const coordf_t maximum = resolved_max_layer_height(print_config, size_t(idx_nozzle - 1));
+    if (!std::isfinite(minimum) || !std::isfinite(maximum) || minimum <= first_layer + EPSILON || maximum < minimum)
+        return first_layer;
+    return minimum;
+}
+
 SlicingParameters SlicingParameters::create_from_config(
     const PrintConfig               &print_config,
     const PrintObjectConfig         &object_config,
@@ -188,8 +206,8 @@ SlicingParameters SlicingParameters::create_from_config(
     const std::vector<unsigned int> &object_extruders,
     const Vec3d                     &object_shrinkage_compensation)
 {
-    coordf_t initial_layer_print_height                      = (print_config.initial_layer_print_height.value <= 0) ? 
-        object_config.layer_height.value : print_config.initial_layer_print_height.value;
+    // A raft whose bed layer the coarse nozzle lays starts at a height that nozzle can lay.
+    coordf_t initial_layer_print_height                      = mixed_nozzle_raft_first_layer_height(print_config, object_config);
 
     // Resolved once here and reused for every support-related nozzle read below, so support cannot
     // be sliced against one nozzle's limits and printed by another.

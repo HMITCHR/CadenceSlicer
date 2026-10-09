@@ -4,7 +4,8 @@
 // Scripted GUI test mode. Only CADENCE_TEST_SCRIPT turns it on: the app then skips network,
 // cloud, keychain and update start-up, runs the scenario steps through the same handlers the
 // user's clicks reach, writes a state dump and window captures per step to CADENCE_TEST_OUT, and
-// exits with a status code. Without the variable nothing here runs.
+// exits with a status code. A scenario can connect a pretend printer (TestModePrinter.hpp) to
+// test the printer sync. Without the variable nothing here runs.
 
 #include <nlohmann/json_fwd.hpp>
 #include <string>
@@ -12,6 +13,10 @@
 class wxMenu;
 class wxPoint;
 class wxWindow;
+
+namespace Slic3r {
+class MachineObject;
+}
 
 namespace Slic3r::GUI {
 
@@ -27,6 +32,9 @@ void start();
 int popup_menu(wxWindow &owner, wxMenu &menu, const wxPoint &at);
 // Each plate validation's result, in order, for the state dumps. Nothing outside test mode.
 void note_validation(const std::string &error);
+// The pretend printer a scenario connected (TestModePrinter.hpp), or null. Always null outside
+// test mode, so the device manager sees only real printers there.
+MachineObject *fake_printer();
 } // namespace TestMode
 
 // Sidebar controls live in Sidebar::priv, so this is implemented in Plater.cpp.

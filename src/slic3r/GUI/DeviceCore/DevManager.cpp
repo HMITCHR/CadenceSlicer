@@ -10,6 +10,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/TestMode.hpp"
 
 #include "libslic3r/Time.hpp"
 
@@ -617,6 +618,8 @@ namespace Slic3r
 
     MachineObject* DeviceManager::get_selected_machine()
     {
+        // The scripted test mode connects no printer; its scenarios may connect a pretend one.
+        if (GUI::TestMode::active()) return GUI::TestMode::fake_printer();
         if (selected_machine.empty()) return nullptr;
 
         MachineObject* obj = get_user_machine(selected_machine, GUI::wxGetApp().get_printer_cloud_provider());

@@ -1598,6 +1598,19 @@ void mixed_nozzle_band_support_body(
         if (layer != nullptr && ! layer->polygons.empty())
             base_interface_z.push_back(layer->print_z);
 
+    // Support body beside the raft's contact layer is as thin as that layer. Where the coarse nozzle cannot lay
+    // that, the interface nozzle lays it with the contact, in the body filament it has. The raft's own levels
+    // below are laid by generate_support_toolpaths() with the same rule.
+    if (slicing_params.has_raft())
+        for (SupportGeneratorLayer *layer : base_layers)
+            if (layer != nullptr && ! layer->polygons.empty() && layer->height < body_min - EPSILON &&
+                layer->print_z > slicing_params.raft_interface_top_z + EPSILON &&
+                layer->print_z < slicing_params.raft_contact_top_z + EPSILON) {
+                layer->fine_body_polygons = union_(layer->polygons);
+                layer->fine_body_height   = layer->height;
+                layer->polygons.clear();
+            }
+
     // Runs of base layers that stack without a gap, above the raft.
     std::vector<std::vector<SupportGeneratorLayer*>> runs;
     for (SupportGeneratorLayer *layer : base_layers) {
@@ -2211,11 +2224,18 @@ void generate_support_toolpaths(
                     ((raft_layer.contact_polygons == nullptr) ? Polygons() : *raft_layer.contact_polygons);
                 // Trees may cut through the raft layers down to a print bed.
                 Flow flow(float(support_params.support_material_flow.width()), float(raft_layer.height), support_params.support_material_flow.nozzle_diameter());
+                // Under a banded body the support columns through the raft's interface levels are as thin as those
+                // levels, which the interface nozzle lays. Where the coarse nozzle cannot lay that, the interface
+                // nozzle lays them too, in the body filament it has (PrintObject::assign_interface_nozzle_body_filament()).
+                const bool body_on_interface_nozzle = support_params.mixed_nozzle_banded_body &&
+                    raft_layer.height < support_params.mixed_nozzle_body_min_height - EPSILON;
+                if (body_on_interface_nozzle)
+                    flow = support_params.mixed_nozzle_fine_body_flow.with_height(float(raft_layer.height));
                 assert(!raft_layer.bridging);
                 if (! to_infill_polygons.empty()) {
                     Fill *filler = filler_support.get();
                     filler->angle = support_params.raft_angle_base;
-                    filler->spacing = support_params.support_material_flow.spacing();
+                    filler->spacing = body_on_interface_nozzle ? flow.spacing() : support_params.support_material_flow.spacing();
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
                     fill_expolygons_with_sheath_generate_paths(
                         // Destination
@@ -2230,6 +2250,8 @@ void generate_support_toolpaths(
                 }
                 if (! tree_polygons.empty())
                     tree_supports_generate_paths(support_layer.support_fills.entities, tree_polygons, flow, support_params);
+                if (body_on_interface_nozzle && ! support_layer.support_fills.entities.empty())
+                    support_layer.base_on_interface_nozzle = true;
             }
 
             Fill *filler = filler_interface.get();

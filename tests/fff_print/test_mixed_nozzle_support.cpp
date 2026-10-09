@@ -2477,16 +2477,195 @@ TEST_CASE("A plain object on a Body Split plate lays its coarse support at the c
     CHECK(report.empty());
 }
 
-TEST_CASE("A raft with the support base on the coarse nozzle is refused", "[TestRebuild][Support]")
+namespace {
+// What a coarse raft case is made of: the support filaments' placement, the support style and the raft layers.
+struct RaftCase {
+    CoarseNozzle   nozzles;
+    SupportCase    support;
+    FilamentCase   filaments;
+    int            raft_layers = 2;
+    bool           support_on = true;
+    bool           skirt = false;
+    // No top Z distance, as stock suggests for a dissimilar interface: the part stands right on the raft.
+    bool           zero_gap = false;
+};
+
+std::string raft_case_name(const RaftCase &rc)
 {
-    // The raft's first layer is the print's first layer, which the coarse nozzle must not lay.
-    for (const Mode mode : {Mode::Feature, Mode::Body})
-        for (const SupportPlacement where : {SupportPlacement::PetgOnFine, SupportPlacement::AllCoarse}) {
-            const std::string outcome = coarse_base_case(mode, CoarseNozzle{0.6, 0.12, 0.42}, k_normal, where, 2);
-            INFO(outcome);
-            CHECK(outcome.find(mode == Mode::Feature ? "refused: [SRL-F13]" : "refused: [SRL-A52]") != std::string::npos);
-            CHECK(outcome.find("Support/raft base") != std::string::npos);
+    std::ostringstream out;
+    out << "0.2/" << rc.nozzles.coarse << " / " << (rc.support_on ? rc.support.name : "no support") << " / "
+        << rc.filaments.name << " / raft " << rc.raft_layers << (rc.skirt ? " / skirt" : "") << (rc.zero_gap ? " / no gap" : "");
+    return out.str();
+}
+
+// Slices the L part (support from the bed under its arm) on a raft whose base is PLA on the coarse nozzle, under
+// Feature Split, 0.10 / 0.40 with a 0.10 first layer, and returns what is wrong, or an empty string.
+std::string coarse_raft_case(const RaftCase &rc)
+{
+    std::ostringstream what;
+    what << raft_case_name(rc) << ": ";
+    const double fine = 0.10;
+    DynamicPrintConfig config = h2d_support_config(Mode::Feature, fine, 0.40, 4, 0., rc.support, rc.filaments);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, rc.nozzles.coarse});
+    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, rc.nozzles.coarse});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, rc.nozzles.coarse_min});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, rc.nozzles.coarse_max});
+    config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
+    config.set_key_value("support_top_z_distance", new ConfigOptionFloat(rc.zero_gap ? 0. : 0.1));
+    config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.1));
+    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
+    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    config.set_key_value("raft_layers", new ConfigOptionInt(rc.raft_layers));
+    config.set_key_value("enable_support", new ConfigOptionBool(rc.support_on));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(rc.skirt ? 2 : 0));
+    set_automatic_tower(config);
+    fill_per_filament_values(config);
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nM1020 S[initial_extruder]\n"));
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    ModelObject *object = model.add_object();
+    object->name = "coarse-raft-part";
+    object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->instances.front()->set_offset(Vec3d(80., 80., 0.));
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+    CadenceTest::Facts facts;
+    try {
+        facts = CadenceTest::slice(print);
+    } catch (const std::exception &error) {
+        return what.str() + "threw " + error.what();
+    }
+    if (! facts.refusal.string.empty())
+        return what.str() + "refused: " + facts.refusal.string;
+    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR")) {
+        std::string name = raft_case_name(rc);
+        std::replace_if(name.begin(), name.end(), [](char c) { return ! std::isalnum((unsigned char)c) && c != '.'; }, '_');
+        std::ofstream(std::string(dir) + "/raft-" + name + ".gcode") << facts.gcode;
+    }
+    const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
+    const double nozzle[2]  = {0.2, rc.nozzles.coarse};
+    const double minimum[2] = {0.04, rc.nozzles.coarse_min};
+    const double maximum[2] = {0.14, rc.nozzles.coarse_max};
+    // The raft's bed layer is laid by the base filament, or by the interface filament when the raft is one layer,
+    // at a height its nozzle can lay: the first layer's, or that nozzle's thinnest when that is thicker.
+    const int    base_tool  = k_filament_map[(rc.raft_layers == 1 ? rc.filaments.interface_filament : rc.filaments.base) - 1] - 1;
+    const int    petg       = std::string(rc.filaments.interface_type) == "PETG" ? rc.filaments.interface_filament - 1 : -1;
+    const double bed_z = std::max(fine, minimum[base_tool]);
+    double lowest = 1e9, lowest_tower = 1e9, first_model_bottom = 1e9;
+    size_t bed_roads = 0, bed_wrong = 0, thin = 0, petg_body = 0, petg_low = 0, contact_roads = 0, contact_wrong = 0;
+    size_t skirt_roads = 0, skirt_wrong = 0;
+    std::set<int> bed_nozzles;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude || move.delta_extruder <= 0.f)
+            continue;
+        const double z = double(move.position.z());
+        const int tool = k_filament_map[move.extruder_id] - 1;
+        lowest = std::min(lowest, z);
+        if (move.extrusion_role == erWipeTower)
+            lowest_tower = std::min(lowest_tower, z);
+        if (CadenceTest::model_road(move))
+            first_model_bottom = std::min(first_model_bottom, z - double(move.height));
+        if (move.extrusion_role == erSkirt) {
+            ++skirt_roads;
+            skirt_wrong += tool != base_tool || double(move.width) < nozzle[tool] - 1e-3;
         }
+        if (z < bed_z + 1e-3) {
+            bed_nozzles.insert(tool);
+            if (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface) {
+                ++bed_roads;
+                if (tool != base_tool || std::abs(double(move.height) - bed_z) > 1e-3 || double(move.width) < nozzle[tool] - 1e-3)
+                    ++bed_wrong;
+            }
+        }
+        // Every road, the tower's included, is a height its own nozzle can lay. The tower's first layer is held to
+        // that too: a raised first layer is one the nozzle that lays it can lay.
+        if (double(move.height) < minimum[tool] - 1e-3 || double(move.height) > maximum[tool] + 1e-3) {
+            if (thin < 3)
+                what << "[" << move.height << " mm road on the " << nozzle[tool] << " at Z " << z << ", role " << int(move.extrusion_role) << "] ";
+            ++thin;
+        }
+        if (int(move.extruder_id) == petg) {
+            petg_body += move.extrusion_role == erSupportMaterial;
+            petg_low  += z < slicing.raft_base_top_z + 1e-3;
+        }
+        if (std::abs(z - slicing.raft_contact_top_z) < 1e-3 && move.extrusion_role == erSupportMaterialInterface) {
+            ++contact_roads;
+            contact_wrong += k_filament_map[move.extruder_id] != k_filament_map[rc.filaments.interface_filament - 1];
+        }
+    }
+    what << "first layer Z " << lowest << ", tower from Z " << lowest_tower << ", raft top " << slicing.raft_contact_top_z
+         << ", part from Z " << first_model_bottom << ", raft bed roads " << bed_roads;
+    bool ok = true;
+    if (std::abs(lowest - bed_z) > 1e-3 || bed_roads == 0 || bed_wrong != 0) {
+        what << ", raft bed layer not laid by the coarse nozzle at Z " << bed_z << " (" << bed_wrong << " roads otherwise)";
+        ok = false;
+    }
+    if (bed_nozzles.size() != 1) {
+        what << ", both nozzles on layer 1";
+        ok = false;
+    }
+    // A raised first layer is said, as a warning on First layer height.
+    const bool warned = std::any_of(facts.validation_warnings.begin(), facts.validation_warnings.end(), [](const StringObjectException &w) {
+        return w.opt_key == "initial_layer_print_height" && w.string.find("The raft's first layer prints at") != std::string::npos;
+    });
+    if (warned != (bed_z > fine + 1e-3)) {
+        what << (warned ? ", warns of a raised first layer" : ", no warning of the raised first layer");
+        ok = false;
+    }
+    if (rc.skirt && (skirt_roads == 0 || skirt_wrong != 0)) {
+        what << ", " << skirt_wrong << " of " << skirt_roads << " skirt roads not laid by the raft's nozzle at its width";
+        ok = false;
+    }
+    if (std::abs(lowest_tower - lowest) > 1e-3) {
+        what << ", tower not on the first printed layer";
+        ok = false;
+    }
+    if (thin != 0) {
+        what << ", " << thin << " roads outside their nozzle's layer heights";
+        ok = false;
+    }
+    if (std::abs(first_model_bottom - slicing.raft_contact_top_z - slicing.gap_raft_object) > 1e-3) {
+        what << ", part does not stand " << slicing.gap_raft_object << " mm above the raft";
+        ok = false;
+    }
+    if (rc.raft_layers > 1 && (contact_roads == 0 || contact_wrong != 0)) {
+        what << ", raft contact layer not on the interface's nozzle (" << contact_wrong << " of " << contact_roads << ")";
+        ok = false;
+    }
+    if (petg_body != 0 || petg_low != 0) {
+        what << ", " << petg_body << " PETG body roads, " << petg_low << " PETG roads in the raft base";
+        ok = false;
+    }
+    return ok ? std::string() : what.str();
+}
+} // namespace
+
+TEST_CASE("A raft with its base on the coarse nozzle starts on the bed at a height that nozzle lays", "[TestRebuild][Support][Raft]")
+{
+    const FilamentCase petg{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
+    const FilamentCase pla{"coarse PLA base, PLA interface on fine", 2, 3, "PLA"};
+    const FilamentCase all_coarse{"PLA base and interface on coarse", 2, 2};
+    std::vector<std::string> failures;
+    for (const CoarseNozzle &nozzles : {CoarseNozzle{0.6, 0.12, 0.42}, CoarseNozzle{0.8, 0.16, 0.56}}) {
+        for (const SupportCase &support : {k_normal, k_organic})
+            for (const FilamentCase &filaments : {petg, pla})
+                for (const int raft_layers : {2, 3, 5})
+                    failures.push_back(coarse_raft_case(RaftCase{nozzles, support, filaments, raft_layers}));
+        // A raft without support, a one-layer raft (its bed layer is the interface's), both support filaments on the
+        // coarse nozzle, and a skirt, which goes with the raft's bed layer.
+        failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 3, false}));
+        failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 1}));
+        failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, all_coarse, 3}));
+        failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 2, true, true}));
+        failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 4, true, false, true}));
+    }
+    const std::string report = failure_report(failures);
+    INFO(report);
+    CHECK(report.empty());
 }
 
 TEST_CASE("Tree support with the support base on the coarse nozzle is refused unless it is Organic with a finer interface", "[TestRebuild][Support]")
@@ -2509,10 +2688,6 @@ TEST_CASE("Tree support with the support base on the coarse nozzle is refused un
         CHECK(shared.find(code) != std::string::npos);
         CHECK(shared.find("Tree support cannot have its interface on the 0.6 mm nozzle with its base") != std::string::npos);
         CHECK(shared.find("Normal support") != std::string::npos);
-        // A raft under an Organic tree on a coarse base stays refused.
-        const std::string raft = coarse_base_case(mode, nozzles, k_organic, SupportPlacement::PetgOnFine, 2);
-        INFO(raft);
-        CHECK(raft.find(mode == Mode::Feature ? "refused: [SRL-F13]" : "refused: [SRL-A52]") != std::string::npos);
         // Organic with the interface on the fine nozzle slices, and so do Snug and Grid, which a tree draws as Organic.
         for (const SupportCase &support : {k_organic, SupportCase{"tree snug", stTreeAuto, smsSnug}, SupportCase{"tree grid", stTreeAuto, smsGrid}}) {
             const std::string organic = coarse_base_case(mode, nozzles, support, SupportPlacement::PetgOnFine);
@@ -3223,4 +3398,198 @@ TEST_CASE("A coarse support layer thinner than the coarse nozzle's minimum goes 
     with_raft.raft_contact_top_z = 0.3;
     CHECK(mixed_nozzle_thin_coarse_body_to_fine(raft_layers, 0.16, with_raft) == 0);
     CHECK(! raft.polygons.empty());
+}
+
+
+TEST_CASE("A raft with its base on the coarse nozzle is refused where it cannot be laid, saying why", "[TestRebuild][Support][Raft]")
+{
+    const CoarseNozzle nozzles{0.6, 0.12, 0.42};
+    // On a Body Split plate the first layer is shared with the Body Split objects, which cannot follow a raised one.
+    const std::string plain = coarse_base_case(Mode::Body, nozzles, k_normal, SupportPlacement::PetgOnFine, 2);
+    INFO(plain);
+    CHECK(plain.find("refused: [SRL-A52] On a Body Split plate a raft cannot have its base on the 0.6 mm nozzle") != std::string::npos);
+    CHECK(plain.find("use Feature Split for this plate") != std::string::npos);
+    // Slim, Strong and Hybrid trees keep their own refusal on a raft.
+    const std::string slim = coarse_base_case(Mode::Feature, nozzles, k_slim, SupportPlacement::PetgOnFine, 2);
+    INFO(slim);
+    CHECK(slim.find("refused: [SRL-F14] Slim, Strong and Hybrid tree support cannot have its base on the 0.6 mm nozzle") != std::string::npos);
+
+    // Feature Split: one object's raft starts at the 0.6's 0.12 mm, the other's (base on the fine nozzle) at 0.10.
+    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"coarse PLA base", 2, 3});
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    config.set_key_value("raft_layers", new ConfigOptionInt(2));
+    set_automatic_tower(config);
+    fill_per_filament_values(config);
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    for (int i = 0; i < 2; ++ i) {
+        ModelObject *object = model.add_object();
+        object->name = i == 0 ? "coarse-raft" : "fine-raft";
+        object->add_volume(make_cube(10., 10., 10.), ModelVolumeType::MODEL_PART, false);
+        if (i == 1)
+            object->config.set_key_value("support_filament", new ConfigOptionInt(1));
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(60. + 40. * i, 60., 0.));
+        object->ensure_on_bed();
+    }
+    print.apply(model, config);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException refused = print.validate(&warnings);
+    INFO(refused.string);
+    // A plate refused for its raised first layer is not also warned about it.
+    CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &w) {
+        return w.string.find("The raft's first layer prints at") != std::string::npos; }));
+    CHECK(refused.string.find("[SRL-F16] The raft under \"coarse-raft\" starts on the bed at 0.12 mm") != std::string::npos);
+    CHECK(refused.string.find("\"fine-raft\" would start at 0.1 mm") != std::string::npos);
+    CHECK(refused.opt_key == "raft_layers");
+    // With a 0.12 mm first layer nothing is raised and both slice-check fine.
+    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.12));
+    print.apply(model, config);
+    const StringObjectException accepted = print.validate();
+    INFO(accepted.string);
+    CHECK(accepted.string.find("SRL-F16") == std::string::npos);
+}
+
+namespace {
+// The L part on a raft, Feature Split 0.2/0.6, 0.10 / 0.40, PETG interface on the 0.2.
+DynamicPrintConfig raft_reslice_config(int support_filament)
+{
+    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"PETG interface", support_filament, 3, "PETG"});
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.1));
+    config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.1));
+    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
+    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    config.set_key_value("raft_layers", new ConfigOptionInt(5));
+    set_automatic_tower(config);
+    fill_per_filament_values(config);
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nM1020 S[initial_extruder]\n"));
+    return config;
+}
+
+// Where the part's first road starts (bottom of its lowest model road) against the raft top plus gap, after a
+// slice of this print as it stands; empty when they agree.
+std::string part_on_raft(Print &print, const std::string &what)
+{
+    const CadenceTest::Facts facts = CadenceTest::slice(print);
+    if (! facts.refusal.string.empty())
+        return what + ": refused: " + facts.refusal.string;
+    const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
+    double part = 1e9, lowest = 1e9;
+    for (const Move &move : facts.moves)
+        if (move.type == EMoveType::Extrude && move.delta_extruder > 0.f) {
+            lowest = std::min(lowest, double(move.position.z()));
+            if (CadenceTest::model_road(move))
+                part = std::min(part, double(move.position.z()) - double(move.height));
+        }
+    std::ostringstream out;
+    if (std::abs(part - slicing.raft_contact_top_z - slicing.gap_raft_object) > 1e-3 ||
+        std::abs(lowest - slicing.first_print_layer_height) > 1e-3)
+        out << what << ": part from Z " << part << " on a raft whose top is " << slicing.raft_contact_top_z << " (gap "
+            << slicing.gap_raft_object << "), first layer at Z " << lowest << " for " << slicing.first_print_layer_height;
+    return out.str();
+}
+} // namespace
+
+TEST_CASE("Changing what the raft is laid with slices the part again at the raft's new height", "[TestRebuild][Support][Raft]")
+{
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    ModelObject *object = model.add_object();
+    object->name = "raft-reslice";
+    object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->instances.front()->set_offset(Vec3d(80., 80., 0.));
+    object->ensure_on_bed();
+    std::vector<std::string> failures;
+    // Support/raft base on the 0.2 (filament 1), then on the 0.6 (filament 2), then back: the raft's first layer
+    // and base levels change height each time, and the part has to follow.
+    for (const int base : {1, 2, 1}) {
+        print.apply(model, raft_reslice_config(base));
+        print.set_status_silent();
+        failures.push_back(part_on_raft(print, "base on filament " + std::to_string(base)));
+    }
+    // The 0.6's layer height limits set the raft's first layer and base levels too.
+    DynamicPrintConfig config = raft_reslice_config(2);
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.16});
+    print.apply(model, config);
+    failures.push_back(part_on_raft(print, "0.6 minimum 0.16"));
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.40});
+    print.apply(model, config);
+    failures.push_back(part_on_raft(print, "0.6 maximum 0.40"));
+    const std::string report = failure_report(failures);
+    INFO(report);
+    CHECK(report.empty());
+}
+
+TEST_CASE("The printer's G-code reads the nozzle diameter of the filament's own nozzle", "[TestRebuild][Support][Raft]")
+{
+    // A raft on the 0.6 makes filament 2 (on the 0.6) the first one; filament 3 (PETG) is on the 0.2.
+    const std::string start  = "; ND_IDX {nozzle_diameter[initial_no_support_extruder]}\n; ND_LEGACY [nozzle_diameter]\n"
+                               "; ND_BARE {nozzle_diameter}\nG28\nM1020 S[initial_extruder]\n";
+    const std::string change = "; TC_NEXT {nozzle_diameter[next_extruder]} TC_LEGACY [nozzle_diameter] TC_BARE {nozzle_diameter}\n";
+    const auto lines = [](const std::string &gcode, const std::string &tag) {
+        std::vector<std::string> out;
+        std::istringstream in(gcode);
+        for (std::string line; std::getline(in, line);)
+            if (line.rfind("; " + tag, 0) == 0)
+                out.push_back(line);
+        return out;
+    };
+    for (const bool mode : {true, false}) {
+        DynamicPrintConfig config = raft_reslice_config(2);
+        if (! mode)
+            config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::Off));
+        config.set_key_value("machine_start_gcode", new ConfigOptionString(start));
+        config.set_key_value("change_filament_gcode", new ConfigOptionString(change));
+        Model model;
+        Print print;
+        print.is_BBL_printer() = true;
+        ModelObject *object = model.add_object();
+        object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+        const CadenceTest::Facts facts = CadenceTest::slice(print);
+        INFO(facts.refusal.string);
+        REQUIRE(facts.refusal.string.empty());
+        const std::vector<std::string> idx = lines(facts.gcode, "ND_IDX"), legacy = lines(facts.gcode, "ND_LEGACY"),
+                                       bare = lines(facts.gcode, "ND_BARE"), change_lines = lines(facts.gcode, "TC_NEXT");
+        REQUIRE(idx.size() == 1);
+        REQUIRE(legacy.size() == 1);
+        REQUIRE(bare.size() == 1);
+        REQUIRE(! change_lines.empty());
+        if (mode) {
+            // The first filament is on the 0.6, and every change names its own nozzle.
+            CHECK(idx.front() == "; ND_IDX 0.6");
+            CHECK(legacy.front() == "; ND_LEGACY 0.6");
+            CHECK(bare.front() == "; ND_BARE 0.6");
+            size_t to_fine = 0, to_coarse = 0;
+            for (const std::string &line : change_lines) {
+                INFO(line);
+                const bool fine = line == "; TC_NEXT 0.2 TC_LEGACY 0.2 TC_BARE 0.2";
+                const bool coarse = line == "; TC_NEXT 0.6 TC_LEGACY 0.6 TC_BARE 0.6";
+                CHECK((fine || coarse));
+                to_fine += fine;
+                to_coarse += coarse;
+            }
+            CHECK(to_fine > 0);
+            CHECK(to_coarse > 0);
+        } else {
+            // Off mode keeps the printer's own reading: the nozzle vector indexed by filament, as stock does.
+            CHECK(idx.front() == "; ND_IDX 0.6");
+            CHECK(legacy.front() == "; ND_LEGACY 0.6");
+        }
+    }
 }

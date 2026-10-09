@@ -76,7 +76,7 @@ DynamicPrintConfig body_raft_config()
 {
     DynamicPrintConfig config = coarse_base_support_config(MixedNozzleSlicingMode::BodySplit);
     config.set_key_value("raft_layers", new ConfigOptionInt(4));
-    // A raft's base is on the fine nozzle: the coarse one may not lay the print's first layer (SRL-A52).
+    // The raft's base on the fine nozzle: on a Body Split plate a coarse raft base is refused (SRL-A52).
     config.set_key_value("support_filament", new ConfigOptionInt(1));
     config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.35));
     config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.25));

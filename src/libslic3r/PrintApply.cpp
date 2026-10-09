@@ -1418,6 +1418,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         update_apply_status(false);
         //BBS: add more logs
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", got print_diff %1%, object_diff %2%, region_diff %3%, set status to APPLY_STATUS_CHANGED")%print_diff.size() %object_diff.size() %region_diff.size();
+        // Which keys changed, so an unexpected re-slice can be traced to them.
+        std::string changed;
+        for (const t_config_option_key &key : print_diff)
+            changed += (changed.empty() ? "" : ", ") + key;
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": print keys changed: " << changed;
     }
 
     // Grab the lock for the Print / PrintObject milestones.

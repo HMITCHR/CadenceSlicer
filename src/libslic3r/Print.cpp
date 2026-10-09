@@ -819,6 +819,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver &new_c
             osteps.emplace_back(posSimplifyInfill);
             osteps.emplace_back(posSimplifySupportPath);
             steps.emplace_back(psSkirtBrim);
+            // Under a mode the nozzles' layer height limits decide the object's own layers (the cadence and
+            // the support's limits in SlicingParameters::create_from_config()), and a raft's levels and first
+            // layer, so the object is sliced again.
+            if ((opt_key == "min_layer_height" || opt_key == "max_layer_height") && is_mixed_nozzle_slicing_enabled(m_config))
+                osteps.emplace_back(posSlice);
         }
         else if (opt_key == "z_hop_types") {
             osteps.emplace_back(posDetectOverhangsForLift);
@@ -1892,14 +1897,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     error.opt_key = "support_interface_filament";
                     return error;
                 }
-                if (object->has_raft() &&
-                    base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON) {
-                    StringObjectException error;
-                    error.string  = Slic3r::format("[SRL-F13] The raft would lay the print's first layer with the %1% mm nozzle, and the first layer belongs to the fine nozzle. Put Support/raft base on a filament on the fine nozzle, or set Raft layers to 0.", base_dmr);
-                    error.object  = object->model_object();
-                    error.opt_key = "support_filament";
-                    return error;
-                }
                 // Tree styles and filaments the nozzles can lay the support with (mixed_nozzle_support_refusal()).
                 if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
                     ! refusal.why.empty()) {
@@ -1929,6 +1926,37 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                             return error;
                         }
                 }
+            }
+        }
+        // A raft whose bed layer the coarse nozzle lays starts at that nozzle's thinnest layer when the first layer
+        // is thinner (mixed_nozzle_raft_first_layer_height()), and the first layer is one for the whole plate.
+        {
+            const PrintObject *raised = nullptr;
+            for (const PrintObject *object : m_objects)
+                if (mixed_nozzle_raft_first_layer_height(m_config, object->config()) > m_config.initial_layer_print_height.value + EPSILON)
+                    raised = object;
+            if (raised != nullptr) {
+                const double height = mixed_nozzle_raft_first_layer_height(m_config, raised->config());
+                for (const PrintObject *object : m_objects)
+                    if (std::abs(mixed_nozzle_raft_first_layer_height(m_config, object->config()) - height) > EPSILON) {
+                        StringObjectException error;
+                        error.string  = Slic3r::format("[SRL-F16] The raft under \"%1%\" starts on the bed at %2% mm, the thinnest layer the nozzle "
+                                                       "that lays it can print, and that makes the first layer %2% mm for the whole plate. \"%3%\" "
+                                                       "would start at %4% mm. Give both objects the same raft and Support/raft base, or set First "
+                                                       "layer height to %2% mm.",
+                                                       raised->model_object()->name, height, object->model_object()->name,
+                                                       mixed_nozzle_raft_first_layer_height(m_config, object->config()));
+                        error.object  = object->model_object();
+                        error.opt_key = "raft_layers";
+                        return error;
+                    }
+                // Said only once nothing refuses the plate for it.
+                const int    nozzle = resolved_support_filament_nozzle_idx(m_config, raised->config().raft_layers.value == 1 ?
+                    raised->config().support_interface_filament.value : raised->config().support_filament.value);
+                warn(Slic3r::format("The raft's first layer prints at %1% mm instead of the %2% mm First layer height: the %3% mm nozzle "
+                                    "lays the raft's base and prints no thinner.",
+                                    height, m_config.initial_layer_print_height.value, m_config.nozzle_diameter.get_at(size_t(std::max(nozzle, 1) - 1))),
+                     "initial_layer_print_height", raised->model_object());
             }
         }
         const bool regular_skirt  = m_config.skirt_loops.value > 0 && this->has_skirt();
@@ -2295,9 +2323,11 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 if (interface_dmr > base_dmr)
                     return reject(object, "SRL-A29", "support_interface_filament",
                                   "The support interface is on a larger nozzle than the support base. The interface is what touches the model, so set Support/raft interface to Default or to a filament on the base's nozzle or a finer one.");
+                // Feature Split starts such a raft on the bed at the coarse nozzle's thinnest layer; a Body Split plate
+                // shares its first layer with the Body Split objects, which cannot follow.
                 if (object->has_raft() && base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
                     return reject(object, "SRL-A52", "support_filament", Slic3r::format(
-                        "The raft would lay the print's first layer with the %1% mm nozzle, and the first layer belongs to the fine nozzle. Put Support/raft base on a filament on the fine nozzle, or set Raft layers to 0.", base_dmr));
+                        "On a Body Split plate a raft cannot have its base on the %1% mm nozzle. Put Support/raft base on a filament on the fine nozzle, set Raft layers to 0, or use Feature Split for this plate.", base_dmr));
                 if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
                     ! refusal.why.empty())
                     return reject(object, refusal.tree ? "SRL-A53" : "SRL-A55", refusal.opt_key, refusal.why);
@@ -2741,9 +2771,6 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             if (interface_dmr > base_dmr)
                 return reject(object, "SRL-A29", "support_interface_filament",
                               "The support interface is on a larger nozzle than the support base. The interface is what touches the model, so set Support/raft interface to Default or to a filament on the base's nozzle or a finer one.");
-            if (object->has_raft() && base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
-                return reject(object, "SRL-A52", "support_filament", Slic3r::format(
-                    "The raft would lay the print's first layer with the %1% mm nozzle, and the first layer belongs to the fine nozzle. Put Support/raft base on a filament on the fine nozzle, or set Raft layers to 0.", base_dmr));
             // Same tree support admission as the Feature Split block above.
             if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
                 ! refusal.why.empty())
@@ -3627,7 +3654,11 @@ BoundingBox Print::total_bounding_box() const
 
 double Print::skirt_first_layer_height() const
 {
-    return m_config.initial_layer_print_height.value;
+    // A raft the coarse nozzle starts on the bed raises the first layer (mixed_nozzle_raft_first_layer_height()).
+    double height = m_config.initial_layer_print_height.value;
+    for (const PrintObject *object : m_objects)
+        height = std::max(height, mixed_nozzle_raft_first_layer_height(m_config, object->config()));
+    return height;
 }
 
 // Feature Split owner of brim and skirt: the first-layer outer-wall (fine shell) tool. nullopt
@@ -3689,8 +3720,23 @@ Flow Print::skirt_flow() const
         m_objects.empty() ? 0 : m_objects.front()->config().support_filament - 1);
     // Under Feature Split the skirt belongs to the first-layer outer-wall tool, not the support
     // filament's tool.
-    if (const std::optional<MixedNozzleResolvedTool> tool = this->feature_split_adhesion_tool())
+    if (const std::optional<MixedNozzleResolvedTool> tool = this->feature_split_adhesion_tool()) {
         nozzle = float(tool->nozzle_diameter);
+        // With every object on a raft, layer 1 is the raft's and the skirt goes with the filament that lays the
+        // raft's bed layer (GCode.cpp takes the first filament of the layer when the outer-wall tool is not on
+        // it). When that filament is on another nozzle the road is that nozzle's first-layer road.
+        if (std::all_of(m_objects.begin(), m_objects.end(), [](const PrintObject *object) { return object->has_raft(); })) {
+            const PrintObject *object   = m_objects.front();
+            const int          filament = object->config().raft_layers.value == 1 ? object->config().support_interface_filament.value :
+                                                                                    object->config().support_filament.value;
+            const int          raft_nozzle = resolved_support_filament_nozzle_idx(m_config, filament);
+            if (filament > 0 && raft_nozzle > 0 && size_t(raft_nozzle) <= m_config.nozzle_diameter.values.size() &&
+                std::abs(m_config.nozzle_diameter.get_at(size_t(raft_nozzle - 1)) - tool->nozzle_diameter) > EPSILON) {
+                const Flow raft = support_material_1st_layer_flow(object, float(this->skirt_first_layer_height()), filament);
+                return Flow(raft.width(), raft.height(), raft.nozzle_diameter());
+            }
+        }
+    }
 
     return Flow::new_from_config_width(frPerimeter,
                                        // Flow::new_from_config_width takes care of the percent to value substitution

@@ -69,6 +69,13 @@ std::optional<unsigned int> mixed_nozzle_interface_nozzle_body_filament(const Pr
 bool mixed_nozzle_support_on_coarse_nozzle(const PrintConfig &print_config, const PrintObjectConfig &object_config,
                                            bool synchronized_support);
 
+// The height of a raft's bed layer. A raft's bed layer is the print's first layer, laid by the support
+// base filament (the interface filament when the raft is one layer). Under Feature Split, when that
+// filament's nozzle cannot lay a layer as thin as initial_layer_print_height, the raft starts on the bed
+// at that nozzle's thinnest layer instead, and the whole first layer with it. Otherwise, and without a
+// raft or a mode, initial_layer_print_height (the object's layer height when that is unset).
+coordf_t mixed_nozzle_raft_first_layer_height(const PrintConfig &print_config, const PrintObjectConfig &object_config);
+
 // Parameters to guide object slicing and support generation.
 // The slicing parameters account for a raft and whether the 1st object layer is printed with a normal or a bridging flow
 // (using a normal flow over a soluble support, using a bridging flow over a non-soluble support).

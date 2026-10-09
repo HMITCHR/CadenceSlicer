@@ -18,12 +18,17 @@
 #include <wx/timer.h>
 
 #include "slic3r/GUI/DeviceManager.hpp"
+#include "slic3r/GUI/DeviceCore/DevExtruderSystem.h"
 #include "slic3r/GUI/DeviceCore/DevNozzleSystem.h"
+#include "slic3r/GUI/DeviceCore/DevUtil.h"
 #include "slic3r/GUI/ProjectNozzleFlowState.hpp"
+#include "slic3r/GUI/TestModePrinter.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <optional>
+#include <string>
 #include <vector>
 
 using json = nlohmann::json;
@@ -103,4 +108,80 @@ TEST_CASE("A printer sync offers the filament sync before setup opens", "[TestRe
     CHECK_FALSE(sync_filaments_before_setup(true, false, false));
     // One sync asks once, also when the project pair and the nozzle prompt both lead to setup.
     CHECK_FALSE(sync_filaments_before_setup(true, true, true));
+}
+
+TEST_CASE("The test mode printer reports its nozzles and AMS as an H2D does", "[TestRebuild][DeviceSync][TestMode]")
+{
+    std::string error;
+    const json spec = json::parse(R"({
+        "left":  { "diameter": 0.2, "flow": "Standard" },
+        "right": { "diameter": 0.6, "flow": "High Flow" },
+        "ams": [ { "extruder": "left", "trays": [
+            { "type": "PLA", "color": "FFFFFFFF", "filament_id": "GFA00" },
+            { "type": "PETG", "color": "000000FF", "filament_id": "GFG02" },
+            {} ] } ]
+    })");
+    const json reports = TestMode::fake_printer_reports(spec, error);
+    REQUIRE(error.empty());
+    REQUIRE(reports.size() == 2);
+    CHECK(reports[0]["info"]["command"] == "get_version");
+    const json &print = reports[1]["print"];
+    CHECK(print["command"] == "push_status");
+
+    // The device block goes through the same parsers a real report does.
+    MachineObject obj(nullptr, nullptr, "test", "test_dev", "");
+    DevNozzleSystemParser::ParseV2_0(print["device"], obj.GetNozzleSystem());
+    ExtderSystemParser::ParseV2_0(print["device"]["extruder"], obj.GetExtderSystem());
+    REQUIRE(obj.GetExtderSystem()->GetTotalExtderCount() == 2);
+    // Device extruder 0 is the right nozzle.
+    CHECK_THAT(obj.GetExtderSystem()->GetNozzleDiameter(0), Catch::Matchers::WithinAbs(0.6, 1e-6));
+    CHECK(obj.GetExtderSystem()->GetNozzleFlowType(0) == NozzleFlowType::H_FLOW);
+    CHECK_THAT(obj.GetExtderSystem()->GetNozzleDiameter(1), Catch::Matchers::WithinAbs(0.2, 1e-6));
+    CHECK(obj.GetExtderSystem()->GetNozzleFlowType(1) == NozzleFlowType::S_FLOW);
+
+    // What a sync of that report writes, in config order: left Standard, right High Flow.
+    std::vector<std::optional<NozzleVolumeType>> flows;
+    for (int device = 0; device < 2; ++device)
+        flows.emplace_back(DevNozzle::ToNozzleVolumeType(obj.GetExtderSystem()->GetNozzleFlowType(device)));
+    CHECK(device_sync_nozzle_volume_types({1, 0}, {0.6, 0.2}, flows, {}) ==
+          std::vector<NozzleVolumeType>{nvtStandard, nvtHighFlow});
+
+    // One AMS 2 Pro on the left extruder (device 1) with two loaded trays and an empty one.
+    const json &ams = print["ams"];
+    REQUIRE(ams["ams"].size() == 1);
+    const std::string info = ams["ams"][0]["info"].get<std::string>();
+    CHECK(DevUtil::get_flag_bits(info, 0, 4) == 3);
+    CHECK(DevUtil::get_flag_bits(info, 8, 4) == 1);
+    CHECK(ams["ams_exist_bits"] == "1");
+    CHECK(ams["tray_exist_bits"] == "3");
+    const json &trays = ams["ams"][0]["tray"];
+    REQUIRE(trays.size() == 3);
+    CHECK(trays[1]["tray_type"] == "PETG");
+    CHECK(trays[1]["tray_info_idx"] == "GFG02");
+    CHECK(trays[1]["tray_color"] == "000000FF");
+    CHECK_FALSE(trays[2].contains("tray_type"));
+
+    // A nozzle type string as the printer sends it wins over the flow name.
+    json reported = spec;
+    reported["right"] = {{"diameter", 0.6}, {"type", "HS01"}, {"flow", "High Flow"}};
+    const json standard = TestMode::fake_printer_reports(reported, error);
+    REQUIRE(error.empty());
+    CHECK(standard[1]["print"]["device"]["nozzle"]["info"][0]["type"] == "HS01");
+    CHECK(TestMode::fake_nozzle_type("TPU High Flow") == "HU01");
+}
+
+TEST_CASE("The test mode printer refuses a description it cannot report", "[TestRebuild][DeviceSync][TestMode]")
+{
+    std::string error;
+    CHECK(TestMode::fake_printer_reports(json::parse(R"({"left": {"flow": "Fast"}})"), error).empty());
+    CHECK(error.find("Fast") != std::string::npos);
+    error.clear();
+    CHECK(TestMode::fake_printer_reports(json::parse(R"({"right": {"diameter": -1}})"), error).empty());
+    CHECK_FALSE(error.empty());
+    error.clear();
+    CHECK(TestMode::fake_printer_reports(json::parse(R"({"ams": [{"trays": [{}, {}, {}, {}, {}]}]})"), error).empty());
+    CHECK_FALSE(error.empty());
+    error.clear();
+    CHECK(TestMode::fake_printer_reports(json::parse(R"({"ams": [{"extruder": "middle"}]})"), error).empty());
+    CHECK_FALSE(error.empty());
 }

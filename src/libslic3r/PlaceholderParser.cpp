@@ -1192,19 +1192,26 @@ namespace client
                 // Allow omitting extruder id when referencing vectors
                 switch (opt.opt->type()) {
                 case coFloats: {
+                    // Under a mixed-nozzle mode G-code export hands nozzle_diameter over per filament (GCode.cpp), so
+                    // the current filament picks its element.
+                    size_t extruder_index = ctx->get_extruder_id();
+                    if (const ConfigOption *by_filament = ctx->resolve_symbol("nozzle_diameter_by_filament");
+                        by_filament != nullptr && by_filament->type() == coBool && by_filament->getBool() &&
+                        std::string(opt.it_range.begin(), opt.it_range.end()) == "nozzle_diameter")
+                        extruder_index = ctx->current_extruder_id;
                     const ConfigOptionFloatsNullable* opt_floatsnullable = dynamic_cast<const ConfigOptionFloatsNullable *>(opt.opt);
                     if (opt_floatsnullable) {
                         if (opt_floatsnullable->size() == 1) { // old version
                             output.set_d(opt_floatsnullable->get_at(0));
                         } else {
-                            output.set_d(opt_floatsnullable->get_at(ctx->get_extruder_id()));
+                            output.set_d(opt_floatsnullable->get_at(extruder_index));
                         }
                     } else {
                         const ConfigOptionFloats* opt_floats = static_cast<const ConfigOptionFloats*>(opt.opt);
                         if (opt_floats->size() == 1) { // old version
                             output.set_d(opt_floats->get_at(0));
                         } else {
-                            output.set_d(opt_floats->get_at(ctx->get_extruder_id()));
+                            output.set_d(opt_floats->get_at(extruder_index));
                         }
                     }
                     break;

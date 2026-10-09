@@ -4966,8 +4966,22 @@ void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
     if (!m_slicing_params.valid) {
+          const SlicingParameters previous = m_slicing_params;
           m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
                                                                    this->object_extruders(), this->print()->shrinkage_compensation());
+          // The object's layers stand on the raft and the first layer, which a support-only change can move (the
+          // support filaments pick the nozzle whose heights the raft takes). Layers sliced for other heights are
+          // sliced again; invalidating posSlice drops the parameters, so they are made once more. Print::apply()
+          // calls this with the state mutex held, hence the unguarded query.
+          const auto moved = [](coordf_t a, coordf_t b) { return std::abs(a - b) > EPSILON; };
+          if (this->is_step_done_unguarded(posSlice) &&
+              (moved(previous.object_print_z_min, m_slicing_params.object_print_z_min) ||
+               moved(previous.first_print_layer_height, m_slicing_params.first_print_layer_height) ||
+               moved(previous.first_object_layer_height, m_slicing_params.first_object_layer_height))) {
+              this->invalidate_step(posSlice);
+              m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
+                                                                       this->object_extruders(), this->print()->shrinkage_compensation());
+          }
       }
 }
 

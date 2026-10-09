@@ -2875,9 +2875,22 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 ++ idx_layer_object;
             if (idx_layer_object == 0 && extr1z == m_slicing_params.raft_interface_top_z) {
                 // Insert one base support layer below the object.
+                // Under a banded body it stops at the raft's contact layer, which the interface nozzle lays, and a
+                // second one fills the gap above it, so the coarse bands start on top of the raft
+                // (mixed_nozzle_band_support_body()).
+                const bool split = m_support_params.mixed_nozzle_banded_body &&
+                    m_slicing_params.raft_contact_top_z > m_slicing_params.raft_interface_top_z + EPSILON &&
+                    m_slicing_params.object_print_z_min > m_slicing_params.raft_contact_top_z + EPSILON;
+                if (split) {
+                    SupportGeneratorLayer &layer_new = layer_storage.allocate(SupporLayerType::Intermediate);
+                    layer_new.print_z  = m_slicing_params.raft_contact_top_z;
+                    layer_new.bottom_z = m_slicing_params.raft_interface_top_z;
+                    layer_new.height   = layer_new.print_z - layer_new.bottom_z;
+                    intermediate_layers.push_back(&layer_new);
+                }
                 SupportGeneratorLayer &layer_new = layer_storage.allocate(SupporLayerType::Intermediate);
                 layer_new.print_z  = m_slicing_params.object_print_z_min;
-                layer_new.bottom_z = m_slicing_params.raft_interface_top_z;
+                layer_new.bottom_z = split ? m_slicing_params.raft_contact_top_z : m_slicing_params.raft_interface_top_z;
                 layer_new.height   = layer_new.print_z - layer_new.bottom_z;
                 intermediate_layers.push_back(&layer_new);
             }

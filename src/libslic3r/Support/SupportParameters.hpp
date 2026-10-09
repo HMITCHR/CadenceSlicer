@@ -245,6 +245,9 @@ struct SupportParameters {
             // The bed layer of that body, laid at the first layer's height and width as stock lays it.
             this->mixed_nozzle_fine_first_layer_flow = Slic3r::support_material_1st_layer_flow(
                 &object, float(slicing_params.first_print_layer_height), object_config.support_interface_filament.value);
+            const int body_idx = resolved_support_filament_nozzle_idx(print_config, object_config.support_filament.value);
+            if (body_idx > 0 && size_t(body_idx) <= print_config.nozzle_diameter.values.size())
+                this->mixed_nozzle_body_min_height = resolved_min_layer_height(print_config, size_t(body_idx - 1));
         }
         // Body and interface on one nozzle that cannot lay the object's layers: the whole support is
         // laid on rows that nozzle can lay (see mixed_nozzle_coarsen_shared_support), the base interface
@@ -258,6 +261,9 @@ struct SupportParameters {
     // The whole support is on a nozzle that cannot lay the object's layers.
     bool                    mixed_nozzle_coarse_support { false };
     Flow                    mixed_nozzle_fine_body_flow;
+    // The thinnest layer the banded body's coarse nozzle lays. A raft level thinner than that goes to the
+    // interface nozzle (generate_support_toolpaths()).
+    coordf_t                mixed_nozzle_body_min_height { 0. };
     // The flow that sizes contact areas, and through them the interface. With the body banded on a
     // coarser nozzle the contacts stay as stock sizes them, with the interface nozzle's road at the
     // object's layer height: the base's own road (0.66 or 0.88 mm) would grow every contact, and the

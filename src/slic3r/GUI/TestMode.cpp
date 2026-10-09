@@ -1,5 +1,7 @@
 #include "TestMode.hpp"
+#include "TestModePrinter.hpp"
 
+#include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_ObjectList.hpp"
@@ -11,6 +13,7 @@
 #include "ObjectDataViewModel.hpp"
 #include "PartPlate.hpp"
 #include "Selection.hpp"
+#include "SyncAmsInfoDialog.hpp"
 #include "Tab.hpp"
 #include "3DScene.hpp"
 #include "Plater.hpp"
@@ -46,6 +49,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -88,6 +92,8 @@ std::string g_menu_error;
 json g_menu_last;
 // Plate validation results since the last step's dump, oldest first.
 json g_validations = json::array();
+// The pretend printer a scenario connected; see connect_printer.
+std::unique_ptr<MachineObject> g_fake_printer;
 
 std::string bed_name(BedType type)
 {
@@ -125,6 +131,22 @@ std::vector<wxDialog *> shown_modal_dialogs()
         if (auto *dialog = dynamic_cast<wxDialog *>(w); dialog != nullptr && dialog->IsShown() && dialog->IsModal())
             out.push_back(dialog);
     return out;
+}
+
+// The class a scenario names a dialog by.
+std::string dialog_class(wxTopLevelWindow *top)
+{
+    if (dynamic_cast<MixedNozzleWizardDialog *>(top) != nullptr)
+        return "MixedNozzleWizardDialog";
+    if (dynamic_cast<DissimilarNozzleDialog *>(top) != nullptr)
+        return "DissimilarNozzleDialog";
+    if (dynamic_cast<MessageDialog *>(top) != nullptr)
+        return "MessageDialog";
+    if (dynamic_cast<SyncAmsInfoDialog *>(top) != nullptr)
+        return "SyncAmsInfoDialog";
+    if (dynamic_cast<SyncNozzleAndAmsDialog *>(top) != nullptr)
+        return "SyncNozzleAndAmsDialog";
+    return wxString(top->GetClassInfo()->GetClassName()).ToStdString();
 }
 
 MixedNozzleWizardDialog *shown_wizard()
@@ -569,6 +591,9 @@ private:
     json m_dismissed = json::array();
     int m_failures {0};
     std::optional<Clock::time_point> m_layout_wait;
+    // Every dialog that opened, in order, so a scenario can check which came first.
+    json m_dialog_history = json::array();
+    std::set<wxTopLevelWindow *> m_dialogs_shown;
 
     const json &step() const { return m_steps[m_index]; }
     long long elapsed_ms() const
@@ -578,6 +603,7 @@ private:
 
     void tick()
     {
+        note_dialogs();
         if (m_busy)
             return;
         m_busy = true;
@@ -659,6 +685,32 @@ private:
         record_step();
         ++m_index;
         m_phase = Phase::Ready;
+    }
+
+    // One line per dialog when it first shows: "class | title | its texts". The stock offer to
+    // sync filaments after a printer sync is a frame, not a dialog, and is noted too.
+    void note_dialogs()
+    {
+        std::set<wxTopLevelWindow *> shown;
+        for (wxWindow *w : wxTopLevelWindows) {
+            auto *dialog = dynamic_cast<wxTopLevelWindow *>(w);
+            if (dialog == nullptr || !dialog->IsShown() ||
+                (dynamic_cast<wxDialog *>(w) == nullptr && dynamic_cast<SyncNozzleAndAmsDialog *>(w) == nullptr))
+                continue;
+            shown.insert(dialog);
+            if (m_dialogs_shown.count(dialog) != 0)
+                continue;
+            std::string texts;
+            for (const std::string &text : visible_texts(dialog))
+                texts += (texts.empty() ? "" : " / ") + text;
+            // Cut on a character boundary so the line stays valid UTF-8.
+            std::size_t cut = std::min<std::size_t>(texts.size(), 200);
+            while (cut > 0 && cut < texts.size() && (static_cast<unsigned char>(texts[cut]) & 0xC0) == 0x80)
+                --cut;
+            m_dialog_history.push_back(dialog_class(dialog) + " | " + into_u8(dialog->GetTitle()) + " | " +
+                                       texts.substr(0, cut));
+        }
+        m_dialogs_shown = std::move(shown);
     }
 
     void enter_settling(bool blocked)
@@ -1026,6 +1078,25 @@ private:
             list->load_generic_subobject(s.value("shape", std::string("Cube")), ModelVolumeType::MODEL_PART);
             return true;
         }
+        // The material an object prints with, as choosing it in the object list does.
+        if (what == "set_object_filament") {
+            ObjectList *list = wxGetApp().obj_list();
+            list->select_item([list, &s] { return list->GetModel()->GetItemById(s.value("object", 0)); });
+            list->set_extruder_for_selected_items(s.at("slot").get<int>());
+            return true;
+        }
+        // The current plate's material-to-nozzle map, set by hand ("maps": nozzle 1 or 2 per material).
+        if (what == "set_filament_map") {
+            PartPlate *plate = plater->get_partplate_list().get_curr_plate();
+            if (plate == nullptr) {
+                error = "no current plate";
+                return false;
+            }
+            plate->set_filament_map_mode(fmmManual);
+            plate->set_filament_maps(s.at("maps").get<std::vector<int>>());
+            plater->update();
+            return true;
+        }
         if (what == "load_file") {
             plater->load_files(std::vector<std::string>{s.at("path").get<std::string>()});
             return true;
@@ -1087,6 +1158,24 @@ private:
             plater->load_project(from_u8((m_out / s.at("name").get<std::string>()).string()));
             return true;
         }
+        // A pretend printer (TestModePrinter.hpp) for the printer sync. Connecting again with other
+        // nozzles or spools is the printer reporting a change.
+        if (what == "connect_printer") {
+            const json spec = s.value("printer", json::object());
+            if (g_fake_printer)
+                return TestMode::update_fake_printer(*g_fake_printer, spec, error);
+            g_fake_printer = TestMode::make_fake_printer(wxGetApp().getDeviceManager(), spec, error);
+            return g_fake_printer != nullptr;
+        }
+        if (what == "disconnect_printer") {
+            g_fake_printer.reset();
+            return true;
+        }
+        // The sidebar's printer Sync button.
+        if (what == "sync_printer") {
+            sidebar.deal_btn_sync();
+            return true;
+        }
         if (what == "wait" || what == "dump")
             return true;
         error = "unknown step \"" + what + "\"";
@@ -1114,6 +1203,8 @@ private:
         if (const auto *stats = bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_nozzle_stats"))
             p["printer_nozzle_stats"] = stats->values;
         p["filament_presets"] = bundle.filament_presets;
+        if (const auto *colours = project.option<ConfigOptionStrings>("filament_colour"))
+            p["filament_colour"] = colours->values;
         for (const std::string &key : project.keys())
             if (key.rfind("mixed_nozzle", 0) == 0 || key == "filament_map" || key == "filament_nozzle_map" ||
                 key.find("prime_tower") != std::string::npos)
@@ -1241,7 +1332,8 @@ private:
                     if (line.rfind(key, 0) == 0)
                         sliced["gcode_bed_type"] = line.substr(key.size());
                     for (const char *flow_key : {"nozzle_volume_type", "filament_volume_map", "extruder_nozzle_stats",
-                                                 "filament_max_volumetric_speed", "nozzle_diameter"})
+                                                 "filament_max_volumetric_speed", "nozzle_diameter", "filament_map",
+                                                 "filament_settings_id"})
                         if (const std::string head = std::string("; ") + flow_key + " = "; line.rfind(head, 0) == 0)
                             sliced["gcode"][flow_key] = line.substr(head.size());
                 }
@@ -1256,6 +1348,10 @@ private:
                 sliced["tallest_extrusion"] = tallest;
             }
         }
+        out["printer"] = g_fake_printer ? TestMode::describe_printer(*g_fake_printer) : json {{"connected", false}};
+        if (g_fake_printer)
+            out["printer"]["connected"] = true;
+        out["dialog_history"] = m_dialog_history;
         out["validations"] = g_validations;
         g_validations = json::array();
         if (const PartPlate *plate = list.get_curr_plate())
@@ -1292,10 +1388,7 @@ private:
                         {"buttons", visible_buttons(top)}, {"choices", visible_choices(top)},
                         {"checkboxes", visible_checkboxes(top)}, {"buttons_touching", touching_buttons(top)},
                         {"tooltips", visible_tooltips(top)}};
-            if (dynamic_cast<MixedNozzleWizardDialog *>(top) != nullptr)
-                entry["class"] = "MixedNozzleWizardDialog";
-            else if (dynamic_cast<DissimilarNozzleDialog *>(top) != nullptr)
-                entry["class"] = "DissimilarNozzleDialog";
+            entry["class"] = dialog_class(top);
             std::string capture_error;
             const std::string png = capture_window(top, m_out / (base + "-" + std::to_string(count++) + ".png"), capture_error);
             if (!png.empty())
@@ -1408,6 +1501,11 @@ void note_validation(const std::string &error)
 {
     if (active())
         g_validations.push_back(error);
+}
+
+MachineObject *fake_printer()
+{
+    return active() ? g_fake_printer.get() : nullptr;
 }
 
 int popup_menu(wxWindow &owner, wxMenu &menu, const wxPoint &at)
