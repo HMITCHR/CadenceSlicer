@@ -56,9 +56,10 @@ bool mixed_nozzle_support_body_banded(const PrintConfig &print_config, const Pri
 // The filament that prints the support body the interface nozzle lays where the coarse nozzle lays none
 // (SupportLayer::base_on_interface_nozzle, set by generate_support_toolpaths()): the interface filament
 // when it is the base's material, otherwise a non-soluble, non-support project filament on that nozzle
-// other than the interface filament: the base's material first, then one the object prints with
-// (object_filaments, 0-based), then the lowest. An interface filament of another material never prints
-// body; with no such filament there is none. Returns a 0-based filament.
+// other than the interface filament that sticks to the base (its type, or its adhesion category): the
+// base's material first, then one the object prints with (object_filaments, 0-based), then the lowest.
+// An interface filament of another material never prints body; with no such filament there is none.
+// Returns a 0-based filament.
 std::optional<unsigned int> mixed_nozzle_interface_nozzle_body_filament(const PrintConfig &print_config, const PrintObjectConfig &object_config,
                                                                         const std::vector<unsigned int> &object_filaments);
 

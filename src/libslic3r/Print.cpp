@@ -1774,9 +1774,9 @@ static std::vector<MixedNozzleRaftStep> mixed_nozzle_raft_steps(const PrintConfi
 // it can. Organic tree support (and Default, Snug or Grid, which a tree draws as Organic) on a coarser nozzle than
 // its interface is laid in bands that nozzle can lay (mixed_nozzle_band_support_body()). Slim, Strong and Hybrid
 // trees use their own generator, which never hands its layers to the banding, and with the interface on the base's
-// nozzle too the interface itself would have to be laid at coarse rows. Under a banded body the fine nozzle lays
-// some body (the bed layer it cannot lay, thin tree parts, the dense layer under a dissimilar interface), which
-// needs a filament there other than an interface filament of another material.
+// nozzle too the interface itself would have to be laid at coarse rows. Whether the finer nozzle then lays some body
+// (and needs a filament of the base's material for it) is known only once the support is sliced:
+// PrintObject::assign_interface_nozzle_body_filament() refuses it there.
 struct MixedNozzleSupportRefusal {
     std::string why;
     std::string opt_key;
@@ -1805,16 +1805,6 @@ static MixedNozzleSupportRefusal mixed_nozzle_support_refusal(const PrintConfig 
         return { Slic3r::format("Slim, Strong and Hybrid tree support cannot be laid by the %1% mm nozzle, whose thinnest layer is "
                                 "thicker than the object's layers. Use Organic tree support or Normal support.", base_dmr),
                  "support_style" };
-    if (interface_dmr < base_dmr - EPSILON && ! mixed_nozzle_interface_nozzle_body_filament(print_config, config, {})) {
-        const auto type_of = [&print_config](int filament) {
-            return filament > 0 && size_t(filament) <= print_config.filament_type.values.size() ? print_config.filament_type.values[size_t(filament - 1)] : std::string();
-        };
-        return { Slic3r::format("The %1% mm nozzle lays part of the support body next to the interface, and its only filament for that "
-                                "is the interface filament (%2%), not the base's %3%. Map a %3% filament to the %1% mm nozzle, or use "
-                                "a %3% interface filament.", interface_dmr, type_of(config.support_interface_filament.value),
-                                type_of(config.support_filament.value)),
-                 "support_interface_filament", false };
-    }
     return {};
 }
 
@@ -2644,10 +2634,43 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             }
         }
         if (cadence_invalid || base_cadence_assignments < 1 || base_cadence_tool_mismatch ||
-            coarse_cadence_ratio_seen < 2 || !base_cadence_filament || !coarse_cadence_filament)
+            coarse_cadence_ratio_seen < 2 || !base_cadence_filament || !coarse_cadence_filament) {
+            // One part split only by a modifier on the other nozzle's filament (is_body_split_object()): say so,
+            // since nothing on the plate looks like two bodies.
+            const ModelVolume *lone_part = nullptr;
+            size_t parts = 0;
+            for (const ModelVolume *volume : model_object->volumes)
+                if (volume != nullptr && volume->is_model_part()) {
+                    ++parts;
+                    lone_part = volume;
+                }
+            if (parts == 1 && !lone_part->is_mm_painted()) {
+                const int part_filament = lone_part->extruder_id() > 0 ? lone_part->extruder_id() : 1;
+                const std::optional<size_t> part_tool = physical_extruder_for_filament(m_config, unsigned(part_filament - 1));
+                for (const ModelVolume *volume : model_object->volumes) {
+                    if (volume == nullptr || !volume->is_modifier() || !volume->config.has("extruder") || volume->config.extruder() <= 0)
+                        continue;
+                    const int filament = volume->config.extruder();
+                    const std::optional<size_t> tool = physical_extruder_for_filament(m_config, unsigned(filament - 1));
+                    if (!part_tool || !tool || *tool == *part_tool || *tool >= m_config.nozzle_diameter.values.size() ||
+                        *part_tool >= m_config.nozzle_diameter.values.size())
+                        continue;
+                    const bool part_coarse = m_config.nozzle_diameter.values[*part_tool] > m_config.nozzle_diameter.values[*tool];
+                    return reject(object, "SRL-A23", "regional_layer_height", Slic3r::format(
+                        "This object is one part with a modifier (\"%1%\") on filament %2%, which prints on the other nozzle, so "
+                        "Body Split slices it as two bodies, and the coarse one needs a coarse layer height. %3%",
+                        volume->name, filament,
+                        part_coarse ?
+                            "Set the part's layer height to a whole multiple of the base layer height, or set the modifier "
+                            "to a filament on the part's own nozzle." :
+                            "A modifier cannot be the coarse body: set the modifier to a filament on the part's own nozzle, "
+                            "or make that area a separate part with a coarse layer height."));
+                }
+            }
             return reject(object, "SRL-A23", "regional_layer_height",
                           "Body Split needs fine bodies at the base layer height and coarse bodies at one shared whole "
                           "multiple of it.");
+        }
         // A second colour on the coarse tool is admitted: it prints at the shared coarse cadence, so the
         // band schedule stays one per tool. The ratio, tool distinctness and nozzle ordering come from
         // the shared cadence resolver, whose diagnostic code is reported in this sentence.
@@ -7894,6 +7917,8 @@ void Print::_make_wipe_tower()
                 return true;
             std::map<unsigned int, float> previous_z_by_domain;
             std::map<unsigned int, std::vector<const WipeTower::StructuralEmission *>> earlier_by_domain;
+            // Held roads above their block's support chain that no road has reached yet.
+            std::map<unsigned int, std::vector<const WipeTower::StructuralEmission *>> held_by_domain;
             double largest_nozzle_diameter = 0.;
             for (double diameter : m_config.nozzle_diameter.values)
                 if (std::isfinite(diameter) && diameter > 0.)
@@ -8006,6 +8031,24 @@ void Print::_make_wipe_tower()
                             double(change.print_z) - double(emission.z) >
                                 double(m_mixed_nozzle_tower_lag_max) + EPSILON)
                             return reject("the tower sits further below the part than this plate allows");
+                        // A held coarse prime road (or a road lifted to one) stands above its block's support chain
+                        // until a road reaches its height. A road crossing it lower down (by more than the G-code's
+                        // rounding) would be printed into it.
+                        {
+                            std::vector<const WipeTower::StructuralEmission *> &held = held_by_domain[emission.support_domain];
+                            held.erase(std::remove_if(held.begin(), held.end(), [&](const WipeTower::StructuralEmission *road) {
+                                return road->z <= predecessor + EPSILON; }), held.end());
+                            constexpr float apart = 0.05f;
+                            for (const WipeTower::StructuralEmission *road : held)
+                                if (emission.z < road->z - 0.02f &&
+                                    emission.footprint_min.x() < road->footprint_max.x() - apart &&
+                                    road->footprint_min.x() < emission.footprint_max.x() - apart &&
+                                    emission.footprint_min.y() <= road->footprint_max.y() + apart &&
+                                    road->footprint_min.y() <= emission.footprint_max.y() + apart)
+                                    return reject("a road would be printed under a higher road laid before it");
+                            if (emission.held_level)
+                                held.push_back(&emission);
+                        }
                         // A ramming held above its level to reach the outgoing tool's own minimum stands on
                         // the same tower top as the level beside it, and the next coarse layer covers it. It
                         // is checked above like any road, but it is not the top of its block's support chain;

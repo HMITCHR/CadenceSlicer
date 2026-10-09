@@ -1438,6 +1438,23 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
                 last_wipe_tower_print_z = m_layer_tools[j].print_z;
             }
     }
+    // The repair above stops at the first row without tools, which a Body Split plate has where one
+    // body ends under another (a fine base under a coarse column). Its support is sliced on layers of
+    // its own, and a support-only layer that changes nozzle (a fine piece of the support between two
+    // coarse bands) has no object, so nothing above gives it a tower visit: the nozzle would change
+    // without a purge, and the tower would expect the wrong tool on its next level. Every row up to
+    // the last switch that changes tool gets a visit.
+    if (is_mixed_nozzle_slicing_enabled(config) && last_tool_change_layer != size_t(-1)) {
+        int previous = -1;
+        for (size_t i = 0; i <= last_tool_change_layer; ++i) {
+            LayerTools &lt = m_layer_tools[i];
+            if (lt.extruders.empty())
+                continue;
+            if (!lt.has_wipe_tower && previous >= 0 && (int(lt.extruders.front()) != previous || lt.extruders.size() > 1))
+                lt.has_wipe_tower = true;
+            previous = int(lt.extruders.back());
+        }
+    }
 
     // Compact tower (mixed-nozzle modes only): decide which layers deposit a tower block
     // (wipe_tower_emit). A layer with its own switch always emits. Any other layer is a filler

@@ -3903,11 +3903,32 @@ WipeTower::ToolChangeResult WipeTower::tool_change_new(size_t new_tool, bool sol
         }
 #endif
         const size_t purge_begin = writer.extrusions().size();
+        // Over a held coarse prime road in this block the purge rows are lifted to its top and laid that much
+        // taller, so they never run into it; the head comes back down over the wall line, clear of the rows.
+        const float level_z      = m_z_pos;
+        const float level_height = m_layer_height;
+        const float held         = held_road_z(block);
+        const bool  purge_lifted = held > m_z_pos + WT_EPSILON;
+        if (purge_lifted) {
+            m_layer_height += held - m_z_pos;
+            m_z_pos         = held;
+            writer.move_z(held);
+        }
         toolchange_wipe_new(writer, cleaning_box, wipe_length, solid_toolchange, wipe_volume_budget, is_nozzle_change);
         departure_row = middle_purge_row(writer.extrusions(), purge_begin);
         // Wipe rows belong to the block's internal support domain, separate from the outer wall.
         purge_records = make_structural_emissions(writer.extrusions(), m_z_pos, m_layer_height,
             StructuralRole::InteriorDeposit, static_cast<unsigned int>(2 + block->block_id), purge_begin);
+        if (purge_lifted) {
+            for (StructuralEmission &record : purge_records) {
+                record.held_above_level = true;
+                record.held_level       = true;
+            }
+            m_z_pos         = level_z;
+            m_layer_height  = level_height;
+            writer.travel(0.f, writer.y());
+            writer.move_z(level_z);
+        }
 
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
         ++m_num_tool_changes;
@@ -3992,8 +4013,16 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
 
     // The outgoing tool rams at the nearest height within its own layer-height limits. On a
     // lagging tower the level height belongs to the arriving tool and may be outside them.
-    const float ram_height = ramming_height(old_filament_id, m_layer_height);
-    const float ram_z      = m_z_pos - m_layer_height + ram_height;
+    float ram_height = ramming_height(old_filament_id, m_layer_height);
+    float ram_z      = m_z_pos - m_layer_height + ram_height;
+    // Over a held coarse prime road the ramming rows are lifted to its top, so they never run into it.
+    bool ram_lifted = false;
+    if (const float held = held_road_z(get_block_by_category(m_filpar[old_filament_id].category, false));
+        held > ram_z + WT_EPSILON) {
+        ram_height += held - ram_z;
+        ram_z       = held;
+        ram_lifted  = true;
+    }
     const bool  ram_moves  = std::abs(ram_z - m_z_pos) > WT_EPSILON;
     float nz_extrusion_flow = nozzle_change_extrusion_flow(ram_height);
     WipeTowerWriter writer(ram_height, m_nozzle_change_perimeter_width, m_gcode_flavor, m_filpar, m_enable_arc_fitting, m_travel_speed, m_lag_emit_block_z);
@@ -4094,8 +4123,10 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
                 auto records = make_structural_emissions(writer.extrusions(), ram_z,
                     need_change_flow ? 0.2f : ram_height, StructuralRole::InteriorDeposit,
                     static_cast<unsigned int>(2 + block->block_id), road_begin);
-                for (StructuralEmission &record : records)
+                for (StructuralEmission &record : records) {
                     record.held_above_level = ram_z > m_z_pos + WT_EPSILON;
+                    record.held_level       = ram_lifted;
+                }
                 result.structural_emissions.insert(result.structural_emissions.end(), records.begin(), records.end());
             }
             if (i == nozzle_change_line_count - 1)
@@ -4116,8 +4147,10 @@ WipeTower::NozzleChangeResult WipeTower::ramming(int old_filament_id, int new_fi
                 auto records = make_structural_emissions(writer.extrusions(), ram_z,
                     ram_height, StructuralRole::InteriorDeposit,
                     static_cast<unsigned int>(2 + block->block_id), road_begin);
-                for (StructuralEmission &record : records)
+                for (StructuralEmission &record : records) {
                     record.held_above_level = ram_z > m_z_pos + WT_EPSILON;
+                    record.held_level       = ram_lifted;
+                }
                 result.structural_emissions.insert(result.structural_emissions.end(), records.begin(), records.end());
             }
             if (nozzle_change_budget > 0.f && nozzle_change_emitted + WT_EPSILON >= nozzle_change_budget)
@@ -4391,8 +4424,11 @@ WipeTower::ToolChangeResult WipeTower::finish_layer_new(bool extrude_perimeter, 
         loops_num = first_layer ? int((m_wipe_tower_brim_width + wide_spacing / 2.f) / wide_spacing) :
                                   int(float(std::max(loops_num, 0)) * spacing / wide_spacing + 1e-3f);
         spacing   = wide_spacing;
-        writer.set_extrusion_flow(structural_extrusion_flow(int(m_current_tool), m_extrusion_flow) * base_flow_ratio)
-              .change_analyzer_line_width(base_flow_ratio * brim_road_width);
+        // The first-layer boost is capped for the road it widens, this one, not the shared width.
+        const float brim_flow_ratio = (is_first_layer() && m_mixed_nozzle_slicing) ?
+            base_flow_ratio_for_width(int(m_current_tool), brim_road_width) : 1.f;
+        writer.set_extrusion_flow(structural_extrusion_flow(int(m_current_tool), m_extrusion_flow) * brim_flow_ratio)
+              .change_analyzer_line_width(brim_flow_ratio * brim_road_width);
     }
 
     if (loops_num > 0) {
@@ -5554,6 +5590,30 @@ void WipeTower::plan_lagging_tower()
         level.force_emit = false;
         return level;
     };
+    // The height of a coarse arrival's first road on the tower top: up to the part, at most one coarse
+    // layer, and above the bed never under the coarse minimum. Less than the minimum under the part,
+    // the arrival lays only its prime road, one minimum step up (see the coarse run below).
+    const auto coarse_step = [&](float top, float part_z) {
+        const float room   = part_z - top;
+        const float lowest = top > WT_EPSILON ? std::min(coarse_min, coarse_h) : 0.f;
+        if (room > WT_EPSILON)
+            return std::max(std::min(coarse_h, room), lowest);
+        return lowest > 0.f ? lowest : coarse_h;
+    };
+    // The Z of the lowest road a visit above the base lays when the tower top is at top, by the
+    // rules below: a coarse run's first step, a fine run's prime road, a maintenance step, and the
+    // outgoing tool's ramming, which keeps to its own nozzle's heights (ramming_height()).
+    const auto next_visit_first_road = [&](const WipeTowerInfo &next, float top, unsigned int active) {
+        if (next.tool_changes.empty()) {
+            const float height = on_coarse_nozzle(int(active)) ? coarse_h : fine_h;
+            return top + std::min(height, std::max(next.z - top, 0.f));
+        }
+        const WipeTowerInfo::ToolChange &first = next.tool_changes.front();
+        float step = fine_h;
+        if (on_coarse_nozzle(int(first.new_tool)))
+            step = coarse_step(top, next.z);
+        return top + std::min(step, ramming_height(int(first.old_tool), step));
+    };
 
     // Set while a base level is held back under a coarse arrival; that arrival then lays the whole step.
     bool base_step_held = false;
@@ -5758,13 +5818,24 @@ void WipeTower::plan_lagging_tower()
                 // at least one. The tool change belongs to the first; the rest are catch-up layers
                 // in the same visit (normally only just above the base).
                 float top   = tower_top;
+                // Closer than its minimum under the part, the coarse tool would lay a step ahead of
+                // it, and the next nozzle change would ram higher still. It lays only its prime road
+                // there, as a fine return does, and the next coarse layer covers it.
+                const float lowest = std::min(coarse_min, coarse_h);
+                if (top > WT_EPSILON && lowest > 0.f && part_z - top < lowest - WT_EPSILON) {
+                    WipeTowerInfo level = run;
+                    level.z          = top + lowest;
+                    level.height     = lowest;
+                    level.part_z     = part_z;
+                    level.wall_owner = int(arriving);
+                    level.prime_only = true;
+                    level.held_above = true;
+                    lagged.push_back(std::move(level));
+                    continue;
+                }
                 bool  first = true;
                 while (true) {
-                    const float room = part_z - top;
-                    // Above the bed never under the coarse minimum: an arrival just above the last
-                    // coarse layer lays a full minimum step, a little ahead of the part.
-                    const float lowest = top > WT_EPSILON ? std::min(coarse_min, coarse_h) : 0.f;
-                    const float step   = room > WT_EPSILON ? std::max(std::min(coarse_h, room), lowest) : coarse_h;
+                    const float step = coarse_step(top, part_z);
                     WipeTowerInfo level = first ? run : WipeTowerInfo(top + step, step);
                     level.z          = top + step;
                     level.height     = step;
@@ -5794,9 +5865,23 @@ void WipeTower::plan_lagging_tower()
                 level.prime_only = true;
                 lagged.push_back(std::move(level));
                 // Before the first coarse arrival nothing bounds the lag, so the fine tool brings
-                // the tower up itself whenever it falls more than m_lag_max behind.
+                // the tower up itself whenever it falls more than m_lag_max behind. At the end of
+                // a level it also builds ahead for the next visit, whose lowest road has to be
+                // within m_lag_max of its own part layer: after layers without a visit, or where
+                // the fine tool rams at its own maximum under a coarse step, that road sits lower
+                // than this visit would leave it. Never above this part layer.
+                size_t next_visit = m_plan.size();
+                if (run_begin >= source.tool_changes.size())
+                    for (next_visit = source_idx + 1; next_visit < m_plan.size(); ++ next_visit)
+                        if (!m_plan[next_visit].tool_changes.empty() || m_plan[next_visit].force_emit)
+                            break;
+                const auto next_visit_too_low = [&](float top) {
+                    return next_visit < m_plan.size() && top + fine_h <= part_z + WT_EPSILON &&
+                           m_plan[next_visit].z - next_visit_first_road(m_plan[next_visit], top, active_tool) >
+                               m_lag_max + WT_EPSILON;
+                };
                 float top = tower_top;
-                while (m_lag_max > 0.f && part_z - top > m_lag_max + WT_EPSILON) {
+                while (m_lag_max > 0.f && (part_z - top > m_lag_max + WT_EPSILON || next_visit_too_low(top))) {
                     WipeTowerInfo fill(top + fine_h, fine_h);
                     fill.part_z        = part_z;
                     fill.wall_owner    = int(arriving);
@@ -5890,6 +5975,8 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
         }
     }
 
+    m_held_road_z.clear();
+    m_held_rows_end.clear();
     for (auto &used : m_used_filament_length) // reset used filament stats
         used = 0.f;
 
@@ -5962,6 +6049,23 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
         // On a lagging level the arriving tool draws everything, so per-tool height limits hold.
         if (layer.wall_owner >= 0)
             wall_idx = layer.wall_owner;
+        // In a lagging tower's base, which keeps pace with the part, a coarse tool can hand over to a
+        // fine one on a level one fine layer tall (coarse support in a fine body). The coarse tool
+        // cannot lay that step, so the last fine arrival of the same material kind lays the wall and
+        // any block the coarse tool would have finished. Levels the coarse tool can lay, and materials
+        // the tower keeps apart, are left as they are.
+        const auto fine_stand_in = [&](int tool) {
+            if (!lagging() || layer.z - layer.height <= WT_EPSILON || tool < 0 || size_t(tool) >= m_filpar.size() ||
+                !on_coarse_nozzle(tool) || layer.height >= m_filpar[size_t(tool)].min_layer_height - WT_EPSILON)
+                return -1;
+            for (auto change = layer.tool_changes.rbegin(); change != layer.tool_changes.rend(); ++ change)
+                if (!on_coarse_nozzle(int(change->new_tool)) &&
+                    m_filpar[change->new_tool].category == m_filpar[size_t(tool)].category)
+                    return int(change->new_tool);
+            return -1;
+        };
+        if (const int stand_in = fine_stand_in(wall_idx); stand_in >= 0)
+            wall_idx = stand_in;
         // A fine return lays its prime road and no block fill.
         const bool prime_only = layer.prime_only;
 
@@ -5999,7 +6103,8 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
         }
         for (int i = 0; i < int(layer.tool_changes.size()); ++i) {
             ToolChangeResult wall_gcode;
-            if (i == 0 && (layer.tool_changes[i].old_tool == wall_idx)) {
+            // A held coarse prime level lays no wall: a wall that high would be run into by the next level's.
+            if (i == 0 && (layer.tool_changes[i].old_tool == wall_idx) && !layer.held_above) {
                 finish_layer_tcr = finish_layer_new(only_generate_wall ? false : true, false, false);
             }
             bool        solid_nozzlechange = false, solid_toolchange = false;
@@ -6013,7 +6118,7 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
             if (i == 0 && (layer.tool_changes[i].old_tool == wall_idx)) {
 
             }
-            else if (layer.tool_changes[i].new_tool == wall_idx) {
+            else if (layer.tool_changes[i].new_tool == wall_idx && !layer.held_above) {
                 finish_layer_tcr = finish_layer_new(only_generate_wall ? false : true, false, false);
                 insert_finish_layer_idx = i;
             }
@@ -6027,6 +6132,9 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
 
             for (WipeTowerBlock& block : m_wipe_tower_blocks) {
                 block.finish_depth[m_cur_layer_id] = block.start_depth + block.depth;
+                if (held_road_z(&block) > m_z_pos + WT_EPSILON)
+                    if (const auto rows = m_held_rows_end.find(block.block_id); rows != m_held_rows_end.end())
+                        block.cur_depth = std::max(block.cur_depth, rows->second);
                 if (block.cur_depth + EPSILON >= block.start_depth + block.layer_depths[m_cur_layer_id]-m_perimeter_width) {
                     continue;
                 }
@@ -6052,6 +6160,8 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
                 // On a lagging level every block belongs to the arriving tool.
                 if (layer.wall_owner >= 0)
                     finish_layer_filament = layer.wall_owner;
+                if (const int stand_in = fine_stand_in(finish_layer_filament); stand_in >= 0)
+                    finish_layer_filament = stand_in;
                 // Cancel the block of the last layer
                 if (!is_valid_last_layer(finish_layer_filament, m_cur_layer_id, layer.z)) continue;
                 ToolChangeResult finish_block_tcr;
@@ -6114,6 +6224,31 @@ void WipeTower::generate_new(std::vector<std::vector<WipeTower::ToolChangeResult
 
         if (only_generate_wall && !timelapse_wall.gcode.empty()) {
             layer_result.insert(layer_result.begin(), std::move(timelapse_wall));
+        }
+        if (layer.held_above) {
+            for (ToolChangeResult &block : layer_result)
+                for (StructuralEmission &emission : block.structural_emissions) {
+                    emission.held_above_level = true;
+                    emission.held_level       = true;
+                    if (emission.role == StructuralRole::InteriorDeposit && emission.support_domain >= 2) {
+                        float &held = m_held_road_z[int(emission.support_domain) - 2];
+                        held = std::max(held, emission.z);
+                    }
+                }
+            for (const WipeTowerBlock &block : m_wipe_tower_blocks)
+                if (m_held_road_z.count(block.block_id)) {
+                    float &end = m_held_rows_end[block.block_id];
+                    end = std::max(end, block.cur_depth);
+                }
+        } else if (!layer.prime_only) {
+            // A full level at or above a held road's top carries the tower past it.
+            for (auto it = m_held_road_z.begin(); it != m_held_road_z.end();) {
+                if (it->second <= layer.z + WT_EPSILON) {
+                    m_held_rows_end.erase(it->first);
+                    it = m_held_road_z.erase(it);
+                } else
+                    ++ it;
+            }
         }
         if (layer.catch_up && !result.empty() && !result.back().empty()) {
             // A catch-up layer merges into the visit below it and carries its own Z.

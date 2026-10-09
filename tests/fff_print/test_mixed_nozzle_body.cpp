@@ -505,6 +505,46 @@ TEST_CASE("A fine-filament modifier in a single coarse part is a Body Split inla
     CHECK_FALSE(is_body_split_object(plain_print.config(), *plain_model.objects.front()));
 }
 
+// A single part with a modifier on the other nozzle's filament is sliced as two bodies, so the coarse one needs the
+// coarse layer height. Without it the refusal used to say only "fine bodies at the base layer height and coarse bodies
+// at a whole multiple of it", with nothing on the plate that looks like two bodies. It now names the modifier and says
+// what to change.
+TEST_CASE("A single part with a modifier on the other nozzle and no coarse layer height is refused naming the modifier",
+          "[TestRebuild][BodySplit]")
+{
+    DynamicPrintConfig config = coupon_config_with_filaments(2);
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{3});
+    fill_per_filament_values(config);
+    // The part on the fine nozzle (filament 1) with a logo modifier on the coarse one, and the part on the coarse
+    // nozzle with no coarse layer height and a modifier on the fine one.
+    for (const bool part_coarse : {false, true}) {
+        CAPTURE(part_coarse);
+        Model model;
+        Print print;
+        ModelObject *object = model.add_object();
+        object->name = "part-with-logo";
+        ModelVolume *part = object->add_volume(make_cube(20., 20., 4.), ModelVolumeType::MODEL_PART, false);
+        part->config.set_key_value("extruder", new ConfigOptionInt(part_coarse ? 2 : 1));
+        ModelVolume *logo = object->add_volume(make_cube(8., 3., 0.8), ModelVolumeType::PARAMETER_MODIFIER, false);
+        logo->name = "logo";
+        logo->set_offset(Vec3d(6., 8., 3.2));
+        logo->config.set_key_value("extruder", new ConfigOptionInt(part_coarse ? 1 : 2));
+        object->add_instance();
+        object->ensure_on_bed();
+        print.apply(model, config);
+        print.set_status_silent();
+        const CadenceTest::Facts facts = CadenceTest::slice(print);
+        const std::string &refusal = facts.refusal.string;
+        INFO(refusal);
+        CHECK(refusal.find("SRL-A23") != std::string::npos);
+        CHECK(refusal.find("modifier (\"logo\")") != std::string::npos);
+        CHECK(refusal.find(part_coarse ? "Set the part's layer height to a whole multiple of the base layer height" :
+                                         "set the modifier to a filament on the part's own nozzle") != std::string::npos);
+    }
+}
+
 TEST_CASE("Body Split fine skins put a coarse body's roof and pocket floor on the fine nozzle", "[TestRebuild][BodySplit]")
 {
     DynamicPrintConfig config = fine_skin_ratio3_config();

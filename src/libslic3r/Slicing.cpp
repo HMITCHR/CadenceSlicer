@@ -138,12 +138,24 @@ std::optional<unsigned int> mixed_nozzle_interface_nozzle_body_filament(const Pr
     const std::string base_type = type_of(object_config.support_filament.value);
     if (! base_type.empty() && type_of(interface_filament) == base_type)
         return interface_slot;
+    // The body sits beside the base's own body, so it has to be a material that sticks to it: the same type, or
+    // the same adhesion category the prime tower groups materials by. PETG beside a PLA base would part like an
+    // interface does.
+    const auto &categories = print_config.filament_adhesiveness_category.values;
+    const int base_filament = object_config.support_filament.value;
+    const auto sticks_to_base = [&](unsigned int filament) {
+        if (base_type.empty() || type_of(int(filament) + 1) == base_type)
+            return true;
+        return base_filament > 0 && size_t(base_filament - 1) < categories.size() && filament < categories.size() &&
+               categories[filament] == categories[size_t(base_filament - 1)];
+    };
     std::optional<unsigned int> best;
     std::pair<bool, bool> best_rank;
     for (unsigned int filament = 0; filament < print_config.filament_type.values.size(); ++ filament) {
         if (filament == interface_slot || filament >= print_config.filament_soluble.values.size() ||
             print_config.filament_soluble.get_at(filament) || print_config.filament_is_support.get_at(filament) ||
-            resolved_support_filament_nozzle_idx(print_config, int(filament) + 1) != interface_idx)
+            resolved_support_filament_nozzle_idx(print_config, int(filament) + 1) != interface_idx ||
+            ! sticks_to_base(filament))
             continue;
         const std::pair<bool, bool> rank { type_of(int(filament) + 1) == base_type,
             std::find(object_filaments.begin(), object_filaments.end(), filament) != object_filaments.end() };

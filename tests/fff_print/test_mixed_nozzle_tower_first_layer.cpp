@@ -623,8 +623,9 @@ TEST_CASE("Fine skins under a coarse body: the coarse nozzle lays the tower leve
 
 // A coarse tool laying the tower's bed level drew the brim loops, the solid fill and the base at
 // the fine nozzle's 0.25 mm width. The fill, spaced at that width, was only about 83 percent full
-// on a 0.2 mm layer.
-TEST_CASE("A tower bed level laid by the coarse tool is at its own width, full, and keeps the brim's first-layer flow boost",
+// on a 0.2 mm layer. The brim's first-layer flow boost is capped so the road is no wider than 1.25
+// times its nozzle, and the cap is read for the brim's own width, not the shared one.
+TEST_CASE("A tower bed level laid by the coarse tool is at its own width, full, and its brim boost is capped for that width",
           "[TestRebuild][TowerFirstLayer]")
 {
     const bool swapped = GENERATE(false, true);
@@ -644,8 +645,10 @@ TEST_CASE("A tower bed level laid by the coarse tool is at its own width, full, 
     REQUIRE(audit.chamfer_width > 0.);
     // Every coarse road on the bed level is at least 0.75 x its nozzle.
     CHECK(audit.narrowest >= 0.75 * 0.6);
-    // The brim is laid with the 1.15 first-layer boost over the chamfer loops above it.
-    CHECK_THAT(audit.brim_width / audit.chamfer_width, Catch::Matchers::WithinAbs(1.15, 0.035));
+    // The brim road is already 1.25 x the 0.6 mm nozzle, so the 1.15 first-layer boost is capped away: the brim
+    // is as wide as the chamfer loops above it, and no wider than the cap.
+    CHECK_THAT(audit.brim_width / audit.chamfer_width, Catch::Matchers::WithinAbs(1.0, 0.035));
+    CHECK(audit.brim_width <= 1.25 * 0.6 + 0.03);
     // About as full as a single nozzle's solid fill (94 percent at 0.75 mm wide and 0.2 mm high).
     CHECK(audit.fullness >= 0.88);
     CHECK(audit.fullness <= 1.02);

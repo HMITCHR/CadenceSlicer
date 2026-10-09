@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <limits>
+#include <map>
 #include <string>
 #include <sstream>
 #include <utility>
@@ -116,6 +117,9 @@ public:
         // Ramming held above its level to meet the outgoing tool's minimum; audited as a road but
         // not the top of its support chain.
         bool held_above_level{false};
+        // A road of a held coarse prime level, or a later road lifted to it (WipeTowerInfo::held_above): no
+        // road laid lower down may cross it before the tower top reaches it.
+        bool held_level{false};
     };
 
     struct NozzleChangeResult
@@ -663,6 +667,19 @@ private:
     void   plan_lagging_tower();
     // Last temperature requested per filament, so the base emits one M104 per change of target.
     std::vector<int> m_tower_temperature_held;
+    // Per block id, the top of the held coarse prime roads standing above the tower top (WipeTowerInfo::held_above),
+    // until a full level reaches them. Purge and ramming rows laid in that block before then are lifted to it.
+    std::map<int, float> m_held_road_z;
+    // Per block id, where the held level's rows end in the block (its cursor after them). A full level below the
+    // held top starts its block fill there, so the fill lies beside the held rows, not under them.
+    std::map<int, float> m_held_rows_end;
+    float held_road_z(const WipeTowerBlock *block) const
+    {
+        if (block == nullptr)
+            return 0.f;
+        const auto it = m_held_road_z.find(block->block_id);
+        return it == m_held_road_z.end() ? 0.f : it->second;
+    }
     void   update_tower_base_extent();
     Vec2f            m_origin;
     std::vector<int>    m_last_layer_id;
@@ -822,6 +839,10 @@ private:
         // A later run of the same part layer's tool changes on the other nozzle; its results join
         // the previous level's visit.
         bool  joins_visit{false};
+        // A prime-only coarse arrival less than the coarse minimum below its part layer: its prime
+        // road stands on the tower top at the coarse minimum and the top does not rise to it, so the
+        // tower never gets ahead of the part. Its roads are not the top of their block.
+        bool  held_above{false};
         // Compact-tower filler layer: deposit (and count) its wall although it has no tool change.
         bool  force_emit{false};
 		float toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }

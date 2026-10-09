@@ -1270,15 +1270,21 @@ void PrintObject::assign_interface_nozzle_body_filament()
     const std::optional<unsigned int> filament =
         mixed_nozzle_interface_nozzle_body_filament(m_print->config(), m_config, this->object_extruders());
     if (! filament) {
+        // Refused here, once the support shows the finer nozzle really lays body, not before slicing.
+        const PrintConfig &print_config = m_print->config();
         const int interface_filament = m_config.support_interface_filament.value;
-        const int nozzle = resolved_support_filament_nozzle_idx(m_print->config(), interface_filament);
-        std::ostringstream message;
-        message << "Support on \"" << this->model_object()->name << "\" needs a filament on the "
-                << m_print->config().nozzle_diameter.get_at(size_t(std::max(nozzle, 1) - 1))
-                << " mm nozzle for the support body next to the interface, other than the interface filament "
-                << interface_filament << ". Map a filament of the support's material to that nozzle, or set the "
-                   "support interface filament to the support base filament.";
-        throw Slic3r::SlicingError(message.str());
+        const int nozzle = resolved_support_filament_nozzle_idx(print_config, interface_filament);
+        const auto type_of = [&print_config](int filament) {
+            return filament > 0 && size_t(filament) <= print_config.filament_type.values.size() ?
+                print_config.filament_type.values[size_t(filament - 1)] : std::string();
+        };
+        const std::string base_type = type_of(m_config.support_filament.value);
+        throw Slic3r::SlicingError(Slic3r::format(
+            "[SRL-F15] Support on \"%1%\": the %2% mm nozzle lays part of the support body next to the interface and has "
+            "no %3% filament for it (the interface is %4%; that body has to be %3% to stick to the base). Map a %3% "
+            "filament to the %2% mm nozzle, or use a %3% interface filament.",
+            this->model_object()->name, print_config.nozzle_diameter.get_at(size_t(std::max(nozzle, 1) - 1)), base_type,
+            type_of(interface_filament)));
     }
     for (SupportLayer *layer : flagged)
         layer->interface_nozzle_body_filament = *filament;
