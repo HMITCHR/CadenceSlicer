@@ -3912,19 +3912,17 @@ bool PresetBundle::check_filament_temp_equation_by_printer_type_and_nozzle_for_m
 
 namespace {
 // BBL machine profiles express the nozzle in `printer_variant` ("0.2", "0.6"). Compare it
-// numerically so a formatting difference can never silently unbind a filament.
+// numerically so a formatting difference can never silently unbind a filament. Read with a dot
+// whatever the app language: std::stod follows the C locale, which a comma-decimal language sets,
+// and then read "0.6" as 0 and found no profile for either nozzle.
 bool printer_variant_is_diameter(const Preset &printer, double diameter)
 {
     const std::string variant = printer.config.opt_string("printer_variant");
     if (variant.empty())
         return false;
-    try {
-        size_t consumed = 0;
-        const double value = std::stod(variant, &consumed);
-        return consumed == variant.size() && std::isfinite(value) && std::fabs(value - diameter) < EPSILON;
-    } catch (const std::exception &) {
-        return false;
-    }
+    size_t consumed = 0;
+    const double value = string_to_double_decimal_point(variant, &consumed);
+    return consumed == variant.size() && std::isfinite(value) && std::fabs(value - diameter) < EPSILON;
 }
 } // namespace
 

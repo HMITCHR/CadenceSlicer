@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <map>
 #include <set>
+#include <sstream>
 
 #include <wx/display.h>
 #include <wx/stattext.h>
@@ -41,6 +44,24 @@ constexpr int kMaterialsPage = int(MixedNozzleWizardPage::Materials);
 constexpr int kSpeedPage = int(MixedNozzleWizardPage::Speed);
 constexpr int kReviewPage = int(MixedNozzleWizardPage::Review);
 constexpr int kMorePage = int(MixedNozzleWizardPage::MoreOptions);
+
+// Heights in the fine layer list and box are shown with a dot, like every other height in setup,
+// and the box reads "0.1" or "0,1" whatever the app language. wxString::Format and ToDouble follow
+// the C locale, which a comma-decimal language sets, so a typed "0.1" was refused there.
+wxString height_text(double height)
+{
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(4) << height;
+    return from_u8(stream.str());
+}
+
+bool read_height(wxString text, double &height)
+{
+    text.Trim(true).Trim(false);
+    text.Replace(",", ".");
+    return text.ToCDouble(&height);
+}
 
 // The reasons and their wording live in the model.
 wxString wizard_review_message(const std::string &reason)
@@ -222,7 +243,7 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
             if (pair.size() != 2)
                 return coarse ? _L("Coarse") : _L("Fine");
             const double diameter = coarse ? std::max(pair[0], pair[1]) : std::min(pair[0], pair[1]);
-            return (coarse ? _L("Coarse") : _L("Fine")) + wxString::Format(" %g mm", diameter);
+            return (coarse ? _L("Coarse") : _L("Fine")) + " " + height_text(diameter) + " mm";
         };
         m_body_assignments = new wxPanel(mode_page, wxID_ANY);
         auto *body_sizer = new wxBoxSizer(wxVERTICAL);
@@ -388,7 +409,7 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
     m_fine_nozzle_line = label(finish_page, finish_page->GetSizer(), wxEmptyString);
     m_fine_height_choice = choice(finish_page, finish_page->GetSizer(), {}, wxNOT_FOUND);
     m_fine_height = new wxTextCtrl(finish_page, wxID_ANY,
-        wxString::Format("%.4g", m_input.draft.chosen_fine_height));
+        height_text(m_input.draft.chosen_fine_height));
     finish_page->GetSizer()->Add(m_fine_height, 0, wxEXPAND | wxALL, FromDIP(8));
     // The status line takes space only while it has something to say, and the help sits right under
     // the dropdown.
@@ -405,7 +426,7 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
         const bool custom = selected >= 0 && std::size_t(selected) >= m_fine_height_values.size();
         m_fine_height->Show(custom);
         if (!custom && selected >= 0)
-            m_fine_height->ChangeValue(wxString::Format("%.4g", m_fine_height_values[std::size_t(selected)]));
+            m_fine_height->ChangeValue(height_text(m_fine_height_values[std::size_t(selected)]));
         finish_page->Layout();
         // A pick belongs to the finish it was made at.
         m_cadence_picked_id.reset();
@@ -934,10 +955,12 @@ void MixedNozzleWizardDialog::refresh_fine_heights()
     // The fine tool's own limits capped by its diameter, as in build_wizard_candidates(). Rebuilt
     // when the material roles change, since they decide which nozzle is fine.
     WizardHeightEnvelope envelope;
+    double fine_nozzle = 0.;
     if (m_input.draft.fine_logical_filament) {
         const auto fine = resolve_mixed_nozzle_tool(m_input.effective_config,
             *m_input.draft.fine_logical_filament, MixedNozzleResolveScope::PhysicalToolOnly);
         if (fine) {
+            fine_nozzle = fine.tool->nozzle_diameter;
             envelope.min_height = resolved_min_layer_height(m_input.effective_config,
                                                             fine.tool->physical_extruder);
             envelope.max_height = std::min(
@@ -947,7 +970,19 @@ void MixedNozzleWizardDialog::refresh_fine_heights()
     }
     m_fine_height_values = legal_fine_heights(m_input.effective_config, m_input.catalogue, envelope);
 
-    const double current = m_input.draft.chosen_fine_height;
+    double current = m_input.draft.chosen_fine_height;
+    // Setup starts from the selected process's layer height. With two nozzles kept on another
+    // nozzle's printer variant (0.2 + 0.6 on the 0.4 or 0.6 profile) that height is above the fine
+    // nozzle's limit, so the page opened on Custom with a refusal and no coarse layers. Start on
+    // the listed height nearest half the fine nozzle instead (0.10 for a 0.2, as its own profile).
+    const bool outside = std::isfinite(envelope.min_height) && std::isfinite(envelope.max_height) &&
+        (current > envelope.max_height + 1e-9 || current < envelope.min_height - 1e-9);
+    if (outside && !m_fine_height_values.empty() && fine_nozzle > 0.) {
+        const double target = fine_nozzle / 2.;
+        current = *std::min_element(m_fine_height_values.begin(), m_fine_height_values.end(),
+            [target](double a, double b) { return std::abs(a - target) < std::abs(b - target); });
+        m_input.draft.chosen_fine_height = current;
+    }
     // Each row says what its height is for and which cadences it opens; the row in effect is
     // marked.
     const WizardFinishPage finish = wizard_finish_page(m_input.effective_config,
@@ -958,7 +993,7 @@ void MixedNozzleWizardDialog::refresh_fine_heights()
     for (std::size_t i = 0; i < m_fine_height_values.size(); ++i) {
         // "0.08 mm (finest)", "0.1 mm (now)". The height in effect is selected below.
         const wxString row = i < finish.rows.size() ? from_u8(finish.rows[i].label)
-                                                    : wxString::Format("%.4g mm", m_fine_height_values[i]);
+                                                    : height_text(m_fine_height_values[i]) + " mm";
         m_fine_height_choice->Append(row);
         if (std::abs(m_fine_height_values[i] - current) < 1e-9) selected = int(i);
     }
@@ -966,7 +1001,7 @@ void MixedNozzleWizardDialog::refresh_fine_heights()
     const bool custom = selected == wxNOT_FOUND;
     m_fine_height_choice->SetSelection(custom ? int(m_fine_height_values.size()) : selected);
     m_fine_height->Show(custom);
-    if (custom && current > 0.) m_fine_height->ChangeValue(wxString::Format("%.4g", current));
+    if (custom && current > 0.) m_fine_height->ChangeValue(height_text(current));
 }
 
 bool MixedNozzleWizardDialog::selected_fine_height(double &height)
@@ -977,7 +1012,7 @@ bool MixedNozzleWizardDialog::selected_fine_height(double &height)
         return true;
     }
     // "Custom..." keeps the free-text path and its validation.
-    return m_fine_height->GetValue().ToDouble(&height) && std::isfinite(height) && height > 0.;
+    return read_height(m_fine_height->GetValue(), height) && std::isfinite(height) && height > 0.;
 }
 
 bool MixedNozzleWizardDialog::refresh_candidates()
@@ -1444,7 +1479,7 @@ bool MixedNozzleWizardDialog::refresh_review()
     m_shared_consent->SetLabel(from_u8(wizard_shared_consent_label(m_review.shared_plate_count)));
     m_shared_consent->Show(m_review.needs_shared_consent);
     m_pages->GetPage(kReviewPage)->Layout();
-    m_fine_height->ChangeValue(wxString::Format("%.4g", candidate.fine_height));
+    m_fine_height->ChangeValue(height_text(candidate.fine_height));
     refresh_fine_heights();
 
     // The summary reads the review, the prepared Apply's notes and the tower ledger, once each.
@@ -1652,7 +1687,13 @@ void MixedNozzleWizardDialog::navigate(int direction)
         if (current == kSpeedPage) {
             const WizardCandidate *candidate = selected_candidate();
             if (candidate == nullptr) {
-                set_wrapped(m_status, _L("Pick a coarse layer to continue."));
+                // With no rows at all, keep saying why rather than asking for a pick that cannot
+                // be made.
+                double height = 0.;
+                if (m_cadence_page.rows.empty() && selected_fine_height(height))
+                    set_wrapped(m_status, from_u8(wizard_no_coarse_layer_line(height, m_input.effective_config)));
+                else
+                    set_wrapped(m_status, _L("Pick a coarse layer to continue."));
                 return;
             }
             m_input.draft.chosen_coarse_height = candidate->coarse_height;

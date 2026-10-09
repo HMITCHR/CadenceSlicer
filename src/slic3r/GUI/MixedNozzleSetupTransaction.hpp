@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "libslic3r/PresetBundle.hpp"
+#include <boost/log/trivial.hpp>
 #include "slic3r/GUI/MixedNozzleSetupController.hpp"
 #include "slic3r/GUI/MixedNozzleNativeEntry.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -187,6 +188,12 @@ inline MixedNozzleSetupPlan stage_mixed_nozzle_setup(
         ? staged.prints.find_preset(*request.resolved_process_name) : nullptr;
     if (request.resolved_process_name &&
         (requested_process == nullptr || !requested_process->is_compatible)) {
+        BOOST_LOG_TRIVIAL(warning) << "stage_mixed_nozzle_setup: process " << *request.resolved_process_name
+                                   << (requested_process == nullptr ? " is not installed" : " does not fit the staged printer")
+                                   << "; project min_layer_height "
+                                   << (staged.project_config.has("min_layer_height") ? staged.project_config.opt_serialize("min_layer_height") : std::string("none"))
+                                   << ", max_layer_height "
+                                   << (staged.project_config.has("max_layer_height") ? staged.project_config.opt_serialize("max_layer_height") : std::string("none"));
         plan.diagnostic = "Mixed-Nozzle setup process selection is unavailable.";
         return plan;
     }

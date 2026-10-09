@@ -211,3 +211,68 @@ TEST_CASE("A changed configuration and Turn off clear an old visible ranking dec
     CHECK_FALSE(controller.estimate("current cadence"));
     CHECK(mixed_nozzle_ranking_key(0, *first.model, live_config) != launched.front().slice.key);
 }
+
+TEST_CASE("A ranking slice of an empty plate is refused before it reaches the G-code export", "[TestRebuild][Ranking][EmptyPlate]")
+{
+    const MixedNozzleSlicingMode mode = GENERATE(MixedNozzleSlicingMode::FeatureSplit,
+                                                 MixedNozzleSlicingMode::BodySplit);
+    WizardProject project(h2d_02_06_spec());
+    add_rank_object(project, mode);
+    SetupChoice choice;
+    choice.mode = mode;
+    choice.fine_height = 0.10;
+    choice.ratio = 2;
+    if (mode == MixedNozzleSlicingMode::BodySplit)
+        choice.joining = JoiningChoice::Off;
+    REQUIRE(run_wizard_setup(project, choice).applied);
+    DynamicPrintConfig config = wizard_plate_effective_config(project.bundle, project.plate);
+    config.apply(*project.plate.config());
+    for (int fine_filament : {0, 1}) {
+        auto empty = std::make_shared<Model>(project.model);
+        empty->clear_objects();
+        DynamicPrintConfig row = config;
+        if (fine_filament == 1)
+            mixed_nozzle_single_nozzle_baseline(*empty, row, 1, 0.10);
+        MixedNozzleRankingCancel cancel;
+        const MixedNozzleSliceTime time = mixed_nozzle_slice_time(*empty, row, true, Vec3d::Zero(), {}, cancel);
+        CAPTURE(fine_filament, time.diagnostic, int(time.status));
+        // Stopped before the export, which reads the first object (address 0 on Windows, a crash).
+        CHECK(time.status == MixedNozzleSliceTimeStatus::Refused);
+        CHECK(time.diagnostic == "Add a model to the plate to see print times.");
+    }
+}
+
+TEST_CASE("Feature Split setup on 0.4 / 0.8 applies when the project's layer limits do not fit an MN preset",
+          "[TestRebuild][BugGuard][ProcessBasis]")
+{
+    // A Windows user's 0.4 / 0.8 project: step 3 named an MN preset that its compatibility check
+    // rejects (the 0.4 nozzle carried the 0.8 profile's 0.16 minimum), so setup staging refused
+    // every row and Apply. Setup now keeps the current process for such a preset.
+    const std::string start = GENERATE(std::string("0.4"), std::string("0.8"));
+    const bool stale = GENERATE(false, true);
+    ProfileSpec spec;
+    spec.vendor = "BBL";
+    spec.printer = start == "0.4" ? "Bambu Lab H2D 0.4 nozzle" : "Bambu Lab H2D 0.8 nozzle";
+    spec.process = start == "0.4" ? "0.20mm Standard @BBL H2D" : "0.40mm Standard @BBL H2D 0.8 nozzle";
+    const std::string m4 = "Bambu PLA Basic @BBL H2D", m8 = "Bambu PLA Basic @BBL H2D 0.8 nozzle";
+    spec.materials = start == "0.4" ? std::vector<std::string>{m4, m4} : std::vector<std::string>{m8, m8};
+    spec.also_visible_materials = {start == "0.4" ? m8 : m4};
+    spec.nozzles = {0.4, 0.8};
+    spec.min_heights = stale ? std::vector<double>{0.16, 0.16} : std::vector<double>{0.08, 0.16};
+    spec.max_heights = {0.28, 0.56};
+    spec.tower = Vec2d(260., 120.);
+    WizardProject project(spec);
+    add_rank_object(project, MixedNozzleSlicingMode::FeatureSplit);
+    SetupChoice choice;
+    choice.mode = MixedNozzleSlicingMode::FeatureSplit;
+    choice.fine_height = 0.20;
+    choice.ratio = 2;
+    CAPTURE(start, stale);
+    CHECK(run_wizard_setup(project, choice).applied);
+    const std::string process = project.bundle.prints.get_edited_preset().name;
+    CAPTURE(process);
+    if (stale)
+        CHECK(process == spec.process);
+    else
+        CHECK(process.rfind("MN Feature 0.4-0.8 ", 0) == 0);
+}

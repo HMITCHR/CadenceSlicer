@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <set>
 #include <utility>
 #include <algorithm>
@@ -28,6 +29,7 @@
 #endif
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Color.hpp"
@@ -126,12 +128,13 @@ bool mixed_nozzle_parse_layer_pair(const char *layers, double &fine, double &coa
     const std::size_t separator = text.find('/');
     if (separator == std::string::npos)
         return false;
-    try {
-        fine = std::stod(text.substr(0, separator));
-        coarse = std::stod(text.substr(separator + 1));
-    } catch (const std::exception &) {
+    // Read with a dot whatever the app language (std::stod follows the C locale).
+    size_t fine_end = 0;
+    size_t coarse_end = 0;
+    fine = string_to_double_decimal_point(std::string_view(text).substr(0, separator), &fine_end);
+    coarse = string_to_double_decimal_point(std::string_view(text).substr(separator + 1), &coarse_end);
+    if (fine_end == 0 || coarse_end == 0)
         return false;
-    }
     return fine > 0. && coarse > 0.;
 }
 
@@ -161,7 +164,7 @@ wxString mixed_nozzle_process_label_for(const Preset &preset, const DynamicPrint
         mixed_nozzle_parse_layer_pair(entry->layers, stock_fine, stock_coarse) &&
         (!is_approx(*fine, stock_fine) || !is_approx(*coarse, stock_coarse))) {
         // The heights are what the slicer uses, so they are shown exactly.
-        layers = wxString::Format("%.2f/%.2f", *fine, *coarse);
+        layers = from_u8(float_to_string_decimal_point(*fine, 2) + "/" + float_to_string_decimal_point(*coarse, 2));
         provenance = from_u8(" \xc2\xb7 ") + format_wxstr(_L("from %1%"), from_u8(entry->layers));
     }
     const wxString applicability = entry->feature_only ? _L("Feature") : _L("Both modes");

@@ -15,7 +15,9 @@
 
 #include <algorithm>
 #include <array>
+#include <clocale>
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -490,7 +492,14 @@ TEST_CASE("The one nozzle only line is always there while ranking runs and never
     const WizardCadencePage none = wizard_cadence_page(finish.candidates, 0.12, finish.config, refused);
     const std::string refused_line = wizard_speed_summary_line(none, 0.12, std::size_t(0), false);
     CHECK(refused_line.rfind(lead, 0) == 0);
-    CHECK(has_text(refused_line, "choose the fine material first"));
+    CHECK(refused_line == lead + "no time: choose the fine material first.");
+    // A note that is a whole sentence (an empty plate): the rows' punctuation, one period.
+    WizardEstimate empty_plate;
+    empty_plate.status = WizardEstimateStatus::Unavailable;
+    empty_plate.note = "Add a model to the plate to see print times.";
+    const WizardCadencePage empty = wizard_cadence_page(finish.candidates, 0.12, finish.config, empty_plate);
+    CHECK(wizard_speed_summary_line(empty, 0.12, std::size_t(0), false) ==
+          lead + "no time: Add a model to the plate to see print times.");
     // Timed: its time.
     const WizardCadencePage timed = wizard_cadence_page(finish.candidates, 0.12, finish.config,
                                                         wizard_estimate(30660., 0, 0.));
@@ -551,6 +560,20 @@ TEST_CASE("The excluded coarse layer line names the layer and the nozzle's limit
     CHECK(has_text(page.exclusions, "0.64 mm"));
     CHECK(has_text(page.exclusions, "0.8 mm nozzle"));
     CHECK(has_text(page.exclusions, "0.56 mm"));
+}
+
+TEST_CASE("Step 3 with two nozzles of one size says so instead of asking for a smaller fine layer",
+          "[TestRebuild][BugGuard][WizardSpeed]")
+{
+    PresetBundle bundle = installed_bbl_profiles();
+    FullPrintConfig config = resolver_for_pair(bundle, 0.2, 0.8);
+    const std::string mixed = wizard_no_coarse_layer_line(0.3, config);
+    CHECK(mixed.find("Pick a smaller fine layer") != std::string::npos);
+    config.nozzle_diameter.values = {0.6, 0.6};
+    const std::string equal = wizard_no_coarse_layer_line(0.3, config);
+    CAPTURE(equal);
+    CHECK(equal.rfind("Both nozzles are 0.6 mm, so there is no coarse layer to pick.", 0) == 0);
+    CHECK(equal.find("two different sizes") != std::string::npos);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1127,6 +1150,58 @@ TEST_CASE("A slot's material settings are composed for the nozzle the plate puts
           "base:Bambu PETG Basic @BBL H2D 0.2 nozzle");
     CHECK_FALSE(fixture.bundle.mixed_nozzle_rebind_plan(plate_map,
         fixture.current_plate.get_real_filament_volume_maps(fixture.bundle.project_config)).offered);
+}
+
+namespace {
+// The app's C locale follows its language; Windows picks that from the regional format. Switches to
+// the first comma-decimal locale this machine has for the life of the object.
+struct CommaDecimalLocale
+{
+    std::string previous = std::setlocale(LC_ALL, nullptr);
+    const char *name = nullptr;
+    CommaDecimalLocale()
+    {
+        for (const char *candidate : {"de_DE.UTF-8", "de_DE", "German_Germany.1252", "de-DE", "fr_FR.UTF-8", "fr_FR"})
+            if (std::setlocale(LC_ALL, candidate) != nullptr) {
+                char text[8] = "";
+                std::snprintf(text, sizeof(text), "%.1f", 0.5);
+                if (text[1] == ',') {
+                    name = candidate;
+                    return;
+                }
+            }
+        std::setlocale(LC_ALL, previous.c_str());
+    }
+    ~CommaDecimalLocale() { std::setlocale(LC_ALL, previous.c_str()); }
+};
+} // namespace
+
+TEST_CASE("Setup finds each nozzle's material profile and the MN presets in a comma-decimal language",
+          "[TestRebuild][BugGuard][Locale]")
+{
+    CoverFixture fixture;
+    const std::vector<int> plate_map = fixture.current_plate.get_real_filament_maps(fixture.bundle.project_config);
+    REQUIRE(plate_map.size() == 8);
+    const std::vector<WizardProcessPresetRow> rows{
+        {"MN Body 0.4-0.2 Standard 0.10-0.20 @BBL", "", 0.10, 0.20, true},
+        {"MN Body 0.2-0.6 Standard 0.12-0.36 @BBL", "", 0.12, 0.36, true},
+    };
+    const CommaDecimalLocale comma;
+    if (comma.name == nullptr)
+        SKIP("no comma-decimal locale installed");
+    CAPTURE(comma.name);
+    const DynamicPrintConfig composed = fixture.bundle.full_config(true, plate_map);
+    const auto *values = composed.option<ConfigOptionStrings>("mixed_nozzle_filament_binding");
+    REQUIRE(values != nullptr);
+    REQUIRE(values->values.size() > 5);
+    // Each slot is bound to its own nozzle's profile, as in English.
+    CHECK(values->values[5] == "base:Bambu PETG HF @BBL H2D 0.4 nozzle");
+    CHECK(values->values[3] == "base:Bambu PETG Basic @BBL H2D 0.2 nozzle");
+    // The MN Body preset for the pair is found from its name.
+    const auto choice = wizard_body_process_choice(rows, "MN Feature 0.2-0.4 0.08-0.24 Candidate @BBL", "",
+                                                   {0.2, 0.4}, 0.10, 0.20);
+    CHECK(choice.preset == "MN Body 0.4-0.2 Standard 0.10-0.20 @BBL");
+    CHECK_FALSE(choice.no_body_preset_for_pair);
 }
 
 // ------------------------------------------------------------------------------------------------

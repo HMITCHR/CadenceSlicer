@@ -70,6 +70,13 @@ MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPr
         // Applied twice, as PartPlate does: the second apply sees the objects the first created.
         print.apply(model, config);
         print.apply(model, config);
+        // An empty plate has nothing to time. Stop here: the G-code export reads the first object,
+        // and with none it read address 0 and crashed the app on Windows.
+        if (print.objects().empty()) {
+            out.status = MixedNozzleSliceTimeStatus::Refused;
+            out.diagnostic = "Add a model to the plate to see print times.";
+            return out;
+        }
         const StringObjectException error = print.validate();
         if (!error.string.empty()) {
             out.status = MixedNozzleSliceTimeStatus::Refused;

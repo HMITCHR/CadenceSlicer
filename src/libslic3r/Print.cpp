@@ -3986,6 +3986,12 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     }
 
     name_tbb_thread_pool_threads_set_locale();
+    // Slicing writes numbers as text and reads some back: the prime tower's height and width tags,
+    // and the G-code the time checks render and time. The worker threads above run with a dot, but
+    // this thread keeps the app's locale, which follows its language. In German, French and other
+    // comma-decimal languages the tower tags came out as "0,100000" and the timed G-code read
+    // wrong. Slice with a dot, as the command line and the G-code export already do.
+    CNumericLocalesSetter locales_setter;
 
     //compute the PrintObject with the same geometries
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, enter, use_cache=%2%, object size=%3%")%this%use_cache%m_objects.size();

@@ -1822,11 +1822,21 @@ bool Sidebar::priv::switch_diameter(bool single)
             reseed_combo(right_extruder->combo_diameter, second);
         }
     };
+    // The boxes hold "0.2" in every language. ToDouble() reads the user's locale, so a comma-decimal
+    // language (German, French and others, which Windows picks from the regional format) failed to
+    // read it and Keep both nozzles put both boxes back. ToCDouble() always reads a dot.
+    auto parse_pair = [](const wxString &requested_left, const wxString &requested_right, double &left, double &right) {
+        const bool parsed = requested_left.ToCDouble(&left) && requested_right.ToCDouble(&right) &&
+                            mixed_nozzle_project_nozzle_pair_valid({left, right});
+        if (!parsed)
+            BOOST_LOG_TRIVIAL(warning) << "switch_diameter: could not read the nozzle pair \""
+                                       << into_u8(requested_left) << "\" / \"" << into_u8(requested_right) << "\"";
+        return parsed;
+    };
     auto open_project_setup = [&](const wxString &requested_left, const wxString &requested_right) {
         double left = 0.;
         double right = 0.;
-        const bool parsed = requested_left.ToDouble(&left) && requested_right.ToDouble(&right) &&
-                            mixed_nozzle_project_nozzle_pair_valid({left, right});
+        const bool parsed = parse_pair(requested_left, requested_right, left, right);
         // The same wizard every other entry opens, with the pair pre-applied, starting at step 1
         // so the split mode is chosen rather than assumed.
         const bool committed = parsed && this->plater->open_mixed_nozzle_wizard(
@@ -1835,8 +1845,12 @@ bool Sidebar::priv::switch_diameter(bool single)
         if (committed) {
             reseed_combo(left_extruder->combo_diameter, requested_left);
             reseed_combo(right_extruder->combo_diameter, requested_right);
-        } else
+        } else {
+            if (parsed)
+                BOOST_LOG_TRIVIAL(info) << "switch_diameter: setup for " << left << " / " << right
+                                        << " was closed without applying; the nozzle boxes go back to the project's nozzles";
             reseed_from_effective();
+        }
         return committed;
     };
 
@@ -1845,10 +1859,11 @@ bool Sidebar::priv::switch_diameter(bool single)
     auto keep_both_nozzles = [&](const wxString &requested_left, const wxString &requested_right) {
         double left = 0.;
         double right = 0.;
-        const bool parsed = requested_left.ToDouble(&left) && requested_right.ToDouble(&right) &&
-                            mixed_nozzle_project_nozzle_pair_valid({left, right});
+        const bool parsed = parse_pair(requested_left, requested_right, left, right);
         const bool committed = parsed &&
             this->plater->keep_mixed_nozzle_nozzle_pair({left, right});
+        if (parsed && !committed)
+            BOOST_LOG_TRIVIAL(warning) << "switch_diameter: Keep both nozzles did not write " << left << " / " << right;
         if (committed) {
             reseed_combo(left_extruder->combo_diameter, requested_left);
             reseed_combo(right_extruder->combo_diameter, requested_right);
@@ -1901,6 +1916,8 @@ bool Sidebar::priv::switch_diameter(bool single)
         if (outcome.open_setup)
             return open_project_setup(diameter_left, diameter_right);
         if (outcome.return_before_preset_lookup) {
+            BOOST_LOG_TRIVIAL(info) << "switch_diameter: nozzle change to " << captured.left << " / " << captured.right
+                                    << " cancelled; the nozzle boxes go back to the project's nozzles";
             reseed_from_effective();
             return false;
         }
@@ -1916,6 +1933,8 @@ bool Sidebar::priv::switch_diameter(bool single)
     auto preset          = wxGetApp().preset_bundle->get_similar_printer_preset({}, diameter.ToStdString());
     if (preset == nullptr) {
         // ORCA add a text. this appears when user tries to change nozzle value but config doesnt have a inherited or compatible preset
+        BOOST_LOG_TRIVIAL(warning) << "switch_diameter: no printer profile for a " << into_u8(diameter)
+                                   << " mm nozzle; the nozzle boxes go back to the project's nozzles";
         MessageDialog dlg(this->plater, _L("Configuration incompatible"), _L("Warning"), wxICON_WARNING | wxOK);
         dlg.ShowModal();
         reseed_from_effective();
@@ -2349,8 +2368,11 @@ bool Sidebar::priv::sync_extruder_list(bool &only_external_material, bool is_man
         if (is_manual && obj->is_info_ready() && obj->GetExtderSystem()->GetTotalExtderCount() == 2) {
             const auto *map = printer_config.option<ConfigOptionInts>("physical_extruder_map");
             const std::vector<int> mapping = map ? map->values : std::vector<int>{0, 1};
-            if (mapping != std::vector<int>{0, 1} && mapping != std::vector<int>{1, 0})
+            if (mapping != std::vector<int>{0, 1} && mapping != std::vector<int>{1, 0}) {
+                BOOST_LOG_TRIVIAL(warning) << "[MNS-BASE-A02] sync_extruder_list: unexpected physical_extruder_map; "
+                                              "the printer's nozzles were not compared with the project pair";
                 return false;
+            }
             std::vector<double> machine_pair(2);
             for (size_t i = 0; i < 2; ++i)
                 machine_pair[mapping[i]] = mixed_nozzle_reported_diameter(obj->GetExtderSystem()->GetNozzleDiameter(i));
@@ -2753,16 +2775,16 @@ void Sidebar::priv::update_sync_status(const MachineObject *obj)
 
     if (extruder_nums == 1) {
         double value = 0.0;
-        single_extruder->diameter.ToDouble(&value);
+        single_extruder->diameter.ToCDouble(&value);
         extruder_infos[0].diameter = float(value);
     }
     else if(extruder_nums == 2){
         double value = 0.0;
-        left_extruder->diameter.ToDouble(&value);
+        left_extruder->diameter.ToCDouble(&value);
         extruder_infos[0].diameter = float(value);
     
         value = 0.0;
-        right_extruder->diameter.ToDouble(&value);
+        right_extruder->diameter.ToCDouble(&value);
         extruder_infos[1].diameter = float(value);
     }
 

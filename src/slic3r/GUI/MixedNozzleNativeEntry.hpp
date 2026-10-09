@@ -277,8 +277,11 @@ struct MixedNozzleSearchDescriptor {
 
     bool matches(std::string query) const
     {
+        // ASCII only: std::tolower follows the app's locale, and in Turkish it turns "I" into a
+        // dotless i, so "Infill" never matched "infill".
         auto lower = [](std::string value) {
-            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; });
             return value;
         };
         const std::string haystack = lower(label + " " + aliases);

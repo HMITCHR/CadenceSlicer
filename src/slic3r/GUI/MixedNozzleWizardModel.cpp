@@ -3,6 +3,7 @@
 #include "FeatureSplitEditorSupport.hpp"
 #include "MixedNozzleNativeEntry.hpp"
 #include "ValidationActionRouting.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/MixedNozzleConfig.hpp"
 #include "libslic3r/MixedNozzleProcessConfig.hpp"
 #include "libslic3r/RegionalLayerBands.hpp"
@@ -14,6 +15,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -1481,11 +1483,12 @@ std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine
         return {};
     if (baseline->status != WizardEstimateStatus::Estimated) {
         const std::string state =
-            baseline->status == WizardEstimateStatus::Unavailable && !baseline->note.empty() ? "no time, " + baseline->note :
+            baseline->status == WizardEstimateStatus::Unavailable && !baseline->note.empty() ? "no time: " + baseline->note :
             baseline->status == WizardEstimateStatus::Pending && page.baseline_slicing ? std::string("slicing now...") :
                                                                                           wizard_speed_time_text(*baseline);
-        // "slicing now..." already ends the sentence.
-        const bool ends_sentence = state.size() >= 3 && state.compare(state.size() - 3, 3, "...") == 0;
+        // "slicing now..." and a note that is a whole sentence ("Add a model ... times.") already
+        // end it.
+        const bool ends_sentence = !state.empty() && state.back() == '.';
         return "One nozzle only, " + height_text(fine_height) + " mm everywhere: " + state + (ends_sentence ? "" : ".");
     }
     std::string line = "One nozzle only, " + height_text(fine_height) + " mm everywhere: " +
@@ -1508,6 +1511,12 @@ std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine
 
 std::string wizard_no_coarse_layer_line(double fine_height, const FullPrintConfig &copied_effective_config)
 {
+    // Two nozzles of one size have no coarse layer at any fine layer, so say that rather than ask
+    // for a smaller fine layer.
+    const std::vector<double> &pair = copied_effective_config.nozzle_diameter.values;
+    if (pair.size() == 2 && pair[0] > 0. && std::abs(pair[0] - pair[1]) < 1e-6)
+        return "Both nozzles are " + height_text(pair[0]) + " mm, so there is no coarse layer to pick. Set the "
+               "left and right Nozzle boxes in the sidebar to two different sizes, then open setup again.";
     const MixedNozzleCoarseEnvelope envelope = mixed_nozzle_coarse_envelope(copied_effective_config);
     std::string line = "No coarse layer works with a " + height_text(fine_height) + " mm fine layer";
     if (envelope.resolved)
@@ -2137,10 +2146,18 @@ std::vector<double> pair_of(const std::string &name)
     for (const std::string prefix : {std::string(kBodyFamilyPrefix), std::string(kFeatureFamilyPrefix)}) {
         if (name.rfind(prefix, 0) != 0)
             continue;
-        double first = 0.;
-        double second = 0.;
-        if (std::sscanf(name.c_str() + prefix.size(), "%lf-%lf", &first, &second) == 2 &&
-            valid_height(first) && valid_height(second) && !approximately_equal(first, second))
+        // "0.2-0.6 ..." read with a dot whatever the app language. sscanf follows the C locale, so
+        // a comma-decimal language read no pair and setup found no MN preset for the nozzles.
+        const std::string_view rest = std::string_view(name).substr(prefix.size());
+        size_t first_end = 0;
+        const double first = string_to_double_decimal_point(rest, &first_end);
+        if (first_end == 0 || first_end >= rest.size() || rest[first_end] != '-')
+            continue;
+        size_t second_end = 0;
+        const double second = string_to_double_decimal_point(rest.substr(first_end + 1), &second_end);
+        if (second_end == 0)
+            continue;
+        if (valid_height(first) && valid_height(second) && !approximately_equal(first, second))
             return {std::min(first, second), std::max(first, second)};
     }
     return {};

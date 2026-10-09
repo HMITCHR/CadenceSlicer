@@ -1586,6 +1586,12 @@ PreparedWizardApply prepare_wizard_apply(const WizardDraft &draft,
     // family overrides it.
     if (draft.mode == MixedNozzleSlicingMode::FeatureSplit && project_pair.size() == 2 &&
         !(stock_process && wizard_process_family(*stock_process, {}) == WizardProcessFamily::FeatureSplit)) {
+        // Read compatibility after the requested pair and its limits are staged, as Body Split does
+        // below and as setup staging checks it. The live flags can be stale (a project whose limits
+        // still came from another nozzle's printer profile), which picked an MN Body preset that
+        // staging then found incompatible, so every row was refused.
+        if (staged_bundle.get_printer_extruder_count() == 2)
+            staged_bundle.update_compatible(PresetSelectCompatibleType::Never);
         const Preset &current = owners.preset_bundle->prints.get_edited_preset();
         const std::vector<WizardProcessPresetRow> rows = wizard_basis_rows(staged_bundle.prints, project_pair);
         const WizardProcessBasis basis = wizard_process_basis(rows, draft.mode, current.name, current.inherits(),
@@ -1597,9 +1603,23 @@ PreparedWizardApply prepare_wizard_apply(const WizardDraft &draft,
                 preset_fine = row.fine_height;
                 preset_coarse = row.coarse_height;
             }
-        body_process_lines = wizard_process_basis_lines(basis, current.name, project_pair, preset_fine,
+        // The basis list also offers an installed preset that names the pair but whose own
+        // compatibility check fails here (for example a project whose layer limits came from
+        // another nozzle's printer profile). Setup staging only selects compatible presets, so
+        // every row was refused. Keep the current process then, as for a pair with no preset.
+        WizardProcessBasis usable = basis;
+        if (!basis.preset.empty()) {
+            const Preset *picked = staged_bundle.prints.find_preset(basis.preset, false, true);
+            if (picked == nullptr || !picked->is_compatible) {
+                BOOST_LOG_TRIVIAL(warning) << "prepare_wizard_apply: " << basis.preset
+                                           << " does not fit the printer and its layer limits; keeping " << current.name;
+                usable = WizardProcessBasis{};
+                usable.no_preset_for_pair = true;
+            }
+        }
+        body_process_lines = wizard_process_basis_lines(usable, current.name, project_pair, preset_fine,
             preset_coarse, draft.chosen_fine_height, draft.chosen_coarse_height, can_switch_process);
-        basis_preset = basis.preset;
+        basis_preset = usable.preset;
     }
     if (draft.mode == MixedNozzleSlicingMode::BodySplit && project_pair.size() == 2 && !draft.keep_current_process &&
         !(stock_process && wizard_process_family(*stock_process, {}) == WizardProcessFamily::BodySplit)) {
@@ -2162,6 +2182,18 @@ MixedNozzleRankingSlice wizard_staged_slice(const PreparedWizardApply &prepared,
             if (ModelVolume *volume = find_volume(*model, delta.object_id, delta.volume_id))
                 volume->config.assign_config(delta.config);
         only_plate_instances_printable(*model, plate);
+        // Nothing on the plate: there is nothing to time, and slicing an empty plate is not
+        // something the slicer does anywhere else (the G-code export reads the first object).
+        const bool has_printable = std::any_of(model->objects.begin(), model->objects.end(),
+            [](const ModelObject *object) {
+                return object != nullptr && std::any_of(object->instances.begin(), object->instances.end(),
+                    [](const ModelInstance *instance) { return instance != nullptr && instance->printable; });
+            });
+        if (!has_printable) {
+            slice = MixedNozzleRankingSlice{};
+            slice.diagnostic = "Add a model to the plate to see print times.";
+            return slice;
+        }
 
         slice.is_bbl_printer = staged_bundle.is_bbl_vendor();
         slice.plate_origin = plate.get_origin();
