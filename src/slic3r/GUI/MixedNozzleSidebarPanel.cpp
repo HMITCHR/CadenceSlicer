@@ -1404,8 +1404,11 @@ bool MixedNozzleSidebarPanel::apply_body(wxString &tooltip)
              plater->changed_objects(affected_indices);
              plater->update_project_dirty_from_presets();
              plater->set_plater_dirty(true);
+             // Each part's filament cell is read again from the parts, as setup's Apply does, so the
+             // list shows the filament the G-code uses.
              if (wxGetApp().obj_list() != nullptr)
-                 wxGetApp().obj_list()->Refresh();
+                 wxGetApp().obj_list()->update_objects_list_filament_column(
+                     std::max<size_t>(1, wxGetApp().preset_bundle->filament_presets.size()));
          },
          [plater](const MixedNozzleSetupPlan &plan) {
              return plater->take_mixed_nozzle_setup_snapshot("Edit mixed-nozzle settings", plan);

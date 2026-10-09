@@ -1303,14 +1303,17 @@ std::string string_printf(const char *format, ...)
     return buffer;
 }
 
+// The product version, as the About dialog shows it. Readers of these lines match the application
+// name only (G-code import, the G-code processor), and projects carry SoftFever_VERSION in their own
+// metadata, so nothing compares this version.
 std::string header_slic3r_generated()
 {
-	return std::string(SLIC3R_APP_NAME " " SoftFever_VERSION);
+	return std::string(SLIC3R_APP_NAME " " CADENCE_PRODUCT_VERSION);
 }
 
 std::string header_gcodeviewer_generated()
 {
-	return std::string(GCODEVIEWER_APP_NAME " " SoftFever_VERSION);
+	return std::string(GCODEVIEWER_APP_NAME " " CADENCE_PRODUCT_VERSION);
 }
 
 unsigned get_current_pid()

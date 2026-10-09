@@ -7233,7 +7233,41 @@ void Print::_make_wipe_tower()
         // The rejection above is written for the tower's own tests. When a Body Split plate has
         // support on the coarser nozzle (the case the rc4 sweep hit), say what the user can change.
         const auto tower_rejection_for_user = [this](const std::string &rejection) {
-            if (!is_mixed_nozzle_body_split(m_config) || m_config.nozzle_diameter.values.size() != 2)
+            if (m_config.nozzle_diameter.values.size() != 2)
+                return rejection;
+            // The tower keeps materials that do not stick to each other (PLA and PETG, say) in
+            // separate blocks. When the two nozzles share no material, the fine nozzle's block is
+            // not laid on the levels the coarse nozzle takes, and the next fine level has no
+            // support under it. Say which materials and what to change.
+            if (is_mixed_nozzle_feature_split(m_config) || is_mixed_nozzle_body_split(m_config)) {
+                std::array<std::set<int>, 2> categories;
+                std::array<std::vector<std::string>, 2> types;
+                for (const unsigned int filament : this->extruders()) {
+                    const std::optional<size_t> extruder = physical_extruder_for_filament(m_config, filament);
+                    if (!extruder || *extruder > 1 || filament >= m_config.filament_adhesiveness_category.values.size())
+                        continue;
+                    categories[*extruder].insert(m_config.filament_adhesiveness_category.values[filament]);
+                    const std::string type = filament < m_config.filament_type.values.size() ? m_config.filament_type.values[filament] : std::string();
+                    if (!type.empty() && std::find(types[*extruder].begin(), types[*extruder].end(), type) == types[*extruder].end())
+                        types[*extruder].push_back(type);
+                }
+                const bool shared = std::any_of(categories[0].begin(), categories[0].end(),
+                                                [&categories](int category) { return categories[1].count(category) > 0; });
+                if (!categories[0].empty() && !categories[1].empty() && !shared) {
+                    const auto side = [this, &types](size_t extruder) {
+                        std::string names;
+                        for (const std::string &type : types[extruder])
+                            names += (names.empty() ? "" : " and ") + type;
+                        return (names.empty() ? std::string("one material") : names) + " on the " +
+                               Slic3r::float_to_string_decimal_point(m_config.nozzle_diameter.values[extruder], 1) + " mm nozzle";
+                    };
+                    return "The prime tower cannot be built with " + side(0) + " and " + side(1) +
+                           ": these materials do not stick to each other, so the tower keeps them apart and "
+                           "misses levels. Use the same kind of material on both nozzles (for example PLA for the "
+                           "walls and the sparse infill) and slice again.\n" + rejection;
+                }
+            }
+            if (!is_mixed_nozzle_body_split(m_config))
                 return rejection;
             const double coarse = std::max(m_config.nozzle_diameter.values[0], m_config.nozzle_diameter.values[1]);
             for (const PrintObject *object : m_objects) {

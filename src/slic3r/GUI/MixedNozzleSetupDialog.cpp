@@ -58,6 +58,8 @@ WizardEstimate ranking_estimate(const MixedNozzleSliceTime &time)
         return wizard_estimate(time.seconds, time.switches, time.tower_mm3);
     case MixedNozzleSliceTimeStatus::Refused:
         estimate.note = "slicing would refuse this choice";
+        estimate.refused = true;
+        estimate.refusal = time.diagnostic;
         break;
     case MixedNozzleSliceTimeStatus::Cancelled:
         estimate.note = "not estimated";
@@ -250,8 +252,14 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
                 event.Skip();
             });
             for (wxRadioButton *button : {fine, coarse})
-                button->Bind(wxEVT_RADIOBUTTON, [this, highlight](wxCommandEvent &event) {
+                button->Bind(wxEVT_RADIOBUTTON, [this, highlight, index](wxCommandEvent &event) {
                     highlight();
+                    // Choosing Fine or Coarse replaces the slot the part opened on; a slot picked in
+                    // More options in this session stays.
+                    if (index < m_body_slot_overrides.size() && m_body_slot_from_project[index]) {
+                        m_body_slot_overrides[index]->SetSelection(0);
+                        m_body_slot_from_project[index] = false;
+                    }
                     refresh_body_roles_view();
                     refresh_navigation();
                     event.Skip();
@@ -353,7 +361,7 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
     m_coarse_filament = material_picker(assign_page, assign_page->GetSizer(),
         m_input.draft.coarse_logical_filament ? int(*m_input.draft.coarse_logical_filament) : wxNOT_FOUND);
     m_coarse_resolved = resolved_line();
-    label(assign_page, assign_page->GetSizer(), m_input.materials_note.empty()
+    m_materials_note = label(assign_page, assign_page->GetSizer(), m_input.materials_note.empty()
         ? _L("Pre-selected from the materials detected on each nozzle.") : from_u8(m_input.materials_note));
     // Show the resolved nozzle, diameter and flow variant so the choice can be checked here.
     for (auto *picker : {m_fine_filament, m_coarse_filament})
@@ -597,9 +605,16 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
         const std::size_t own_slot = row.logical_filament >= 1 ? std::size_t(row.logical_filament - 1) : std::size_t(-1);
         label(m_body_slots_panel, m_body_slots_panel->GetSizer(), part_row_text(index,
             own_slot < m_input.filament_labels.size() ? m_input.filament_labels[own_slot] : std::string()));
-        auto *slot = choice(m_body_slots_panel, m_body_slots_panel->GetSizer(), items, 0);
-        slot->Bind(wxEVT_CHOICE, refresh_roles_on_choice);
+        // A part already on a slot other than the fine and coarse materials reopens on that slot.
+        const int opened_on = wizard_body_slot_choice(row.logical_filament, m_input.draft.fine_logical_filament,
+            m_input.draft.coarse_logical_filament, m_input.filament_labels.size());
+        auto *slot = choice(m_body_slots_panel, m_body_slots_panel->GetSizer(), items, opened_on);
+        slot->Bind(wxEVT_CHOICE, [this, index, refresh_roles_on_choice](wxCommandEvent &event) {
+            m_body_slot_from_project[index] = false;
+            refresh_roles_on_choice(event);
+        });
         m_body_slot_overrides.push_back(slot);
+        m_body_slot_from_project.push_back(opened_on != 0);
     }
     tower_page->GetSizer()->Add(m_body_slots_panel, 0, wxEXPAND);
     m_joining_panel = new wxPanel(tower_page, wxID_ANY);
@@ -906,6 +921,11 @@ void MixedNozzleWizardDialog::refresh_resolved_tools()
     };
     set_wrapped(m_fine_resolved, describe(m_fine_filament, false));
     set_wrapped(m_coarse_resolved, describe(m_coarse_filament, true));
+    // The slot setup puts on an empty coarse nozzle is the coarse material picked now.
+    const int coarse = m_coarse_filament->GetSelection();
+    if (m_materials_note != nullptr && !m_input.materials_empty_nozzle.empty() && coarse >= 0)
+        set_wrapped(m_materials_note, from_u8(wizard_empty_nozzle_note(m_input.materials_empty_nozzle,
+                                                                       std::size_t(coarse))));
     relayout_page(m_pages->GetPage(kMaterialsPage));
 }
 
@@ -1456,6 +1476,35 @@ bool MixedNozzleWizardDialog::refresh_review()
     summary.estimate = candidate.estimate;
     if (m_ranking)
         summary.baseline = m_ranking->estimate(WIZARD_RANKING_BASELINE_ROW);
+    // The supports as the project has them; setup keeps them. The prepared process below, when it
+    // is read, has the final word.
+    const std::vector<std::string> &filament_types = m_input.effective_config.filament_type.values;
+    const auto filament_type = [&filament_types](std::optional<std::size_t> slot) {
+        return slot && *slot < filament_types.size() ? filament_types[*slot] : std::string();
+    };
+    const auto support_side = [this, &material_label, &filament_type](int slot) {
+        WizardSupportSide side;
+        side.slot = slot;
+        if (slot > 0) {
+            const std::size_t logical = std::size_t(slot - 1);
+            side.material = material_label(logical);
+            side.type = filament_type(logical);
+            if (const auto resolved = resolve_mixed_nozzle_tool(m_input.effective_config, logical,
+                                                                MixedNozzleResolveScope::PhysicalToolOnly))
+                side.physical = resolved.tool->physical_extruder;
+        }
+        return side;
+    };
+    const auto set_supports = [&summary, &support_side](bool on, int base, int interface_slot, int top_layers) {
+        summary.supports = on;
+        summary.support_base = support_side(base);
+        summary.support_interface = support_side(interface_slot);
+        summary.support_interface_top_layers = top_layers;
+    };
+    set_supports(m_input.effective_config.enable_support.value, m_input.effective_config.support_filament.value,
+                 m_input.effective_config.support_interface_filament.value,
+                 m_input.effective_config.support_interface_top_layers.value);
+    summary.fine_material_type = filament_type(draft.fine_logical_filament);
     summary.tower_intent = draft.tower_intent;
     summary.changes = m_review.entries;
     summary.material_lines = m_binding_notes;
@@ -1473,6 +1522,9 @@ bool MixedNozzleWizardDialog::refresh_review()
         summary.process_before = native.process_before;
         summary.process_after = native.process_after;
         summary.also_changed = native.also_changed;
+        if (native.supports_read)
+            set_supports(native.supports, native.support_filament, native.support_interface_filament,
+                         native.support_interface_top_layers);
         // The first layer the prepared process prints, which is the preset's.
         if (native.first_layer_height > 0.)
             summary.first_layer = wizard_first_layer(first_layer.height, first_layer.speed,

@@ -1707,32 +1707,11 @@ void GCodeViewer::capture_physical_tool_state(const GCodeProcessorResult& gcode_
         input.configured_bindings.push_back(std::move(binding));
     }
 
-    // The result map is already keyed by logical extruder/filament. Preserve that
-    // authority directly; never reverse-map it through a physical tool (shared
-    // mappings such as {1,1} would otherwise become ambiguous and lose usage).
-    for (const auto& [logical, volume] : gcode_result.print_statistics.model_volumes_per_extruder) {
-        if (logical >= gcode_result.filament_densities.size() ||
-            logical >= gcode_result.filament_diameters.size() ||
-            !std::isfinite(volume) || volume < 0.0)
-            continue;
-        const double diameter = gcode_result.filament_diameters[logical];
-        const double density = gcode_result.filament_densities[logical];
-        if (!std::isfinite(diameter) || !std::isfinite(density) || diameter <= 0.0 || density <= 0.0)
-            continue;
-        constexpr double k_pi = 3.14159265358979323846;
-        PhysicalToolLogicalUsage usage;
-        usage.logical_filament = logical;
-        const double cross_section_mm2 = k_pi * 0.25 * diameter * diameter;
-        // Preserve Orca's current units: mm3 / mm2 * 0.001 = metres.
-        usage.model_usage_m = volume / cross_section_mm2 * 0.001;
-        // Filament density is stored in g/cm3: mm3 * g/cm3 * 0.001 = grams.
-        usage.model_usage_g = volume * density * 0.001;
-        input.logical_usage.push_back(std::move(usage));
-    }
-    std::sort(input.logical_usage.begin(), input.logical_usage.end(),
-              [](const PhysicalToolLogicalUsage& left, const PhysicalToolLogicalUsage& right) {
-                  return left.logical_filament < right.logical_filament;
-              });
+    // Part and supports, interface included: a filament that only prints the support interface
+    // used to read 0.00 m / 0.00 g here.
+    input.logical_usage = physical_tool_logical_usage(gcode_result.print_statistics.model_volumes_per_extruder,
+                                                      gcode_result.print_statistics.support_volumes_per_extruder,
+                                                      gcode_result.filament_diameters, gcode_result.filament_densities);
 
     // Build the owned snapshot, qualification and classification.
     m_physical_presentation_cache.clear();

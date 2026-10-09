@@ -48,6 +48,36 @@ std::vector<std::string> physical_tool_snapshot_filament_names(
     return names;
 }
 
+std::vector<PhysicalToolLogicalUsage> physical_tool_logical_usage(
+    const std::map<std::size_t, double>& model_volumes, const std::map<std::size_t, double>& support_volumes,
+    const std::vector<float>& filament_diameters, const std::vector<float>& filament_densities)
+{
+    // The result maps are keyed by logical filament already; never reverse-map through a physical
+    // tool (shared mappings such as {1,1} would become ambiguous and lose usage).
+    std::map<std::size_t, double> volumes;
+    for (const std::map<std::size_t, double>* source : {&model_volumes, &support_volumes})
+        for (const auto& [logical, volume] : *source)
+            if (std::isfinite(volume) && volume >= 0.0)
+                volumes[logical] += volume;
+    std::vector<PhysicalToolLogicalUsage> usage;
+    for (const auto& [logical, volume] : volumes) {
+        if (logical >= filament_densities.size() || logical >= filament_diameters.size())
+            continue;
+        const double diameter = filament_diameters[logical];
+        const double density = filament_densities[logical];
+        if (!std::isfinite(diameter) || !std::isfinite(density) || diameter <= 0.0 || density <= 0.0)
+            continue;
+        constexpr double k_pi = 3.14159265358979323846;
+        PhysicalToolLogicalUsage row;
+        row.logical_filament = logical;
+        // Orca's units: mm3 / mm2 * 0.001 = metres; mm3 * g/cm3 * 0.001 = grams.
+        row.model_usage_m = volume / (k_pi * 0.25 * diameter * diameter) * 0.001;
+        row.model_usage_g = volume * density * 0.001;
+        usage.push_back(row);
+    }
+    return usage;
+}
+
 PhysicalToolPreviewSnapshot::PhysicalToolPreviewSnapshot(PhysicalToolPreviewSnapshotInput input)
     : m_result_identity(input.result_identity)
     , m_mode(input.mode)

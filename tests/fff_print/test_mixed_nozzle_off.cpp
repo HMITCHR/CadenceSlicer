@@ -22,6 +22,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -1152,6 +1153,44 @@ SplitGcode split_config_block(const std::vector<std::string> &lines)
     return out;
 }
 
+// The print-progress lines (M73) and the estimated-time comments come from the time estimate, and a
+// whole-suite run can move the estimate by a few seconds, which adds or drops an M73 line. They are
+// taken out of the line-by-line comparison; the estimated normal-mode time is kept, in seconds.
+struct ProgressFree
+{
+    std::vector<std::string> lines;
+    size_t                   progress_lines { 0 };
+    double                   normal_seconds { -1. };
+};
+
+ProgressFree without_progress_lines(const std::vector<std::string> &body)
+{
+    ProgressFree out;
+    for (const std::string &line : body) {
+        if (line.rfind("M73 ", 0) == 0) {
+            ++out.progress_lines;
+            continue;
+        }
+        if (line.rfind("; estimated ", 0) == 0) {
+            const std::string normal = "; estimated printing time (normal mode) = ";
+            if (line.rfind(normal, 0) == 0) {
+                // "1d 2h 3m 4s", any of the parts left out.
+                double seconds = 0.;
+                std::istringstream parts(line.substr(normal.size()));
+                for (std::string part; parts >> part;) {
+                    const char unit = part.back();
+                    const double value = std::atof(part.substr(0, part.size() - 1).c_str());
+                    seconds += value * (unit == 'd' ? 86400. : unit == 'h' ? 3600. : unit == 'm' ? 60. : 1.);
+                }
+                out.normal_seconds = seconds;
+            }
+            continue;
+        }
+        out.lines.push_back(line);
+    }
+    return out;
+}
+
 // Settings stock does not list. Mode Off ignores the mixed-nozzle ones. This tree also keeps the
 // differs-from-system mask in the print config, because the G-code handoff reads it, so the
 // block lists it too. All are comment lines; no move, temperature or tool change depends on them.
@@ -1172,18 +1211,26 @@ TEST_CASE("Off matches stock OrcaSlicer G-code on the shared scenes", "[TestRebu
             comparable_lines(read_gzip(std::string(TEST_DATA_DIR) + "/stock-off/" + name + ".gcode.gz")));
         const SplitGcode ours = split_config_block(comparable_lines(StockOffScenes::slice(name)));
 
-        // Every line outside the config block is the same.
+        // Every line outside the config block is the same, apart from the time estimate's own lines.
+        const ProgressFree stock_body = without_progress_lines(stock.body);
+        const ProgressFree ours_body = without_progress_lines(ours.body);
         size_t first_diff = 0;
-        while (first_diff < stock.body.size() && first_diff < ours.body.size() &&
-               stock.body[first_diff] == ours.body[first_diff])
+        while (first_diff < stock_body.lines.size() && first_diff < ours_body.lines.size() &&
+               stock_body.lines[first_diff] == ours_body.lines[first_diff])
             ++first_diff;
         {
-            INFO("first differing line " << first_diff + 1 << " (stock " << stock.body.size() << " lines, ours "
-                 << ours.body.size() << ")");
-            INFO("stock: " << (first_diff < stock.body.size() ? stock.body[first_diff] : std::string("<end>")));
-            INFO("ours:  " << (first_diff < ours.body.size() ? ours.body[first_diff] : std::string("<end>")));
-            CHECK((first_diff == stock.body.size() && first_diff == ours.body.size()));
+            INFO("first differing line " << first_diff + 1 << " without progress lines (stock "
+                 << stock_body.lines.size() << " lines, ours " << ours_body.lines.size() << ")");
+            INFO("stock: " << (first_diff < stock_body.lines.size() ? stock_body.lines[first_diff] : std::string("<end>")));
+            INFO("ours:  " << (first_diff < ours_body.lines.size() ? ours_body.lines[first_diff] : std::string("<end>")));
+            CHECK(first_diff == stock_body.lines.size());
+            CHECK(first_diff == ours_body.lines.size());
         }
+        // Both carry progress lines and an estimated time, and the estimates agree within 1%.
+        CHECK(ours_body.progress_lines > 0);
+        CHECK((stock_body.progress_lines > 0) == (ours_body.progress_lines > 0));
+        REQUIRE(stock_body.normal_seconds > 0.);
+        CHECK_THAT(ours_body.normal_seconds, Catch::Matchers::WithinRel(stock_body.normal_seconds, 0.01));
 
         // Every stock setting is listed with the same value; additions are only the documented ones.
         for (const auto &[key, value] : stock.config) {

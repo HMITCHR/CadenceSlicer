@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -401,6 +403,158 @@ TEST_CASE("Support matrix on an H2D 0.2/0.8 slices to G-code; tree support on a 
     CHECK(failures.empty());
 }
 
+namespace {
+// First-layer brim roads that end on a support road, and the brim road count.
+struct BrimOverSupport {
+    std::string refusal;
+    size_t      brim_roads = 0;
+    size_t      support_roads = 0;
+    size_t      brim_on_support = 0;
+};
+
+BrimOverSupport brim_over_support(Mode mode)
+{
+    // Support base on the coarse PLA (2, right 0.8), interface on the fine side (3), a 5 mm brim.
+    const FilamentCase filaments{"base coarse, interface fine", 2, 3};
+    DynamicPrintConfig config = h2d_support_config(mode, 0.10, 0.30, 3, 0.20, k_normal, filaments);
+    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
+    config.set_key_value("brim_width", new ConfigOptionFloat(5.));
+    config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.));
+    CadenceTest::Scene scene;
+    scene.config   = config;
+    scene.populate = [mode](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        load_two_arm_model(model, print, cfg, mode, 0.10, 0.30);
+    };
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+    // With CADENCE_TEST_DUMP_DIR set, keeps the G-code there for inspection.
+    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR"))
+        std::ofstream(std::string(dir) + "/brim-" + mode_name(mode) + ".gcode") << facts.gcode;
+    BrimOverSupport out;
+    out.refusal = facts.refusal.string;
+    if (!out.refusal.empty())
+        return out;
+    // The first layer, the column's outline on it, and the support standing on the bed beside it.
+    double first_z = std::numeric_limits<double>::max();
+    for (const Move &move : facts.moves)
+        if (CadenceTest::model_road(move))
+            first_z = std::min(first_z, double(move.position.z()));
+    const auto on_first_layer = [first_z](const Move &move) {
+        return move.type == EMoveType::Extrude && std::abs(double(move.position.z()) - first_z) < 1e-3;
+    };
+    // Support roads on the first layer as segments, with their widths.
+    struct Road { Vec2d a, b; double width; };
+    std::vector<Road> support;
+    for (size_t i = 1; i < facts.moves.size(); ++i) {
+        const Move &move = facts.moves[i];
+        if (on_first_layer(move) &&
+            (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface))
+            support.push_back({Vec2d(facts.moves[i - 1].position.x(), facts.moves[i - 1].position.y()),
+                               Vec2d(move.position.x(), move.position.y()), double(move.width)});
+    }
+    out.support_roads = support.size();
+    const auto distance = [](const Vec2d &p, const Road &road) {
+        const Vec2d d = road.b - road.a;
+        const double t = d.squaredNorm() > 0. ? std::clamp((p - road.a).dot(d) / d.squaredNorm(), 0., 1.) : 0.;
+        return (p - (road.a + t * d)).norm();
+    };
+    // A brim road that ends inside a support road would lay filament on top of it.
+    for (const Move &move : facts.moves)
+        if (on_first_layer(move) && move.extrusion_role == erBrim) {
+            ++out.brim_roads;
+            const Vec2d end(move.position.x(), move.position.y());
+            out.brim_on_support += std::any_of(support.begin(), support.end(), [&](const Road &road) {
+                return distance(end, road) < 0.5 * (road.width + double(move.width)) - 0.05;
+            });
+        }
+    return out;
+}
+} // namespace
+
+TEST_CASE("The brim keeps off the first-layer support in Feature Split as it does in Off",
+          "[TestRebuild][Support][Brim]")
+{
+    // With the support base on the coarse nozzle, the fine nozzle lays the support on the first
+    // layer. The brim used to ignore that support and run over it, a brim stock does not lay.
+    for (const Mode mode : {Mode::Off, Mode::Feature}) {
+        const BrimOverSupport tally = brim_over_support(mode);
+        INFO(mode_name(mode) << ": " << tally.refusal);
+        REQUIRE(tally.refusal.empty());
+        CAPTURE(tally.brim_roads, tally.support_roads, tally.brim_on_support);
+        CHECK(tally.support_roads > 0);
+        CHECK(tally.brim_roads > 0);
+        // A few brim ends touch a support road where the two meet; before the fix nearly every
+        // Feature Split brim road lay on the support.
+        CHECK(tally.brim_on_support * 20 <= tally.brim_roads);
+    }
+}
+
+TEST_CASE("Feature Split exports a plate of two different objects of different heights, with and without supports",
+          "[TestRebuild][Support][MultiObject]")
+{
+    // An 8 mm column with two arms and a 20 mm box beside it: each object gets its own layer plan
+    // block, so the plate exports. One block for the whole plate used to refuse the export.
+    const double box_height = 20.;
+    for (const bool supports : {false, true}) {
+        INFO((supports ? "with supports" : "without supports"));
+        const FilamentCase filaments{"base coarse, interface fine", 2, 3};
+        DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.20, k_normal, filaments);
+        config.set_key_value("enable_support", new ConfigOptionBool(supports));
+        CadenceTest::Scene scene;
+        scene.config   = config;
+        double column_max_x = 0., box_min_x = 0.;
+        scene.populate = [&](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+            ModelObject *column = model.add_object();
+            column->name = "two-arm-overhang";
+            column->add_volume(two_arm_mesh(), ModelVolumeType::MODEL_PART, false);
+            column->add_instance();
+            column->instances.front()->set_offset(Vec3d(60., 60., 0.));
+            column->ensure_on_bed();
+            ModelObject *box = model.add_object();
+            box->name = "tall-box";
+            box->add_volume(make_cube(14., 14., box_height), ModelVolumeType::MODEL_PART, false);
+            box->add_instance();
+            box->instances.front()->set_offset(Vec3d(110., 60., 0.));
+            box->ensure_on_bed();
+            column_max_x = column->instance_bounding_box(0).max.x();
+            box_min_x = box->instance_bounding_box(0).min.x();
+            print.apply(model, cfg);
+            print.set_status_silent();
+        };
+        const CadenceTest::Facts facts = CadenceTest::slice(scene);
+        INFO(facts.refusal.string);
+        REQUIRE(facts.refusal.string.empty());
+        REQUIRE_FALSE(facts.gcode.empty());
+        REQUIRE(column_max_x < box_min_x);
+        CHECK(facts.emitted.plan_start_markers == 2);
+        CHECK(facts.emitted.plan_end_markers == 2);
+        CHECK_FALSE(facts.emitted.plan_malformed);
+
+        // Both objects print in full: walls up to each one's own top, sparse infill inside each.
+        double column_top = 0., box_top = 0.;
+        size_t column_sparse = 0, box_sparse = 0, support_roads = 0;
+        for (const Move &move : facts.moves) {
+            if (move.type != EMoveType::Extrude)
+                continue;
+            const bool on_box = double(move.position.x()) > box_min_x - 1.;
+            if (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface)
+                ++support_roads;
+            if (!CadenceTest::model_road(move))
+                continue;
+            (on_box ? box_top : column_top) = std::max(on_box ? box_top : column_top, double(move.position.z()));
+            if (move.extrusion_role == erInternalInfill)
+                ++(on_box ? box_sparse : column_sparse);
+        }
+        CAPTURE(column_top, box_top, column_sparse, box_sparse, support_roads);
+        CHECK_THAT(box_top, Catch::Matchers::WithinAbs(box_height, 0.11));
+        CHECK_THAT(column_top, Catch::Matchers::WithinAbs(8., 0.11));
+        CHECK(column_sparse > 0);
+        CHECK(box_sparse > 0);
+        if (supports)
+            CHECK(support_roads > 0);
+        else
+            CHECK(support_roads == 0);
+    }
+}
 
 namespace {
 // The prime tower as the automatic tower setup leaves it: auto-sized pad under a 35 mm width cap.
@@ -2039,4 +2193,39 @@ TEST_CASE("The coarse nozzle never lays support thinner than its minimum layer h
     CAPTURE(body.roads, body.thin_roads);
     REQUIRE(body.roads > 0);
     CHECK(body.thin_roads == 0);
+}
+
+TEST_CASE("Feature Split with PLA walls and PETG sparse infill on the other nozzle says what to change",
+          "[TestRebuild][Tower][MaterialMix]")
+{
+    // The owner's Windows test: PLA walls on the 0.2, sparse infill in PETG HF (slot 4) on the 0.8,
+    // no support. The tower keeps PLA and PETG in separate blocks, so it cannot be built; the
+    // refusal names the two materials and the fix.
+    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
+    config.set_key_value("enable_support", new ConfigOptionBool(false));
+    config.set_key_value("filament_map", new ConfigOptionInts{1, 1, 1, 2});
+    config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(4));
+    CadenceTest::Scene scene;
+    scene.config   = config;
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = "cube";
+        object->add_volume(make_cube(30., 30., 12.), ModelVolumeType::MODEL_PART, false);
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    std::string message;
+    try {
+        const CadenceTest::Facts facts = CadenceTest::slice(scene);
+        message = facts.refusal.string;
+    } catch (const std::exception &error) {
+        message = error.what();
+    }
+    INFO(message);
+    REQUIRE_FALSE(message.empty());
+    CHECK(message.find("PLA on the 0.2 mm nozzle and PETG on the 0.8 mm nozzle") != std::string::npos);
+    CHECK(message.find("Use the same kind of material on both nozzles") != std::string::npos);
 }

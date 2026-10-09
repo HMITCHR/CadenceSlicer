@@ -58,6 +58,12 @@ struct WizardNativeReview {
     std::string engine_refusal;
     // The Process setting that refusal names.
     std::string engine_refusal_key;
+    // Supports as the prepared process leaves them. Slots are 1-based, 0 = Default.
+    bool supports_read {false};
+    bool supports {false};
+    int support_filament {0};
+    int support_interface_filament {0};
+    int support_interface_top_layers {0};
 };
 
 // The step the wizard opens on, the one the entry point's question belongs to.
@@ -102,6 +108,8 @@ struct MixedNozzleWizardDialogInput {
     std::vector<std::string> filament_labels;
     // Shown under the material pickers when setup had to put a material on a nozzle itself.
     std::string materials_note;
+    // The nozzle that note names. The note then follows the coarse material picked.
+    std::string materials_empty_nozzle;
     // True when this opening counts as the first-run introduction, so the Plater records it as
     // seen.
     bool show_intro_line {false};
@@ -223,12 +231,16 @@ private:
     ::ComboBox *m_coarse_filament {nullptr};
     wxStaticText *m_fine_resolved {nullptr};
     wxStaticText *m_coarse_resolved {nullptr};
+    // The line under the pickers; it follows the coarse pick when setup fills an empty nozzle.
+    wxStaticText *m_materials_note {nullptr};
     wxWindow *m_body_assignments {nullptr};
     // Per Body Split part: Fine and Coarse on step 1, the kept-slot note, and the exact slot on
     // More options (0 = set by Fine or Coarse).
     std::vector<std::pair<wxRadioButton *, wxRadioButton *>> m_body_roles;
     std::vector<wxStaticText *> m_body_role_notes;
     std::vector<wxChoice *> m_body_slot_overrides;
+    // True while a part's exact slot is the one it opened on and nobody has changed it.
+    std::vector<bool> m_body_slot_from_project;
     wxPanel *m_body_slots_panel {nullptr};
     wxStaticText *m_joining_summary {nullptr};
     wxButton *m_off_link {nullptr};

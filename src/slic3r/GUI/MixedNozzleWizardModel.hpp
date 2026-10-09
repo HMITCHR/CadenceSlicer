@@ -192,7 +192,16 @@ struct WizardEstimate {
     unsigned int switches {0};
     double tower_mm3 {0.};
     std::string note;
+    // An Unavailable row whose slice was refused, with the reason the slicer gave.
+    bool refused {false};
+    std::string refusal;
 };
+
+// True when the row's slice failed or was refused, so Apply would give a plate that cannot slice.
+inline bool wizard_estimate_unsliceable(const WizardEstimate &estimate)
+{
+    return estimate.status == WizardEstimateStatus::Failed || estimate.refused;
+}
 
 // The G-code processor's error against a real print, as a fraction of the estimate. Fills the
 // interval only; rows are not compared by it.
@@ -392,7 +401,8 @@ WizardCadencePage wizard_cadence_page(const std::vector<WizardCandidate> &candid
 
 // The row to select once estimates arrive. A row picked in this session (`explicit_pick`) stays.
 // Otherwise a ranked page selects the clear fastest, and on a tie the tied row with the fewest
-// nozzle changes, then the first. An unranked page keeps `kept_candidate`.
+// nozzle changes, then the first. An unranked page keeps `kept_candidate`. A row that could not be
+// sliced is never kept: the selection moves to the first row that slices.
 std::optional<std::size_t> wizard_ranked_selection(const WizardCadencePage &page,
                                                    std::optional<std::size_t> kept_candidate,
                                                    bool explicit_pick = false);
@@ -721,11 +731,15 @@ struct WizardMaterialDefaults {
     std::optional<std::size_t> coarse;
     // Says what setup did when no material sat on the coarse nozzle. Empty otherwise.
     std::string note;
+    // That nozzle, as the note names it ("the 0.6 mm nozzle"). Empty when a material sat on it.
+    std::string empty_nozzle;
 };
 WizardMaterialDefaults wizard_default_materials(const std::vector<double> &nozzle_diameters,
                                                 const std::vector<int> &filament_map,
                                                 const std::vector<std::string> &filament_types,
                                                 const std::vector<std::size_t> &object_slots);
+// The note for an empty coarse nozzle, naming the slot setup puts there: the coarse material picked.
+std::string wizard_empty_nozzle_note(const std::string &empty_nozzle, std::size_t coarse_slot);
 
 // Body Split asks per part whether it prints fine or coarse; its material follows from Materials. A
 // part on a third material keeps its slot while that slot is on its nozzle, and More options can
@@ -749,6 +763,11 @@ struct WizardBodySlotOverride {
     std::size_t slot {0};
     std::size_t physical {0};
 };
+// The More options exact slot choice a Body Split part opens on: its own slot (1-based, as the
+// choice lists slots after "Set by Fine or Coarse") when that slot is neither the fine nor the coarse
+// material, so an exact slot set before reads as set. Otherwise 0, "Set by Fine or Coarse".
+int wizard_body_slot_choice(int part_slot, std::optional<std::size_t> fine_slot,
+                            std::optional<std::size_t> coarse_slot, std::size_t slot_count);
 // Each part's nozzle as it is now. A part with no nozzle goes coarse; if that leaves every part on
 // one nozzle, the smallest part goes fine.
 std::vector<WizardBodyRole> wizard_default_body_roles(const std::vector<WizardBodyRoleRow> &rows,
@@ -848,6 +867,15 @@ struct WizardSummaryRow {
     std::string value;
 };
 
+// One side of the supports on the Review page: the slot that prints it (1-based, 0 = Default), the
+// nozzle it resolves to, its material label and its filament type.
+struct WizardSupportSide {
+    int slot {0};
+    std::optional<std::size_t> physical;
+    std::string material;
+    std::string type;
+};
+
 // Everything the Review page says, from values the wizard already has. The dialog only lays it out.
 struct WizardReviewSummaryInput {
     MixedNozzleSlicingMode mode {MixedNozzleSlicingMode::Off};
@@ -865,6 +893,13 @@ struct WizardReviewSummaryInput {
     std::vector<std::string> joined_assemblies;
     std::optional<WizardEstimate> estimate;
     std::optional<WizardEstimate> baseline;
+    // Supports as Apply leaves them: the base and the interface, and the fine material's type for
+    // the interface layer hint.
+    bool supports {false};
+    WizardSupportSide support_base;
+    WizardSupportSide support_interface;
+    int support_interface_top_layers {0};
+    std::string fine_material_type;
     std::string process_before;
     std::string process_after;
     WizardTowerIntent tower_intent {WizardTowerIntent::Preserve};

@@ -599,6 +599,11 @@ static ExPolygons outer_inner_brim_area(const Print& print,
                         expolygons_append(brim_area, areas);
             }
             support_material_extruder = object->config().support_filament;
+            // A mixed-nozzle first support layer whose body the interface nozzle lays prints it with
+            // that nozzle's body filament, as tool ordering counts it. That filament keeps the brim
+            // off the support, as the support filament does in stock.
+            if (!object->support_layers().empty() && object->support_layers().front()->base_on_interface_nozzle)
+                support_material_extruder = object->support_layers().front()->interface_nozzle_body_filament + 1;
             if (support_material_extruder == 0 && object->has_support_material()) {
                 if (print.config().print_sequence == PrintSequence::ByObject)
                     support_material_extruder = objectWithExtruder.second;

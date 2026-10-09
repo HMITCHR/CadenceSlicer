@@ -368,6 +368,108 @@ TEST_CASE("The project's own coarse layer reads now and stays selected when time
     CHECK(wizard_ranked_selection(fresh, n5, false) == std::optional<std::size_t>{0});
 }
 
+TEST_CASE("A coarse layer that could not be sliced does not stay selected, and Review does not say ready",
+          "[TestRebuild][BugGuard][WizardSpeed]")
+{
+    // The project was set up at N5 (0.40 mm). After a nozzle change its row no longer slices.
+    RankCube cube = rank_cube(kRankCubeSeconds);
+    const std::size_t n5 = cube.by_ratio.at(5);
+    cube.candidates[n5].estimate = WizardEstimate{};
+    cube.candidates[n5].estimate->status = WizardEstimateStatus::Failed;
+    const auto check_moves_off = [&cube, n5](const char *what) {
+        INFO(what);
+        const WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config,
+                                                           wizard_estimate(9000., 0, 0.));
+        REQUIRE_FALSE(page.ranked);
+        const std::optional<std::size_t> bad_row = row_of(page, n5);
+        REQUIRE(bad_row);
+        // Held as the project's own row, or only selected: the selection moves to the fastest row that slices.
+        for (const bool explicit_pick : {true, false}) {
+            const std::optional<std::size_t> selected = wizard_ranked_selection(page, n5, explicit_pick);
+            REQUIRE(selected);
+            CHECK(*selected != *bad_row);
+            CHECK(page.rows[*selected].ratio == 7);
+        }
+    };
+    check_moves_off("failed slice");
+    WizardEstimate refused;
+    refused.status = WizardEstimateStatus::Unavailable;
+    refused.note = "slicing would refuse this choice";
+    refused.refused = true;
+    refused.refusal = "Tree support cannot have its base on the 0.8 mm nozzle yet.";
+    cube.candidates[n5].estimate = refused;
+    check_moves_off("refused slice");
+    // A row that is only waiting for its time stays selected.
+    cube.candidates[n5].estimate = WizardEstimate{};
+    const WizardCadencePage waiting = wizard_cadence_page(cube.candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
+    CHECK(wizard_ranked_selection(waiting, n5, true) == row_of(waiting, n5));
+
+    // Review with that row: not ready, and the link goes back to the coarse layer list.
+    WizardReviewSummaryInput input;
+    input.mode = MixedNozzleSlicingMode::FeatureSplit;
+    input.nozzle_diameters = {0.2, 0.8};
+    input.fine_height = 0.08;
+    input.coarse_height = 0.40;
+    input.estimate = WizardEstimate{};
+    input.estimate->status = WizardEstimateStatus::Failed;
+    WizardReviewSummary summary = wizard_review_summary(input);
+    CHECK_FALSE(summary.ready);
+    CHECK(summary.ready_line.rfind("Can't apply yet.", 0) == 0);
+    CHECK(summary.target == WizardFixTarget::Speed);
+    CHECK(summary.target_label == "Go to Detail and speed");
+    input.estimate = refused;
+    summary = wizard_review_summary(input);
+    CHECK_FALSE(summary.ready);
+    CHECK(has_text(summary.ready_line, refused.refusal));
+    input.estimate = wizard_estimate(8000., 10, 0.);
+    CHECK(wizard_review_summary(input).ready);
+}
+
+TEST_CASE("Review says which nozzle prints the supports and the interface, and suggests 3 interface layers for another material",
+          "[TestRebuild][BugGuard][WizardReview]")
+{
+    // The owner's L part: 0.2 left fine PLA, 0.6 right coarse PLA base, PETG interface on the left.
+    WizardReviewSummaryInput input;
+    input.mode = MixedNozzleSlicingMode::FeatureSplit;
+    input.nozzle_diameters = {0.2, 0.6};
+    input.fine_physical = 0;
+    input.coarse_physical = 1;
+    input.fine_height = 0.1;
+    input.coarse_height = 0.3;
+    input.fine_material_type = "PLA";
+    input.supports = true;
+    input.support_base = WizardSupportSide{3, std::size_t(1), "3: PLA Basic", "PLA"};
+    input.support_interface = WizardSupportSide{2, std::size_t(0), "2: PETG Basic", "PETG"};
+    input.support_interface_top_layers = 2;
+    const auto value_of = [](const WizardReviewSummary &summary, const std::string &label) -> std::string {
+        for (const WizardSummaryRow &row : summary.rows)
+            if (row.label == label)
+                return row.value;
+        return "<none>";
+    };
+    WizardReviewSummary summary = wizard_review_summary(input);
+    CHECK(value_of(summary, "Supports") == "right 0.6 mm, 3: PLA Basic");
+    CHECK(value_of(summary, "Support interface") == "left 0.2 mm, 2: PETG Basic");
+    const std::string hint = value_of(summary, "Interface layers");
+    CHECK(has_text(hint, "Set Top interface layers to 3 (now 2)"));
+    CHECK(has_text(hint, "PETG"));
+    // Three layers already, or an interface in the part's own material: no hint.
+    input.support_interface_top_layers = 3;
+    CHECK(value_of(wizard_review_summary(input), "Interface layers") == "<none>");
+    input.support_interface_top_layers = 2;
+    input.support_interface.type = "PLA";
+    CHECK(value_of(wizard_review_summary(input), "Interface layers") == "<none>");
+    // Default slots say so.
+    input.support_base = WizardSupportSide{};
+    input.support_interface = WizardSupportSide{};
+    summary = wizard_review_summary(input);
+    CHECK(has_text(value_of(summary, "Supports"), "(Default)"));
+    CHECK(has_text(value_of(summary, "Support interface"), "same as the supports"));
+    // No supports: no support rows.
+    input.supports = false;
+    CHECK(value_of(wizard_review_summary(input), "Supports") == "<none>");
+}
+
 TEST_CASE("The one nozzle only line is always there while ranking runs and never ends in four dots",
           "[TestRebuild][BugGuard][WizardSpeed]")
 {
@@ -621,11 +723,49 @@ TEST_CASE("The materials are matched from what each nozzle holds",
     const WizardMaterialDefaults fallback = wizard_default_materials(pair, {1, 1}, {"PLA", "PLA"}, {1});
     CHECK(fallback.fine == std::optional<std::size_t>{1});
     CHECK(fallback.coarse == std::optional<std::size_t>{0});
-    CHECK_FALSE(fallback.note.empty());
+    CHECK(fallback.note == "No material sits on the 0.6 mm nozzle yet, so setup puts slot 1 there. Pick another if you like.");
+    CHECK(kitten.empty_nozzle.empty());
+    // After the user picks slot 3 (or 1) for the coarse layers, the line names that slot.
+    REQUIRE(fallback.empty_nozzle == "the 0.6 mm nozzle");
+    CHECK(wizard_empty_nozzle_note(fallback.empty_nozzle, 2) ==
+          "No material sits on the 0.6 mm nozzle yet, so setup puts slot 3 there. Pick another if you like.");
+    CHECK(has_text(wizard_empty_nozzle_note(fallback.empty_nozzle, 0), "slot 1 there"));
     // One material only: the coarse choice is left to the user.
     const WizardMaterialDefaults single = wizard_default_materials(pair, {1}, {"PLA"}, {0});
     CHECK(single.fine == std::optional<std::size_t>{0});
     CHECK_FALSE(single.coarse.has_value());
+}
+
+TEST_CASE("An exact material slot set in More options reads as set when setup opens again",
+          "[TestRebuild][BugGuard][WizardParts]")
+{
+    // Fine material slot 4, coarse slot 6. The cylinder was pinned to slot 7 and Apply wrote it.
+    const std::optional<std::size_t> fine = 3, coarse = 5;
+    CHECK(wizard_body_slot_choice(7, fine, coarse, 8) == 7);
+    // A part on the fine or coarse material, on no slot of its own, or on a slot the project no
+    // longer has opens on "Set by Fine or Coarse".
+    CHECK(wizard_body_slot_choice(4, fine, coarse, 8) == 0);
+    CHECK(wizard_body_slot_choice(6, fine, coarse, 8) == 0);
+    CHECK(wizard_body_slot_choice(0, fine, coarse, 8) == 0);
+    CHECK(wizard_body_slot_choice(9, fine, coarse, 8) == 0);
+
+    // Opening on slot 7 applies slot 7 again; "Set by Fine or Coarse" would have moved the
+    // cylinder to the coarse material.
+    WizardBodyRoleRow cube, cylinder;
+    cube.object_id = cylinder.object_id = 3;
+    cube.volume_id = 11;
+    cylinder.volume_id = 12;
+    cube.current_slot = 5;
+    cube.current_physical = 1;
+    cylinder.current_slot = 6;
+    cylinder.current_physical = 1;
+    const std::vector<WizardBodyRoleRow> rows{cube, cylinder};
+    const std::vector<WizardBodyRole> roles{WizardBodyRole::Coarse, WizardBodyRole::Coarse};
+    const std::vector<std::optional<WizardBodySlotOverride>> reopened{std::nullopt, WizardBodySlotOverride{6, 1}};
+    const std::vector<WizardBodyAssignment> body = wizard_body_roles_to_slots(rows, roles, 3, 5, 0, 1, reopened);
+    REQUIRE(body.size() == 2);
+    CHECK(body[1].logical_filament == 6);
+    CHECK(body[1].coarse);
 }
 
 TEST_CASE("Body Split part rows give each part's size",

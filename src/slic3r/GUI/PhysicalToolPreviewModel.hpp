@@ -37,6 +37,13 @@ struct PhysicalToolLogicalUsage {
     double model_usage_g {0.0};
 };
 
+// What each logical filament lays on the part and on its supports, interface included, from the
+// G-code processor's per-filament volumes (mm3), in filament order. A filament without a usable
+// diameter or density is left out.
+std::vector<PhysicalToolLogicalUsage> physical_tool_logical_usage(
+    const std::map<std::size_t, double>& model_volumes, const std::map<std::size_t, double>& support_volumes,
+    const std::vector<float>& filament_diameters, const std::vector<float>& filament_densities);
+
 struct PhysicalToolBindingFact {
     std::size_t logical_filament {0};
     std::optional<uint8_t> configured_physical_tool;

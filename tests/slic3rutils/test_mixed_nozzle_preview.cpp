@@ -168,3 +168,26 @@ TEST_CASE("An Off slice does not offer the physical tool preview", "[TestRebuild
         return entry.type == libvgcode::EViewType::Tool;
     }));
 }
+
+TEST_CASE("The physical tool legend counts what a filament lays on the supports and the interface",
+          "[TestRebuild][PhysicalPreview]")
+{
+    // The L PETG print: filament 1 prints the part and part of the support, filament 2 (PETG) only
+    // the support interface, filament 3 sparse infill and the support base. The processor keeps
+    // support and interface roads apart from the part's.
+    const std::map<std::size_t, double> model{{0, 9000.}, {2, 3000.}};
+    const std::map<std::size_t, double> support{{0, 500.}, {1, 178.}, {2, 1200.}};
+    const std::vector<float> diameters(3, 1.75f);
+    const std::vector<float> densities{1.24f, 1.27f, 1.24f};
+    const std::vector<PhysicalToolLogicalUsage> usage = physical_tool_logical_usage(model, support, diameters, densities);
+    REQUIRE(usage.size() == 3);
+    const double area = 3.14159265358979323846 * 0.25 * 1.75 * 1.75;
+    CHECK(usage[1].logical_filament == 1);
+    CHECK_THAT(usage[1].model_usage_m, Catch::Matchers::WithinRel(178. / area * 0.001, 1e-6));
+    CHECK_THAT(usage[1].model_usage_g, Catch::Matchers::WithinRel(178. * 1.27 * 0.001, 1e-6));
+    CHECK(usage[1].model_usage_m > 0.07);
+    CHECK_THAT(usage[0].model_usage_g, Catch::Matchers::WithinRel(9500. * 1.24 * 0.001, 1e-6));
+    CHECK_THAT(usage[2].model_usage_g, Catch::Matchers::WithinRel(4200. * 1.24 * 0.001, 1e-6));
+    // A filament with no density is left out rather than shown as 0 g.
+    CHECK(physical_tool_logical_usage(model, support, diameters, {1.24f, 0.f, 1.24f}).size() == 2);
+}

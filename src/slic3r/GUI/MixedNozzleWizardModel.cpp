@@ -1273,9 +1273,13 @@ std::optional<std::size_t> wizard_ranked_selection(const WizardCadencePage &page
                     return index;
         return std::nullopt;
     };
+    // A row that could not be sliced is never kept selected, not even the project's own row.
+    const auto unsliceable = [&page](std::size_t index) {
+        return page.rows[index].estimate && wizard_estimate_unsliceable(*page.rows[index].estimate);
+    };
     // Only a row picked in this session outranks the estimates; a static default is not a choice.
     if (explicit_pick)
-        if (const std::optional<std::size_t> kept = row_of_kept())
+        if (const std::optional<std::size_t> kept = row_of_kept(); kept && !unsliceable(*kept))
             return kept;
     // On a tie, prefer the tied row with the fewest nozzle changes (fewer restart blobs, less
     // tower), then the first of those.
@@ -1289,7 +1293,14 @@ std::optional<std::size_t> wizard_ranked_selection(const WizardCadencePage &page
         }
         return best;
     }
-    return row_of_kept();
+    // Unranked rows are timed rows first, fastest first, so the first row that slices is the best
+    // place to move to. With nothing kept the dialog shows the first row.
+    const std::optional<std::size_t> kept = row_of_kept();
+    if (kept.value_or(0) < page.rows.size() && unsliceable(kept.value_or(0)))
+        for (std::size_t index = 0; index < page.rows.size(); ++index)
+            if (!unsliceable(index))
+                return index;
+    return kept;
 }
 
 static std::string wizard_speed_time_text(const WizardEstimate &estimate)
@@ -2587,13 +2598,18 @@ WizardMaterialDefaults wizard_default_materials(const std::vector<double> &nozzl
             if (slot != fine)
                 defaults.coarse = slot;
         if (defaults.coarse) {
-            const std::string nozzle = nozzle_diameters.size() == 2
+            defaults.empty_nozzle = nozzle_diameters.size() == 2
                 ? "the " + height_text(nozzle_diameters[coarse_physical]) + " mm nozzle" : std::string("the coarse nozzle");
-            defaults.note = "No material sits on " + nozzle + " yet, so setup puts slot " +
-                            std::to_string(*defaults.coarse + 1) + " there. Pick another if you like.";
+            defaults.note = wizard_empty_nozzle_note(defaults.empty_nozzle, *defaults.coarse);
         }
     }
     return defaults;
+}
+
+std::string wizard_empty_nozzle_note(const std::string &empty_nozzle, std::size_t coarse_slot)
+{
+    return "No material sits on " + empty_nozzle + " yet, so setup puts slot " + std::to_string(coarse_slot + 1) +
+           " there. Pick another if you like.";
 }
 
 std::vector<WizardBodyRole> wizard_default_body_roles(const std::vector<WizardBodyRoleRow> &rows,
@@ -2658,6 +2674,15 @@ std::vector<WizardBodyAssignment> wizard_body_roles_to_slots(
                         keeps_own ? std::size_t(row.current_slot) : (coarse ? coarse_slot : fine_slot), coarse});
     }
     return body;
+}
+
+int wizard_body_slot_choice(int part_slot, std::optional<std::size_t> fine_slot,
+                            std::optional<std::size_t> coarse_slot, std::size_t slot_count)
+{
+    if (part_slot < 1 || std::size_t(part_slot) > slot_count)
+        return 0;
+    const std::size_t slot = std::size_t(part_slot - 1);
+    return (fine_slot && *fine_slot == slot) || (coarse_slot && *coarse_slot == slot) ? 0 : part_slot;
 }
 
 static std::string wizard_part_size_text(double x, double y, double z)
@@ -3070,6 +3095,26 @@ WizardReviewSummary wizard_review_summary(const WizardReviewSummaryInput &input)
                 summary.rows.push_back({"Coarse layers",
                                         layer_value(*input.coarse_height, coarse_where, input.coarse_material)});
         }
+        // Which nozzle prints the supports and which the interface, said before Apply.
+        if (input.supports) {
+            const auto side_value = [&input](const WizardSupportSide &side, const char *default_text) {
+                if (side.slot <= 0)
+                    return std::string(default_text);
+                const std::string where = nozzle_side_text(input, side.physical);
+                if (where.empty())
+                    return side.material;
+                return side.material.empty() ? where : where + ", " + side.material;
+            };
+            summary.rows.push_back({"Supports", side_value(input.support_base, "the nozzle already printing each layer (Default)")});
+            summary.rows.push_back({"Support interface", side_value(input.support_interface, "same as the supports (Default)")});
+            // An interface in another material peels off cleanly only with enough layers: 2 printed one.
+            if (input.support_interface.slot > 0 && !input.support_interface.type.empty() &&
+                !input.fine_material_type.empty() && input.support_interface.type != input.fine_material_type &&
+                input.support_interface_top_layers < 3)
+                summary.rows.push_back({"Interface layers", "Set Top interface layers to 3 (now " +
+                    std::to_string(input.support_interface_top_layers) + "). With fewer, a " + input.support_interface.type +
+                    " interface can be hard to peel off. It is in the Support settings."});
+        }
         if (input.estimate && input.estimate->status == WizardEstimateStatus::Estimated) {
             std::string time = estimate_duration_text(input.estimate->seconds);
             if (input.baseline && input.baseline->status == WizardEstimateStatus::Estimated)
@@ -3109,6 +3154,12 @@ WizardReviewSummary wizard_review_summary(const WizardReviewSummaryInput &input)
     } else if (!input.blockers.empty()) {
         summary.ready_line = "Can't apply yet. " + wizard_review_reason_text(input.blockers.front());
         summary.target = fix_target_for(input.blockers.front());
+    } else if (input.estimate && wizard_estimate_unsliceable(*input.estimate)) {
+        // The ranking slice of this exact choice failed, so the real slice would fail too.
+        summary.ready_line = input.estimate->refused && !input.estimate->refusal.empty()
+            ? "Can't apply yet. Slicing refuses this coarse layer: " + input.estimate->refusal
+            : std::string("Can't apply yet. This coarse layer could not be sliced. Pick another one.");
+        summary.target = WizardFixTarget::Speed;
     } else {
         summary.ready = true;
         summary.ready_line = "Ready to apply.";

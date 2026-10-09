@@ -1528,6 +1528,14 @@ ExtruderGroup::ExtruderGroup(wxWindow * parent, int index, wxString const &title
     auto combo_flow = new ComboBox(this, wxID_ANY, wxString(""), wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
     combo_flow->GetDropDown().SetUseContentWidth(true);
     this->label_flow = label_flow;
+    if (index >= 0) {
+        // Both labels only as wide as the longer one, so the combos still line up and get the rest
+        // of the card: at the default sidebar width a fixed 80 cut "High Flow" to "High ...".
+        const int label_width = std::max(label_diameter->GetTextExtent(label_diameter->GetLabel()).x,
+                                         label_flow->GetTextExtent(label_flow->GetLabel()).x) + FromDIP(8);
+        label_diameter->SetMinSize({label_width, -1});
+        label_flow->SetMinSize({label_width, -1});
+    }
     combo_flow->Bind(wxEVT_COMBOBOX, [this, index, combo_flow](wxCommandEvent &evt) {
         auto printer_tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER));
         NozzleVolumeType volume_type = NozzleVolumeType(intptr_t(combo_flow->GetClientData(evt.GetInt())));
@@ -20183,6 +20191,7 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
         draft.fine_logical_filament = matched.fine;
         draft.coarse_logical_filament = matched.coarse;
         input.materials_note = matched.note;
+        input.materials_empty_nozzle = matched.empty_nozzle;
     }
     BodySplitPresentation presentation;
     // Other printers print filament i on toolhead i, so picking the fine and coarse material is
@@ -20338,6 +20347,15 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
             speeds != nullptr && !speeds->values.empty())
             result.first_layer_speed = speeds->values.front();
         result.also_changed = prepared.also_changed;
+        // Which slots print the supports and the interface after Apply, for the summary rows.
+        if (after.has("enable_support") && after.has("support_filament") && after.has("support_interface_filament")) {
+            result.supports_read = true;
+            result.supports = after.opt_bool("enable_support");
+            result.support_filament = after.opt_int("support_filament");
+            result.support_interface_filament = after.opt_int("support_interface_filament");
+            if (after.has("support_interface_top_layers"))
+                result.support_interface_top_layers = after.opt_int("support_interface_top_layers");
+        }
         // What the engine would refuse at Slice holds Apply back here instead.
         result.diagnostic = prepared.admission_refusal;
         result.engine_refusal = prepared.admission_refusal;
