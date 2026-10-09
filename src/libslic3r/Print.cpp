@@ -136,6 +136,72 @@ WipeTowerReplayTiming replay_wipe_tower_timing(
     return timing;
 }
 
+// Times short G-code snippets (tower rows, the printer's change G-code) with the slicer's own
+// estimator, so the time check prices them the way the exported G-code is timed: acceleration,
+// corners, Z moves and dwells included. One processor serves every snippet. Each snippet starts
+// where the caller says, reached by an untimed move, and ends with a zero dwell that empties the
+// planner, so its time is the processor's clock after it less the clock before it. Load, unload and tool change times are
+// zeroed, as in replay_wipe_tower_timing() above, because the caller prices those itself.
+class SnippetTimer
+{
+public:
+    SnippetTimer(const PrintConfig &config, const std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> &groups)
+        : m_config(config), m_groups(groups)
+    {
+        this->restart();
+    }
+
+    // Seconds for gcode run from (x, y, z), or NaN when it cannot be timed.
+    double seconds(const std::string &gcode, double x, double y, double z)
+    {
+        // The clock is read as a float, so it is started again before it grows large enough to
+        // round a short snippet's time.
+        if (m_ok && m_processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal) > 1000.f)
+            this->restart();
+        if (!m_ok || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            return std::numeric_limits<double>::quiet_NaN();
+        try {
+            // Move to the start untimed: two moves, so the dwell has enough queued to empty the planner,
+            // then read the clock. Arcs are relative to the true position, so the start is reached
+            // by moving there rather than declared with G92.
+            m_processor.process_buffer(Slic3r::format("G1 X%1% Y%2% Z%3% F60000\nG1 Z%4%\nG92 E0\nG4 S0\n",
+                                                      x, y, z + 1., z));
+            const double before = m_processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+            m_processor.process_buffer(gcode);
+            m_processor.process_buffer("\nG4 S0\n");
+            const double elapsed = m_processor.get_time(PrintEstimatedStatistics::ETimeMode::Normal) - before;
+            return std::isfinite(elapsed) && elapsed >= 0. ? elapsed : std::numeric_limits<double>::quiet_NaN();
+        } catch (...) {
+            m_ok = false;
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+
+private:
+    void restart()
+    {
+        try {
+            m_processor.reset();
+            m_processor.initialize_from_context(m_groups);
+            m_processor.initialize_result_moves();
+            PrintConfig motion_config = m_config;
+            motion_config.machine_load_filament_time.value = 0.;
+            motion_config.machine_unload_filament_time.value = 0.;
+            motion_config.machine_tool_change_time.value = 0.;
+            m_processor.apply_config(motion_config);
+            m_processor.process_buffer("G90\nM83\n");
+            m_ok = true;
+        } catch (...) {
+            m_ok = false;
+        }
+    }
+
+    const PrintConfig                                           &m_config;
+    std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult>  m_groups;
+    GCodeProcessor                                               m_processor;
+    bool                                                         m_ok { false };
+};
+
 } // namespace
 
 // The prime a warm return lays when only `share` of its idle re-prime above the floor is kept.
@@ -5883,6 +5949,9 @@ void Print::select_feature_infill_by_time()
         double loose_seconds { 0. };
     };
     std::vector<CommittedRow> committed_rows;
+    // Per committed row, what a plain tower level costs there: the nearest row's loose work, as the
+    // committed tower laid it. Filled once the tower is indexed.
+    std::vector<double> plain_level_seconds;
     // Priming, the final purge and every row that is not a tool change stay in the total whatever a
     // band decides, so the total is carried whole and a band's own switches are subtracted from it.
     double committed_tower_seconds { 0. };
@@ -5891,13 +5960,264 @@ void Print::select_feature_infill_by_time()
         float(m_config.machine_load_filament_time.value),
         float(m_config.machine_unload_filament_time.value),
         float(m_config.machine_tool_change_time.value)};
+    // Tower rows are timed by the slicer's own estimator, not by the tower writer's length over feed
+    // rate, which leaves out acceleration, corners and Z moves. A row the estimator cannot time keeps
+    // the writer's figure.
+    const auto group_result = get_layered_nozzle_group_result();
+    SnippetTimer snippet_timer(m_config, group_result);
+    const auto row_seconds = [&](const WipeTower::ToolChangeResult &change) {
+        const double z = double(change.tower_z_start > 0.f ? change.tower_z_start : change.print_z);
+        double seconds = 0.;
+        if (!change.gcode.empty())
+            seconds += snippet_timer.seconds(change.gcode, change.start_pos.x(), change.start_pos.y(), z);
+        // GCode lays a nozzle change's ramming before the change G-code, on a two-nozzle printer only.
+        if (!change.nozzle_change_result.gcode.empty() && m_config.nozzle_diameter.size() > 1)
+            seconds += snippet_timer.seconds(change.nozzle_change_result.gcode,
+                change.nozzle_change_result.start_pos.x(), change.nozzle_change_result.start_pos.y(), z);
+        return std::isfinite(seconds) ? seconds : double(change.elapsed_time);
+    };
+    // Every row laid on the tower is a visit: the head retracts and lifts, travels from the part to
+    // the tower, and comes back the same way with the tool it then holds. The centre of the objects
+    // stands in for where it leaves from, and the centre of the tower for where it goes.
+    Vec2d tower_centre(m_config.wipe_tower_x.get_at(m_plate_index), m_config.wipe_tower_y.get_at(m_plate_index));
+    if (m_wipe_tower_data.bbx.defined)
+        tower_centre += m_wipe_tower_data.bbx.center();
+    else
+        tower_centre += 0.5 * Vec2d(m_config.prime_tower_width.value, m_wipe_tower_data.depth);
+    BoundingBoxf parts_box;
+    for (const PrintObject *object : m_objects) {
+        const BoundingBox box = object->bounding_box();
+        for (const PrintInstance &instance : object->instances()) {
+            const Vec2d shift = unscale(instance.shift_without_plate_offset());
+            parts_box.merge(unscale(box.min) + shift);
+            parts_box.merge(unscale(box.max) + shift);
+        }
+    }
+    const auto positive_or = [](double value, double fallback) { return value > 0. ? value : fallback; };
+    // The lift GCode makes before a travel with this filament, from height z: a spiral lift for the
+    // spiral, slope and auto hop types, a straight one otherwise. heading is the direction of travel.
+    const auto lift_gcode = [&](int filament, double z, const Vec2d &heading) {
+        const int material = get_filament_config_indx(filament, 1);
+        const int nozzle = get_nozzle_config_index(filament, 1);
+        const double hop = m_config.z_hop.get_at(material);
+        if (!(hop > 0.))
+            return std::string();
+        const double lift_speed = positive_or(m_config.travel_speed_z.get_at(nozzle), m_config.travel_speed.get_at(nozzle));
+        const ZHopType type = ZHopType(m_config.z_hop_types.get_at(material));
+        const double slope = m_config.travel_slope.get_at(size_t(get_extruder_id((unsigned int) filament))) * M_PI / 180.;
+        const double norm = heading.norm();
+        if ((type == ZHopType::zhtAuto || type == ZHopType::zhtSpiral || type == ZHopType::zhtSlope) &&
+            slope > 0. && norm > 0.) {
+            const double radius = hop / (2. * M_PI * std::atan(slope));
+            const Vec2d centre = radius * heading / norm;
+            return Slic3r::format("G17\nG3 Z%1% I%2% J%3% P1 F%4%\n", z + hop, -centre.y(), centre.x(), 60. * lift_speed);
+        }
+        return Slic3r::format("G1 Z%1% F%2%\n", z + hop, 60. * lift_speed);
+    };
+    // One way between the part and the tower with this filament loaded, as GCode writes it: retract,
+    // lift, travel, drop back down and deretract.
+    std::map<unsigned int, double> leg_cache;
+    const auto leg_seconds = [&](int filament) {
+        if (filament < 0)
+            return 0.;
+        if (const auto found = leg_cache.find((unsigned int) filament); found != leg_cache.end())
+            return found->second;
+        const int material = get_filament_config_indx(filament, 1);
+        const int nozzle = get_nozzle_config_index(filament, 1);
+        const double z = 1.;
+        const double retract = m_config.retraction_length.get_at(material);
+        const double retract_speed = m_config.retraction_speed.get_at(material);
+        const double deretract_speed = positive_or(m_config.deretraction_speed.get_at(material), retract_speed);
+        const double travel_speed = m_config.travel_speed.get_at(nozzle);
+        const double lift_speed = positive_or(m_config.travel_speed_z.get_at(nozzle), travel_speed);
+        const Vec2d from = parts_box.defined ? parts_box.center() : tower_centre;
+        std::string gcode;
+        if (retract > 0. && retract_speed > 0.)
+            gcode += Slic3r::format("G1 E%1% F%2%\n", -retract, 60. * retract_speed);
+        gcode += lift_gcode(filament, z, tower_centre - from);
+        gcode += Slic3r::format("G1 X%1% Y%2% F%3%\n", tower_centre.x(), tower_centre.y(), 60. * travel_speed);
+        gcode += Slic3r::format("G1 Z%1% F%2%\n", z, 60. * lift_speed);
+        if (retract > 0. && deretract_speed > 0.)
+            gcode += Slic3r::format("G1 E%1% F%2%\n", retract, 60. * deretract_speed);
+        double seconds = snippet_timer.seconds(gcode, from.x(), from.y(), z);
+        if (!std::isfinite(seconds))
+            seconds = 0.;
+        leg_cache.emplace((unsigned int) filament, seconds);
+        return seconds;
+    };
+    const auto visit_seconds = [&](const WipeTower::ToolChangeResult &change) {
+        if (change.gcode.empty() && change.nozzle_change_result.gcode.empty())
+            return 0.;
+        return leg_seconds(change.initial_tool) + leg_seconds(change.new_tool);
+    };
+    // The printer's change G-code runs on every switch. On the H2D it lifts Z, makes the trip to the
+    // cutter and back and deretracts, and none of that is tower work. It is rendered once per pair of
+    // filaments with the values GCode gives it, timed from the tower centre and back to it, and charged
+    // per switch by price_walk. A body that does not render costs nothing, as before.
+    std::map<std::pair<int, int>, double> change_cache;
+    const auto change_seconds = [&](int from, int to) {
+        if (from < 0 || to < 0 || from == to || m_config.change_filament_gcode.value.empty())
+            return 0.;
+        if (const auto found = change_cache.find({from, to}); found != change_cache.end())
+            return found->second;
+        double seconds = 0.;
+        try {
+            // The purge the tower rows for this pair carried, which sets the change G-code's flush.
+            double purge_sum = 0.;
+            size_t purge_rows = 0;
+            for (const auto &generated : m_wipe_tower_data.tool_changes)
+                for (const auto &change : generated)
+                    if (change.is_tool_change && change.initial_tool == from && change.new_tool == to) {
+                        purge_sum += double(change.purge_volume);
+                        ++purge_rows;
+                    }
+            const double purge = purge_rows == 0 || purge_sum / purge_rows < EPSILON ? 0. :
+                std::max(purge_sum / purge_rows, 100.); // GCode's smallest flush
+            const int old_material = get_filament_config_indx(from, 1);
+            const int new_material = get_filament_config_indx(to, 1);
+            const int old_extruder = int(get_extruder_id((unsigned int) from));
+            const int new_extruder = int(get_extruder_id((unsigned int) to));
+            const int old_nozzle = group_result ? group_result->get_nozzle_id(from, 1) : old_extruder;
+            const int new_nozzle = group_result ? group_result->get_nozzle_id(to, 1) : new_extruder;
+            const double area = 0.25 * M_PI * std::pow(m_config.filament_diameter.get_at(size_t(to)), 2);
+            const double flush_length = area > 0. ? purge / area : 0.;
+            const auto e_feedrate = [&](int material) {
+                const int feedrate = area > 0. ? int(60. * m_config.filament_max_volumetric_speed.get_at(material) / area) : 0;
+                return feedrate == 0 ? 100 : feedrate;
+            };
+            const double z = 1.;
+            DynamicConfig vars;
+            vars.set_key_value("previous_extruder", new ConfigOptionInt(from));
+            vars.set_key_value("next_extruder", new ConfigOptionInt(to));
+            vars.set_key_value("current_extruder", new ConfigOptionInt(from));
+            vars.set_key_value("current_extruder_id", new ConfigOptionInt(old_extruder));
+            vars.set_key_value("current_hotend", new ConfigOptionInt(old_extruder));
+            vars.set_key_value("next_hotend", new ConfigOptionInt(new_extruder));
+            vars.set_key_value("current_nozzle_id", new ConfigOptionInt(old_nozzle));
+            vars.set_key_value("next_nozzle_id", new ConfigOptionInt(new_nozzle));
+            vars.set_key_value("current_filament_id", new ConfigOptionInt(from));
+            vars.set_key_value("next_filament_id", new ConfigOptionInt(to));
+            const auto &variants = m_config.printer_extruder_variant.values;
+            vars.set_key_value("old_extruder_variant", new ConfigOptionString(
+                old_extruder >= 0 && size_t(old_extruder) < variants.size() ? variants[old_extruder] : std::string()));
+            vars.set_key_value("new_extruder_variant", new ConfigOptionString(
+                new_extruder >= 0 && size_t(new_extruder) < variants.size() ? variants[new_extruder] : std::string()));
+            std::vector<double> nozzle_diameters;
+            std::vector<std::string> nozzle_volume_types;
+            if (group_result)
+                for (int id = 0;; ++id) {
+                    const auto nozzle = group_result->get_nozzle_from_id(id);
+                    if (!nozzle)
+                        break;
+                    nozzle_diameters.push_back(std::stod(nozzle->diameter));
+                    nozzle_volume_types.push_back(get_nozzle_volume_type_string(nozzle->volume_type));
+                }
+            vars.set_key_value("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diameters));
+            vars.set_key_value("nozzle_volume_types", new ConfigOptionStrings(nozzle_volume_types));
+            vars.set_key_value("layer_num", new ConfigOptionInt(1));
+            vars.set_key_value("layer_z", new ConfigOptionFloat(z));
+            vars.set_key_value("toolchange_z", new ConfigOptionFloat(z));
+            vars.set_key_value("max_layer_z", new ConfigOptionFloat(z));
+            vars.set_key_value("relative_e_axis", new ConfigOptionBool(m_config.use_relative_e_distances.value));
+            vars.set_key_value("toolchange_count", new ConfigOptionInt(3));
+            vars.set_key_value("fan_speed", new ConfigOptionInt(0));
+            vars.set_key_value("outer_wall_volumetric_speed",
+                new ConfigOptionFloat(m_config.filament_max_volumetric_speed.get_at(new_material)));
+            vars.set_key_value("old_retract_length", new ConfigOptionFloat(m_config.retraction_length.get_at(old_material)));
+            vars.set_key_value("new_retract_length", new ConfigOptionFloat(m_config.retraction_length.get_at(new_material)));
+            vars.set_key_value("filament_retract_length_nc",
+                new ConfigOptionFloat(std::max(0., m_config.filament_retract_length_nc.get_at(old_material))));
+            vars.set_key_value("old_retract_length_toolchange",
+                new ConfigOptionFloat(m_config.retract_length_toolchange.get_at(old_material)));
+            vars.set_key_value("new_retract_length_toolchange",
+                new ConfigOptionFloat(m_config.retract_length_toolchange.get_at(new_material)));
+            vars.set_key_value("new_extruder_retracted_length", new ConfigOptionFloat(0.));
+            vars.set_key_value("old_filament_temp", new ConfigOptionInt(m_config.nozzle_temperature.get_at(old_material)));
+            vars.set_key_value("new_filament_temp", new ConfigOptionInt(m_config.nozzle_temperature.get_at(new_material)));
+            vars.set_key_value("x_after_toolchange", new ConfigOptionFloat(tower_centre.x()));
+            vars.set_key_value("y_after_toolchange", new ConfigOptionFloat(tower_centre.y()));
+            vars.set_key_value("z_after_toolchange", new ConfigOptionFloat(z));
+            vars.set_key_value("first_flush_volume", new ConfigOptionFloat(flush_length / 2.));
+            vars.set_key_value("second_flush_volume", new ConfigOptionFloat(flush_length / 2.));
+            vars.set_key_value("old_filament_e_feedrate", new ConfigOptionInt(e_feedrate(old_material)));
+            vars.set_key_value("new_filament_e_feedrate", new ConfigOptionInt(e_feedrate(new_material)));
+            for (const char *key : {"travel_point_1_x", "travel_point_1_y", "travel_point_2_x", "travel_point_2_y",
+                                    "travel_point_3_x", "travel_point_3_y"})
+                vars.set_key_value(key, new ConfigOptionFloat(0.));
+            const size_t filament_count = m_config.filament_type.values.size();
+            std::vector<double> flush_speeds(filament_count), cooling(filament_count);
+            std::vector<int> flush_temperatures(filament_count);
+            const bool fast_flush = m_config.prime_volume_mode == PrimeVolumeMode::pvmFast;
+            for (size_t id = 0; id < filament_count; ++id) {
+                const int material = get_filament_config_indx(int(id), 1);
+                flush_speeds[id] = positive_or(m_config.filament_flush_volumetric_speed.get_at(material),
+                                               m_config.filament_max_volumetric_speed.get_at(material));
+                flush_temperatures[id] = fast_flush ? m_config.filament_flush_temp_fast.get_at(material) :
+                                                      m_config.filament_flush_temp.get_at(material);
+                if (flush_temperatures[id] == 0)
+                    flush_temperatures[id] = m_config.nozzle_temperature_range_high.get_at(id);
+                cooling[id] = m_config.filament_cooling_before_tower.get_at(material);
+            }
+            vars.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(flush_speeds));
+            vars.set_key_value("flush_temperatures", new ConfigOptionInts(flush_temperatures));
+            vars.set_key_value("filament_cooling_before_tower", new ConfigOptionFloats(cooling));
+            vars.set_key_value("flush_length", new ConfigOptionFloat(flush_length));
+            for (int index = 1; index <= 4; ++index)
+                vars.set_key_value("flush_length_" + std::to_string(index), new ConfigOptionFloat(0.));
+            vars.set_key_value("wipe_avoid_perimeter", new ConfigOptionBool(m_config.prime_tower_skip_points.value));
+            vars.set_key_value("wipe_avoid_pos_x", new ConfigOptionFloat(tower_centre.x()));
+            vars.set_key_value("is_prime_tower_interface", new ConfigOptionBool(false));
+            vars.set_key_value("filament_tower_interface_purge_volume",
+                new ConfigOptionFloat(m_config.filament_tower_interface_purge_volume.get_at(size_t(to))));
+            vars.set_key_value("filament_tower_interface_print_temp",
+                new ConfigOptionInt(m_config.nozzle_temperature.get_at(new_material)));
+            vars.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(tower_centre.x()));
+            vars.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(tower_centre.y()));
+            vars.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(true));
+            vars.set_key_value("retraction_distance_when_cut",
+                new ConfigOptionFloat(m_config.retraction_distances_when_cut.get_at(old_material)));
+            vars.set_key_value("long_retraction_when_cut",
+                new ConfigOptionBool(m_config.long_retractions_when_cut.get_at(old_material)));
+            vars.set_key_value("retraction_distance_when_ec",
+                new ConfigOptionFloat(m_config.retraction_distances_when_ec.get_at(old_material)));
+            vars.set_key_value("long_retraction_when_ec",
+                new ConfigOptionBool(m_config.long_retractions_when_ec.get_at(old_material)));
+            std::string gcode = m_placeholder_parser.process(m_config.change_filament_gcode.value, (unsigned int) to, &vars);
+            // GCode travels back beside the tower after the change G-code and drops to the tower's Z,
+            // then makes a short lifted move to where the block starts and deretracts.
+            const int nozzle = get_nozzle_config_index(to, 1);
+            const double return_speed = m_config.travel_speed.get_at(nozzle);
+            const double drop_speed = positive_or(m_config.travel_speed_z.get_at(nozzle), return_speed);
+            const double deretract_speed = positive_or(m_config.deretraction_speed.get_at(new_material),
+                                                       m_config.retraction_speed.get_at(new_material));
+            const double deretract = m_config.retract_length_toolchange.get_at(new_material);
+            const Vec2d beside = tower_centre + Vec2d(10., 0.);
+            gcode += Slic3r::format("\nG1 X%1% Y%2% F%3%\nG1 Z%4% F%5%\n", beside.x(), beside.y(), 60. * return_speed,
+                                    z, 60. * drop_speed);
+            gcode += lift_gcode(to, z, tower_centre - beside);
+            gcode += Slic3r::format("G1 X%1% Y%2% F%3%\nG1 Z%4% F%5%\n", tower_centre.x(), tower_centre.y(),
+                                    60. * return_speed, z, 60. * drop_speed);
+            if (deretract > 0. && deretract_speed > 0.)
+                gcode += Slic3r::format("G1 E%1% F%2%\n", deretract, 60. * deretract_speed);
+            seconds = snippet_timer.seconds(gcode, tower_centre.x(), tower_centre.y(), z);
+            if (!std::isfinite(seconds))
+                seconds = 0.;
+        } catch (const std::exception &error) {
+            BOOST_LOG_TRIVIAL(warning) << "Feature infill time: the change G-code from filament " << from + 1
+                                       << " to " << to + 1 << " could not be timed: " << error.what();
+            seconds = 0.;
+        }
+        change_cache.emplace(std::make_pair(from, to), seconds);
+        return seconds;
+    };
     // One digest line per generated row, written as the totals are summed, so two slices whose totals
     // differ can be compared row by row. Each row carries its start and end positions: seconds that
     // moved while both positions held mean the same road timed differently; a moved start position
     // means the block began at a different corner and the travel changed.
     std::ostringstream tower_digest;
     tower_digest.precision(17); // ios_base member, so this needs no <iomanip> here
-    const auto record_tower_row = [&tower_digest](const char *kind, const WipeTower::ToolChangeResult &change) {
+    const auto record_tower_row = [&tower_digest](const char *kind, const WipeTower::ToolChangeResult &change,
+                                                  double priced) {
         // A row whose writer laid no road still holds the writer's unknown-position value (the final
         // purge on a Type1 tower is one). Label it instead of printing a position far off the bed. A
         // level with no writer keeps its zeroes.
@@ -5914,6 +6234,7 @@ void Print::select_feature_infill_by_time()
         tower_digest << kind << " z=" << double(change.print_z)
                      << " tower_z=" << double(change.tower_z_start)
                      << " seconds=" << double(change.elapsed_time)
+                     << " priced=" << priced
                      << " purge=" << double(change.purge_volume)
                      << " tool_change=" << (change.is_tool_change ? 1 : 0)
                      << " leaves=" << change.initial_tool
@@ -5927,6 +6248,17 @@ void Print::select_feature_infill_by_time()
         committed_tower_seconds = 0.;
         committed_tower_volume_mm3 = 0.;
         tower_digest.str(std::string());
+        // What each generated row costs the print: the estimator's time for its G-code, and for a row
+        // laid between the part's own roads, the trip there and back.
+        std::unordered_map<const WipeTower::ToolChangeResult *, double> priced;
+        if (m_wipe_tower_data.priming)
+            for (const auto &change : *m_wipe_tower_data.priming)
+                priced[&change] = row_seconds(change);
+        for (const auto &generated : m_wipe_tower_data.tool_changes)
+            for (const auto &change : generated)
+                priced[&change] = row_seconds(change) + visit_seconds(change);
+        if (m_wipe_tower_data.final_purge)
+            priced[&*m_wipe_tower_data.final_purge] = row_seconds(*m_wipe_tower_data.final_purge);
         for (const LayerTools &row : m_tool_ordering.layer_tools()) {
             CommittedRow entry;
             entry.print_z = row.print_z;
@@ -5934,8 +6266,8 @@ void Print::select_feature_infill_by_time()
             committed_rows.push_back(std::move(entry));
         }
         const auto add_total = [&](const char *kind, const WipeTower::ToolChangeResult &change) {
-            record_tower_row(kind, change);
-            committed_tower_seconds += change.elapsed_time;
+            record_tower_row(kind, change, priced[&change]);
+            committed_tower_seconds += priced[&change];
             // Same collection, same pass: the tower's material sits in memory beside its elapsed
             // time, so the band's tower work needs no extra tower build.
             committed_tower_volume_mm3 += change.purge_volume;
@@ -5979,7 +6311,7 @@ void Print::select_feature_infill_by_time()
                 if (owner == nullptr || closest > EPSILON)
                     continue;
                 owner->tower_by_entered_filament.emplace_back((unsigned int) change.new_tool,
-                    std::make_pair(double(change.elapsed_time), double(change.purge_volume)));
+                    std::make_pair(priced[&change], double(change.purge_volume)));
             }
         // Every other generated row, filed under the layer it was laid at, so the whole-print check can
         // tell what the tower costs up to a given switch.
@@ -5998,8 +6330,26 @@ void Print::select_feature_infill_by_time()
                     }
                 }
                 if (owner != nullptr && closest <= EPSILON)
-                    owner->loose_seconds += double(change.elapsed_time);
+                    owner->loose_seconds += priced[&change];
             }
+        // A plain level is looked for above the solid base, whose rows are heavier than any level a
+        // dropped switch leaves behind.
+        plain_level_seconds.assign(committed_rows.size(), 0.);
+        {
+            std::vector<size_t> levels;
+            for (size_t index = 0; index < committed_rows.size(); ++index)
+                if (committed_rows[index].loose_seconds > 0. &&
+                    committed_rows[index].print_z > tower_base_top_z + EPSILON)
+                    levels.push_back(index);
+            if (!levels.empty())
+                for (size_t index = 0; index < committed_rows.size(); ++index) {
+                    const auto above = std::lower_bound(levels.begin(), levels.end(), index);
+                    size_t nearest = above == levels.end() ? levels.back() : *above;
+                    if (above != levels.begin() && (above == levels.end() || index - *(above - 1) < *above - index))
+                        nearest = *(above - 1);
+                    plain_level_seconds[index] = committed_rows[nearest].loose_seconds;
+                }
+        }
         // The tower every band is priced against, published before any band takes anything out of it.
         // Slices that disagree here disagree about the tower itself; slices that agree here but differ in
         // band seconds disagree about the pricing walk below.
@@ -6017,10 +6367,15 @@ void Print::select_feature_infill_by_time()
     // longer does. With nothing flagged it returns the committed cost unchanged. The walk takes any
     // rule for which filament leaves which row, so the whole-print check can price several bands at
     // once; price_sequence below is the one-band form every per-band trial uses.
+    //
+    // A row whose switches all leave still needs a tower level if a switch above it remains, since
+    // the tower has to grow up to that switch. Such a row is charged a plain level, the nearest
+    // level the committed tower laid with no switch, and refunded reports it with that cost.
     const auto price_walk = [&](const auto &dropped,
                                 const std::vector<std::vector<char>> *reference,
                                 std::vector<std::vector<char>> *record,
-                                std::vector<std::pair<size_t, unsigned int>> *subtracted) {
+                                std::vector<std::pair<size_t, unsigned int>> *subtracted,
+                                std::vector<std::pair<size_t, double>> *refunded = nullptr) {
         HandoffCost cost;
         cost.tower_seconds = committed_tower_seconds;
         cost.tower_volume_mm3 = committed_tower_volume_mm3;
@@ -6030,10 +6385,16 @@ void Print::select_feature_infill_by_time()
         }
         if (subtracted)
             subtracted->clear();
+        if (refunded)
+            refunded->clear();
         NativeFilamentChangeState state;
         state.filament_by_extruder.assign(m_config.nozzle_diameter.size(), -1);
         state.last_filament_by_extruder.assign(m_config.nozzle_diameter.size(), -1);
+        int active = -1;
+        size_t last_switch = 0;
+        std::vector<size_t> emptied;
         for (size_t index = 0; index < committed_rows.size(); ++index) {
+            size_t entries_removed = 0;
             const CommittedRow &row = committed_rows[index];
             if (record)
                 (*record)[index].assign(row.filaments.size(), 0);
@@ -6052,6 +6413,11 @@ void Print::select_feature_infill_by_time()
                     cost.switch_seconds += transition.total_seconds();
                     switched = !transition.no_op();
                     state = transition.next_state;
+                    if (switched) {
+                        cost.switch_seconds += change_seconds(active, int(filament));
+                        active = int(filament);
+                        last_switch = index;
+                    }
                 }
                 if (record)
                     (*record)[index][slot] = switched ? 1 : 0;
@@ -6067,21 +6433,32 @@ void Print::select_feature_infill_by_time()
                         cost.tower_seconds -= entry.second.first;
                         cost.tower_volume_mm3 -= entry.second.second;
                         removed_any = true;
+                        ++entries_removed;
                     }
                 if (removed_any && subtracted)
                     subtracted->emplace_back(index, filament);
             }
+            if (entries_removed > 0 && entries_removed == row.tower_by_entered_filament.size() &&
+                !(row.loose_seconds > 0.))
+                emptied.push_back(index);
         }
+        for (size_t index : emptied)
+            if (index < last_switch && index < plain_level_seconds.size() && plain_level_seconds[index] > 0.) {
+                cost.tower_seconds += plain_level_seconds[index];
+                if (refunded)
+                    refunded->emplace_back(index, plain_level_seconds[index]);
+            }
         cost.available = std::isfinite(cost.tower_seconds) && std::isfinite(cost.switch_seconds);
         return cost;
     };
     const auto price_sequence = [&](const std::vector<char> &drop_row, unsigned int drop_filament,
                                     const std::vector<std::vector<char>> *reference,
                                     std::vector<std::vector<char>> *record,
-                                    std::vector<std::pair<size_t, unsigned int>> *subtracted) {
+                                    std::vector<std::pair<size_t, unsigned int>> *subtracted,
+                                    std::vector<std::pair<size_t, double>> *refunded = nullptr) {
         return price_walk([&drop_row, drop_filament](size_t index, unsigned int filament) {
             return index < drop_row.size() && drop_row[index] != 0 && filament == drop_filament;
-        }, reference, record, subtracted);
+        }, reference, record, subtracted, refunded);
     };
     const auto model_seconds = [&](const std::vector<Layer *> &layers) {
         double seconds = 0.;
@@ -6099,7 +6476,9 @@ void Print::select_feature_infill_by_time()
                     const unsigned filament = tools.extruder(*collection, region->region(), region);
                     const int nozzle = get_nozzle_config_index(int(filament), layer->id());
                     const int material = get_filament_config_indx(int(filament), layer->id());
-                    const auto path_seconds = [&](const ExtrusionPath &path) {
+                    // The volume per second the path is laid at: its role's speed, slowed on the first
+                    // layers and capped by the filament's volumetric limit.
+                    const auto path_rate = [&](const ExtrusionPath &path) {
                         double speed = 0.;
                         switch (path.role()) {
                         case erInternalInfill: speed = cfg.sparse_infill_speed.get_at(nozzle); break;
@@ -6129,17 +6508,82 @@ void Print::select_feature_infill_by_time()
                         cap /= flow_ratio;
                         double rate = speed * path.mm3_per_mm;
                         if (cap > 0.) rate = rate > 0. ? std::min(rate, cap) : cap;
-                        return rate > 0. ? path.total_volume() / rate : std::numeric_limits<double>::quiet_NaN();
+                        return rate > 0. ? rate : std::numeric_limits<double>::quiet_NaN();
+                    };
+                    // The acceleration GCode sets for the path's role.
+                    const auto path_acceleration = [&](const ExtrusionPath &path) {
+                        const double fallback = cfg.default_acceleration.get_at(nozzle);
+                        if (!(fallback > 0.))
+                            return 0.;
+                        if (layer->id() == 0 && cfg.initial_layer_acceleration.get_at(nozzle) > 0.)
+                            return double(cfg.initial_layer_acceleration.get_at(nozzle));
+                        double value = 0.;
+                        if (is_bridge(path.role()))
+                            value = cfg.get_abs_value_at("bridge_acceleration", nozzle);
+                        else if (path.role() == erInternalInfill)
+                            value = cfg.get_abs_value_at("sparse_infill_acceleration", nozzle);
+                        else if (path.role() == erSolidInfill)
+                            value = cfg.get_abs_value_at("internal_solid_infill_acceleration", nozzle);
+                        else if (is_top_surface(path.role()))
+                            value = cfg.top_surface_acceleration.get_at(nozzle);
+                        return value > 0. ? value : fallback;
+                    };
+                    // The collection is written out as G-code and timed by the estimator, so
+                    // acceleration and corners count, as do the short moves between its paths. A
+                    // collection the estimator cannot time falls back to volume over rate.
+                    const double filament_area = 0.25 * M_PI * std::pow(m_config.filament_diameter.get_at(filament), 2);
+                    const double travel_speed = m_config.travel_speed.get_at(nozzle);
+                    double rate_seconds = 0.;
+                    std::string gcode;
+                    Vec2d start = Vec2d::Zero();
+                    bool first = true;
+                    double last_acceleration = -1.;
+                    char line[128];
+                    const auto add_path = [&](const ExtrusionPath &path) {
+                        const double rate = path_rate(path);
+                        rate_seconds += path.total_volume() / rate;
+                        const auto &points = path.polyline.points;
+                        if (!(rate > 0.) || points.size() < 2)
+                            return;
+                        const Vec2d from = unscale(points.front()).template head<2>();
+                        if (first) {
+                            start = from;
+                            first = false;
+                        } else if (travel_speed > 0.) {
+                            snprintf(line, sizeof(line), "G1 X%.3f Y%.3f F%.0f\n", from.x(), from.y(), 60. * travel_speed);
+                            gcode += line;
+                        }
+                        const double acceleration = path_acceleration(path);
+                        if (acceleration > 0. && acceleration != last_acceleration) {
+                            snprintf(line, sizeof(line), "M204 S%.0f\n", acceleration);
+                            gcode += line;
+                            last_acceleration = acceleration;
+                        }
+                        const double feedrate = 60. * rate / path.mm3_per_mm;
+                        const double e_per_mm = filament_area > 0. ? path.mm3_per_mm / filament_area : 0.;
+                        Vec2d previous = from;
+                        for (size_t at = 1; at < points.size(); ++ at) {
+                            const Vec2d to = unscale(points[at]).template head<2>();
+                            snprintf(line, sizeof(line), at == 1 ? "G1 X%.3f Y%.3f E%.5f F%.0f\n" : "G1 X%.3f Y%.3f E%.5f\n",
+                                     to.x(), to.y(), (to - previous).norm() * e_per_mm, feedrate);
+                            gcode += line;
+                            previous = to;
+                        }
                     };
                     const auto flat = collection->flatten();
                     for (const ExtrusionEntity *entity : flat.entities) {
-                        if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity)) seconds += path_seconds(*path);
+                        if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity)) add_path(*path);
                         else if (const auto *paths = dynamic_cast<const ExtrusionMultiPath *>(entity))
-                            for (const auto &path : paths->paths) seconds += path_seconds(path);
+                            for (const auto &path : paths->paths) add_path(path);
                         else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity))
-                            for (const auto &path : loop->paths) seconds += path_seconds(path);
+                            for (const auto &path : loop->paths) add_path(path);
                         else return std::numeric_limits<double>::quiet_NaN();
                     }
+                    if (!std::isfinite(rate_seconds))
+                        return std::numeric_limits<double>::quiet_NaN();
+                    const double timed = gcode.empty() ? std::numeric_limits<double>::quiet_NaN() :
+                        snippet_timer.seconds(gcode, start.x(), start.y(), layer->print_z);
+                    seconds += std::isfinite(timed) ? timed : rate_seconds;
                 }
             }
         }
@@ -6455,9 +6899,10 @@ void Print::select_feature_infill_by_time()
                             drop_row[index] = 1;
                 }
             std::vector<std::pair<size_t, unsigned int>> subtracted;
+            std::vector<std::pair<size_t, double>> refunded;
             const double fine_model = model_seconds(layers) * object->instances().size();
             const HandoffCost fine_handoff = price_sequence(drop_row, (unsigned int) std::max(coarse_id, 0),
-                                                            &committed_record, nullptr, &subtracted);
+                                                            &committed_record, nullptr, &subtracted, &refunded);
             const bool available = std::isfinite(fine_model) && fine_handoff.available;
             if (available) {
                 band.fine_model_seconds = fine_model;
@@ -6502,6 +6947,9 @@ void Print::select_feature_infill_by_time()
                             return row.first == entry.second;
                         }), tower_rows.end());
                 }
+                // A row left with no switch below the last one is a plain level now.
+                for (const auto &entry : refunded)
+                    committed_rows[entry.first].loose_seconds += entry.second;
                 committed_tower_seconds = fine_handoff.tower_seconds;
                 committed_tower_volume_mm3 = fine_handoff.tower_volume_mm3;
                 // The layers this decision stands on are not the layers a later trial was
@@ -6547,6 +6995,46 @@ void Print::select_feature_infill_by_time()
         object->m_feature_economics_applied = true;
         // The normal final simplification stage publishes these updated observations.
     }
+
+    // Bands that went fine on their own numbers can leave a shorter tower with a smaller footprint,
+    // which the committed rows do not show. When some bands still wait for the whole-print check,
+    // the tower is built again for the plan as it now stands and priced afresh. The published
+    // committed figures keep describing the tower the bands were first priced against.
+    const auto reindex_published_kept = [&]() {
+        const double published_seconds = m_feature_economics_committed_tower_seconds;
+        const double published_volume = m_feature_economics_committed_tower_volume_mm3;
+        const std::string published_digest = m_feature_economics_committed_tower_digest;
+        const std::string published_plan = m_feature_economics_committed_tower_plan_digest;
+        index_committed_tower();
+        m_feature_economics_committed_tower_seconds = published_seconds;
+        m_feature_economics_committed_tower_volume_mm3 = published_volume;
+        m_feature_economics_committed_tower_digest = published_digest;
+        m_feature_economics_committed_tower_plan_digest = published_plan;
+    };
+    if (!accepted.empty() && !kept.empty()) {
+        bool rebuilt = false;
+        try {
+            _make_wipe_tower();
+            rebuilt = true;
+        } catch (const Slic3r::SlicingError &) {
+            // No tower for this plan; the final build below decides what the print gets. The bands
+            // are priced on the rows they already have.
+        }
+        if (rebuilt) {
+            reindex_published_kept();
+            for (KeptBand &entry : kept)
+                for (size_t layer = 0; layer < entry.own.size(); ++ layer) {
+                    entry.rows[layer].clear();
+                    for (size_t index = 0; index < committed_rows.size(); ++ index)
+                        if (std::abs(committed_rows[index].print_z - entry.own[layer]->print_z) < EPSILON)
+                            entry.rows[layer].push_back(index);
+                }
+        }
+    }
+
+    // The model seconds of a plan that sent bands fine at the whole-print check, priced again on the
+    // tower built for it at the end; negative when there is nothing to price again.
+    double reprice_model = -1.;
 
     // The whole print, after every band has decided on its own numbers. A band's price holds its
     // switches and the tower rows they pay for, never the tower as a whole: the priming, the solid
@@ -6621,12 +7109,11 @@ void Print::select_feature_infill_by_time()
             }
             return cost;
         };
-        // The plan has to win by more than the selector can see. It prices the tower's rows and the
-        // switches, not the travel to and from the tower or the retracts around each switch, so a
-        // plan that wins by less than a minute is not worth a tower.
-        const double margin_seconds = 60.;
         const PlanCost plan = price_plan(0);
         const PlanCost fine = price_plan(kept.size());
+        // The plan has to win by more than the estimate can be trusted to. Its error grows with the
+        // print, so the margin is a share of the plan, and never under a minute.
+        const double margin_seconds = std::max(60., 0.02 * plan.total());
         // The tower only has to reach the last switch, so a band above the one below it carries the
         // tower levels between the two. The best plan is looked for among the ones that send the
         // top bands fine, one more at a time: an isolated high band, or a cluster of them, whose
@@ -6634,12 +7121,14 @@ void Print::select_feature_infill_by_time()
         // A plan the bands already beat keeps every band.
         size_t best = 0;
         double best_total = plan.total();
+        PlanCost best_cost = plan;
         if (plan.available)
             for (size_t trimmed = 1; trimmed < kept.size(); ++ trimmed) {
                 const PlanCost candidate = price_plan(trimmed);
                 if (candidate.available && candidate.total() < best_total - EPSILON) {
                     best = trimmed;
                     best_total = candidate.total();
+                    best_cost = candidate;
                 }
             }
         size_t going = 0;
@@ -6654,6 +7143,9 @@ void Print::select_feature_infill_by_time()
             }
         }
         const double chosen_seconds = going == 0 ? plan.total() : going == best ? best_total : fine.total();
+        const PlanCost &chosen = going == 0 ? plan : going == best ? best_cost : fine;
+        if (going > 0 && chosen.available)
+            reprice_model = chosen.model;
         {
             std::ostringstream digest;
             digest.precision(12);
@@ -6663,7 +7155,14 @@ void Print::select_feature_infill_by_time()
                    << " all_fine=" << fine.total() << " margin=" << margin_seconds
                    << " best_trim=" << best << " best=" << best_total
                    << " chosen=" << chosen_seconds
-                   << " coarse_bands=" << kept.size() << "\n";
+                   << " coarse_bands=" << kept.size()
+                   << " plan_model=" << plan.model << " plan_tower=" << plan.tower
+                   << " plan_switches=" << plan.switches
+                   << " all_fine_model=" << fine.model << " all_fine_tower=" << fine.tower
+                   << " all_fine_switches=" << fine.switches
+                   << " chosen_model=" << chosen.model << " chosen_tower=" << chosen.tower
+                   << " chosen_switches=" << chosen.switches
+                   << " committed_tower=" << m_feature_economics_committed_tower_seconds << "\n";
             for (size_t at = 0; at < going; ++ at) {
                 const KeptBand &entry = kept[order[at]];
                 digest << "whole_print fine object=" << entry.object->model_object()->name
@@ -6672,6 +7171,12 @@ void Print::select_feature_infill_by_time()
                        << " reason=" << reason << "\n";
             }
             m_feature_economics_whole_print_digest = digest.str();
+        }
+        // The digest goes to the log line by line, so a command line slice shows what the check saw.
+        {
+            std::istringstream lines(m_feature_economics_whole_print_digest);
+            for (std::string line; std::getline(lines, line); )
+                BOOST_LOG_TRIVIAL(info) << "Feature infill time digest: " << line;
         }
         BOOST_LOG_TRIVIAL(info) << "Feature infill time, whole print: plan " << plan.total()
             << " s against all fine " << fine.total() << " s over " << kept.size() << " coarse bands, "
@@ -6753,6 +7258,22 @@ void Print::select_feature_infill_by_time()
             entry->band->reason = std::string("fine_tower_unavailable: ") + error.what();
         }
         _make_wipe_tower();
+        return;
+    }
+    // A plan that sent bands fine at the whole-print check now has its own, shorter tower. Its
+    // price on that tower is what the print should take, and goes to the digest and the log.
+    if (reprice_model >= 0.) {
+        reindex_published_kept();
+        const HandoffCost rebuilt = price_sequence({}, 0, nullptr, nullptr, nullptr);
+        if (rebuilt.available) {
+            std::ostringstream line;
+            line.precision(12);
+            line << "whole_print rebuilt chosen=" << reprice_model + rebuilt.total_seconds()
+                 << " chosen_model=" << reprice_model << " chosen_tower=" << rebuilt.tower_seconds
+                 << " chosen_switches=" << rebuilt.switch_seconds;
+            m_feature_economics_whole_print_digest += line.str() + "\n";
+            BOOST_LOG_TRIVIAL(info) << "Feature infill time digest: " << line.str();
+        }
     }
 }
 
