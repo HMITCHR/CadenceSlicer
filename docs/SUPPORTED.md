@@ -67,6 +67,7 @@ Some things are still up to you:
 
 - Abrasive filaments (CF, GF) need a hardened nozzle, the same as always.
 - In Body Split, whether two different materials stick to each other is down to the materials. Interlocking beams help the joint mechanically, but they won't make PLA bond to PETG.
+- PLA as the main material on one nozzle and PETG on the other (for example PLA walls on the 0.2 and PETG infill on the 0.6) is refused. The prime tower keeps materials that don't stick to each other apart, and it can't do that on every level here. Use the same kind of material on both nozzles. A PETG support interface is different and works (see below).
 - A support interface in a different material works across the two nozzles, for example a PETG interface on the fine nozzle under a PLA part with a PLA support body on the coarse nozzle. That makes three filaments in the print, and the prime tower grows deeper to fit the extra changes. Whether the interface releases cleanly is down to the two materials, as in OrcaSlicer.
 
 ## Presets
@@ -144,7 +145,7 @@ The band grid only works if every layer in a band can be printed the way the fin
 - dynamic filament mapping and custom or cyclic tool ordering
 - resonance avoidance and adaptive volumetric speed
 - in Feature Split, a skirt from the draft shield option
-- in Body Split, overlapping model parts
+- in Body Split, model parts that overlap a lot. A small part sunk into a much bigger one, like text sunk into a base, is allowed: the small part keeps the shared space and you get a note after slicing.
 - different N on different objects on the same plate
 - smooth timelapse, when one nozzle can't lay the shared first layer and the tower has to lag behind the part
 - slice-data caching
@@ -157,8 +158,9 @@ Supports and support interfaces work in Feature Split and Body Split. The nozzle
 
 - the support body (Support/raft base) at Default
 - the interface on a bigger nozzle than the support body
-- tree supports with the support body on the coarse nozzle (for now, I'm working on it)
-- a raft with the support body on the coarse nozzle, and any raft in Body Split (for now)
+- Slim, Strong and Hybrid tree supports with the support body on the coarse nozzle. Organic trees and Normal supports work there.
+- any raft in Body Split (for now). In Feature Split a raft can have its body on either nozzle.
+- support the two nozzles can't print with the filaments loaded, for example a PLA support body next to a PETG interface when the fine nozzle has no PLA. The message says what to load where.
 - a separate prime tower filament
 
 Rough edges I know about:
@@ -167,12 +169,21 @@ Rough edges I know about:
 - The prime tower can get small blobs in its purge area where coarse and fine layers overlap. The part isn't affected.
 - The coarse support body can get a few thin layers (around 0.1 mm) just under the interface. They print fine, but they're thinner than that nozzle's usual minimum.
 - With the support body on the coarse nozzle, the part can get a wider brim than OrcaSlicer would give it.
-- Setup's last step doesn't yet say which nozzle prints the supports. Check the two support filament settings before slicing.
+- With Organic trees on the coarse nozzle, the trunks are coarse and the thin tips and twigs print on the fine nozzle, so both nozzles print part of the tree.
+- A raft with its body on the coarse nozzle starts at that nozzle's thinnest layer (0.12 mm on a 0.6), higher than the first layer you set, and you get a warning. Sliced and checked, not print-tested yet.
 - OrcaSlicer itself prints one top interface layer when two are set. Cadence inherits that.
+- Setup suggests 3 interface layers for a different-material interface, whatever the layer height. At 0.08 mm fine layers that makes a very thin PETG layer, and the tree tips can show through on the underside Use 4 interface layers when the fine layers are under 0.1 mm.
 
 ### Small prints and the prime tower
 
 On small parts the prime tower can use more filament and time than the part. On one small test part with supports, the tower took about 9 m of filament against about 1.2 m for the part and its supports. Feature Split can be slower than one nozzle on small or short prints. The Detail and speed step shows the time for one nozzle only, so compare before you apply. If one nozzle wins, setup offers to print with one nozzle instead.
+
+Two things make the tower bigger than you might expect:
+
+- A support interface in a different material (PETG under PLA) gets its own part of the tower for the full height, even if it's only used for a few layers near the top.
+- A first layer thinner than the coarse nozzle's minimum (0.10 on a 0.6) means the fine nozzle lays the tower's first layer and brim, which is slow. On my 0.2/0.6 test plate, a 0.12 first layer was about 8 minutes faster.
+
+Feature Split can also be slower than one nozzle when the support body is on a different nozzle from the part, because most layers then change nozzle. Setup's times show it, so check before you apply.
 
 ### Interlocking beams need joint height
 
@@ -192,6 +203,14 @@ All the times in setup and in the "Why fine or coarse?" report are the slicer's 
 
 The H2C has one hotend on the left and a six-hotend rack on the right. Cadence treats the rack side as one fixed diameter for the whole print, the same as the H2D's right nozzle. A change that keeps the mounted hotend gets the same ram and prime as on the H2D. A change that swaps the rack to another hotend goes through Bambu's own nozzle change routine. This has only been checked in the slicer, but I'd really love for someone to test this on their H2C and let me know how it works out.  
 
+### Text and small parts in Body Split
+
+Text, inlays and other small parts on the fine nozzle work as their own part, painted, or as a modifier. A few limits:
+
+- A small part sunk into a bigger one is kept only when the overlap is small: at most 10 percent of the bigger part, and the small part at most half its size. Anything more is refused as overlapping parts.
+- Objects that also use modifiers, negative parts or paint use the older, stricter overlap check.
+- The coarse nozzle can't reach into sharp inside corners of small letters, so the top around text can keep a few tiny gaps. v1.1 lays that top with one wall and a proper top fill, which closes most of them. A few can stay where letters sit very close together.
+
 ### Body Split with more than two materials
 
 Body Split is built around one material per nozzle. You can pin a part to a specific material slot in More options, but more than two materials in one Body Split print hasn't been tested much.
@@ -202,4 +221,4 @@ H2D Pro, H2C and X2D are enabled but not print-tested. The per-nozzle flush line
 
 ### Windows
 
-The first Windows build isn't out yet. It'll be added to the release once it's built and tested on at least one machine.
+The Windows build is made by GitHub Actions from the same source as the Mac build. It's tested on one machine, a Surface Book. The installer isn't signed, so SmartScreen warns the first time.

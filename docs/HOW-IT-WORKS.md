@@ -51,7 +51,7 @@ On Bambu printers this uses Bambu's own prime tower, with per-nozzle flush lines
 
 Using the coarse nozzle isn't free. Every coarse band needs a nozzle change pair and tower levels, and on small or sparse layers that can cost more than the coarse nozzle saves.
 
-For every band, the slicer estimates the time the coarse nozzle saves against the nozzle change and the tower levels that band forces. Bands that don't pay stay on the fine nozzle.
+For every band, the slicer estimates the time the coarse nozzle saves against the nozzle change and the tower levels that band forces. Bands that don't pay stay on the fine nozzle. The tower rows, the trips to the tower and the nozzle changes are timed the same way the exported G-code times them, and the margin a band has to beat grows with the size of the print, so a small print that would come out slower mixed goes all fine.
 
 It then checks the whole plan against printing everything fine. If mixed isn't faster, it prints everything fine and tells you why. A band high up the model that can't pay for the extra tower height it would need is dropped too. That's the usual reason the coarse nozzle stops partway up a tall, thin model: above some height, each band saves less than the tower costs to keep climbing.
 
@@ -87,6 +87,12 @@ At each nozzle change, the arriving nozzle travels straight to its part's wall, 
 
 Painting on a fine part with the fine nozzle's own filament keeps that paint on the fine nozzle. It doesn't add nozzle changes anywhere else on the plate.
 
+Painting the fine nozzle's filament onto a coarse part, or giving a coarse part a modifier set to the fine nozzle's filament, also works. That's the easy way to put text or a logo on a part without making it a separate body.
+
+Parts on different nozzles aren't allowed to overlap, with one exception for text and inlays. When a small part is sunk into a much bigger one (the shared space is at most 10 percent of the bigger part, and the small part is at most half its size), the small part keeps the shared space at its own nozzle and layer height, and the bigger part stops right under it. You get a note after slicing that names both parts. Anything bigger is refused.
+
+The coarse body's top surface is laid with one wall and a full top fill, whatever "Only one wall on top surfaces" says. With text in the top, four walls around every letter left no room for top fill between them and left small gaps.
+
 ## Supports
 
 Supports work in both Feature Split and Body Split. Which nozzle prints them comes from the Support settings, the same two settings as in OrcaSlicer: the filament for the support body (Support/raft base) and the filament for the interface (Support/raft interface). Whichever nozzle a filament is on prints that part of the support. Setup doesn't change any of your support settings, though setting interface filament to something like PETG for PLA prints (one of the best benefits of dual nozzle printing) automatically pulls up the same OrcaSlicer pop-up with suggested interface settings changes. When doing this, the prime tower automatically adjusts to allow for the 3 different materials used in the print. 
@@ -96,17 +102,18 @@ If the interface is a different material, like PETG under PLA, set top interface
 A few details:
 
 - No interface material goes on the bed or on the tower's first layer. The first layer is the part's own material.
-- Small bits of support body the coarse nozzle can't lay, like the support's first layer and the solid layer right under the interface, go to the fine nozzle. They print in the body's material if that material is loaded on the fine nozzle, not in the interface material.
+- Small bits of support body the coarse nozzle can't lay, like the support's first layer and the solid layer right under the interface, go to the fine nozzle. They print in the body's material, which has to be loaded on the fine nozzle too. If the fine nozzle only has the interface material, the slice is refused with a message that says what to load.
 - An interface left at Default follows the body's filament.
-- Tree supports work with the support body on the fine nozzle. On the coarse nozzle they're refused for now, because a leaning branch doesn't stack cleanly in thick layers yet. I'm working on it.
-- Rafts work in Feature Split with the support body on the fine nozzle. They're refused with the body on the coarse nozzle, and in Body Split, for now.
+- In Body Split, the coarse support's thick layers end where the coarse part beside it ends its layers, so the support and the part stay level.
+- Organic tree supports work with the support body on either nozzle. On the coarse nozzle each thick layer takes the tree's shape at its middle, keeps only what stands on the layer below and holds up the layer above within the branch's lean, and stays clear of the part and of the interface. Branches thinner than about one and a half coarse lines, and the tips, go to the fine nozzle. Slim, Strong and Hybrid trees lean and split in ways that don't stack in thick layers, so they're refused with the body on the coarse nozzle.
+- Rafts work in Feature Split with the support body on either nozzle. With the body on the coarse nozzle, the raft starts on the bed at that nozzle's thinnest layer (0.12 mm on a 0.6), so the first layer is higher than set and you get a warning. Rafts are refused in Body Split for now.
 
 Some combinations are refused on purpose, with a message that names the setting:
 
 - The support body at Default. At Default the support prints with whichever filament happens to be active, which could be on either nozzle from one layer to the next. Pick a specific filament.
 - An interface on a bigger nozzle than the body. The interface is the part that touches the model, so putting it on the coarser nozzle defeats the point. Set it to Default, or to a filament on the body's nozzle or the finer one.
-- Tree supports with the body on the coarse nozzle. Put the support body on the fine nozzle's filament, or use Normal supports.
-- A raft with the support body on the coarse nozzle, or any raft in Body Split. Put the support body on the fine nozzle's filament, or turn the raft off.
+- Slim, Strong or Hybrid trees with the body on the coarse nozzle. Use Organic or Normal supports, or put the support body on the fine nozzle's filament.
+- Any raft in Body Split. Turn the raft off, or turn Body Split off for that plate.
 - A separate prime tower filament. It would add a third filament to every layer of the tower.
 
 You can also put the whole support on the fine nozzle. On some models the print then ends up on the fine nozzle only, the same as one nozzle.
@@ -116,6 +123,10 @@ You can also put the whole support on the fine nozzle. On some models the print 
 Both nozzles share the first layer. If one nozzle can't lay the base layer or the first layer height, its part starts on the bed with a thicker first cell, and the prime tower lags behind the part to give each nozzle a layer it can print. That's what happens in Body Split when the part on the bed is on the coarse nozzle. Smooth timelapse and wrapping detection need the tower level with the part, so in that case they're refused.
 
 After the start purge line, the nozzle retracts and lifts before its first travel, so it doesn't drag across the purge line on its way to the tower.
+
+The start G-code uses the nozzle the print actually starts on: the start purge amount, the air printing check, the bed trim and the chamber cooling follow that nozzle. Before v1.1 it could use the other nozzle's values.
+
+If the first printed layer only has support on it, the tower still starts on that layer, with its brim.
 
 ## Setup and the ranking by full slices
 

@@ -26,9 +26,23 @@ Feature Split lets you pick which nozzle prints each feature of a single model. 
 
 Body Split is for models made of several parts, or models with painted regions where you want to specify which nozzle prints them. Each part or painted selection prints entirely on the nozzle you pick for it, walls and infill both, and the part on the bed can be on either nozzle. Where parts on different nozzles touch, Cadence adds interlocking beams so the joint isn't just two flat faces stuck together.
 
-Supports work in both. The support body and the interface print on whichever nozzles their filaments are on in the Support settings. I usually put the body on the coarse nozzle and the interface on the fine one, and the interface can be a different material, like PETG under a PLA part.
+Supports work in both. The support body and the interface print on whichever nozzles their filaments are on in the Support settings. I usually put the body on the coarse nozzle and the interface on the fine one, and the interface can be a different material, like PETG under a PLA part. Normal supports and Organic tree supports both work with the body on the coarse nozzle. With Organic trees, the trunks print on the big nozzle and the thin tips go to the small one.
 
 Setup is four steps: pick the split, pick the filaments, pick the layer heights, then check and apply. On the layer height step it slices every coarse layer option in the background and shows the real estimated time for each, next to the one-nozzle time, so you can see what you're saving before you apply.
+
+## Small text on a big-nozzle print
+
+You can print small, crisp lettering on a part that's otherwise printed fast with the big nozzle. There are two ways to do it.
+
+**Feature Split (simplest).** Add the text to the model however you like: raised, engraved, on the top or on a side. Run setup, pick Feature Split and keep the default split. The small nozzle prints every wall and top surface, so the lettering comes out the same as an all-small-nozzle print, while the big nozzle does the infill underneath. On a 60 x 40 mm test sign with 5 mm letters on a 0.2 and 0.6, that was 1 h 21 min against 1 h 45 min all on the 0.2.
+
+**Body Split (text in a second colour).** Add the text as its own part (right click the object, Add part, Text, or load it as a second part), then put the text on the small nozzle's filament and the base on the big nozzle's. You can also paint the lettering onto the base with the small nozzle's filament, or use a text-shaped modifier. The base prints fast at the big nozzle's layer height and the text at the small one's. On the same sign, black text on a green base took about 47 min against 1 h 40 min all on the 0.2.
+
+A few things to know for Body Split:
+
+- Text can sit on the surface or be sunk into it. If it's sunk in, Cadence gives that space to the text and tells you after slicing. Two big parts that overlap a lot are still refused.
+- Raised letters join the base with a flat joint, not the interlocking beams used between bigger parts. That's fine for lettering, but don't rely on it to hold a part that takes a load.
+- Letters with strokes thinner than about 0.4 mm only survive on the small nozzle. A print that's all big nozzle loses most of 5 mm text.
 
 ## Does it actually save time?
 
@@ -127,18 +141,19 @@ Or skip all of that: export the G-code and print from a USB stick or SD card.
 
 Still working on a handful of small issues, mainly:
 
-- Setup's last step doesn't say which nozzle prints the supports yet, so check Support/raft base and Support/raft interface before slicing.
-- Tree supports and rafts only work with the support body on the fine nozzle for now. With it on the coarse nozzle Cadence refuses the slice and says why. I'm working on tree supports for the coarse nozzle and they'll come in an update.
+- Slim, Strong and Hybrid tree supports still need the support body on the fine nozzle. Organic and Normal supports work on either nozzle.
+- Rafts work in Feature Split, with the body on either nozzle. Body Split can't print on a raft yet.
+- PLA as the main material on one nozzle and PETG on the other is refused, because the prime tower can't join them. A PETG support interface is fine.
 - Some settings don't fit the layer grid (adaptive layer height, spiral vase, Arachne walls and a few others). Cadence refuses them with a message that names the setting.
 
-The full list is in the [release notes](docs/RELEASE-NOTES-v1.0.md) and [Supported](docs/SUPPORTED.md#known-issues).
+The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.md) and [Supported](docs/SUPPORTED.md#known-issues).
 
 ## Other docs
 
 - [How it works](docs/HOW-IT-WORKS.md): the layer grid, nozzle changes, the prime tower, the time check, Feature Split, Body Split and beams
 - [Supported](docs/SUPPORTED.md): printers, nozzle pairs, flow types, materials, presets and known issues
 - [Privacy](docs/PRIVACY.md): every network call the app can make, and what's off by default
-- [Release notes](docs/RELEASE-NOTES-v1.0.md)
+- Release notes: [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
 
 ## Bugs
 
