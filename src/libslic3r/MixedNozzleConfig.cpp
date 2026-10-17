@@ -1676,6 +1676,11 @@ PrintConfig mixed_nozzle_tower_config_as_off(const PrintConfig &config)
 {
     PrintConfig off = config;
     off.mixed_nozzle_slicing_mode.value = MixedNozzleSlicingMode::Off;
+    // The MN presets and the tower policy turn "No sparse layers" on for the mixed-nozzle tower.
+    // Stock does not offer it on a Bambu tower, and kept on here Off's ladder starts the tower at the
+    // first filament change, then drops the nozzle beside the printed part to lay it. The stock
+    // tower stands from the first layer.
+    off.wipe_tower_no_sparse_layers.value = false;
     return off;
 }
 

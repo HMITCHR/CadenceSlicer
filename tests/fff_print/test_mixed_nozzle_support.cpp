@@ -767,15 +767,122 @@ struct TowerTally {
     double      seconds = 0.;
     size_t      tower_levels = 0;
     size_t      coarse_roads = 0;
+    std::string gcode;
+    double      first_layer_height = 0.;
+    double      max_layer_height = 0.;
 };
+
+// What the G-code does with the prime tower, read from the text as the late-tower sweep's tower_scan.py
+// and plunge.py do: tower extrusions are the ones under "; FEATURE: Prime tower" or inside a wipe tower
+// block, and each move's layer is the last "; Z_HEIGHT:" above it.
+struct TowerPath {
+    double lowest_tower_z = std::numeric_limits<double>::max();
+    // 1-based G-code layer of the lowest tower extrusion, and of the first extrusion above the first layer.
+    int    lowest_tower_layer = 0;
+    int    first_layer_above_bed = 0;
+    // Tower extrusions laid more than `tolerance` away from their layer's Z.
+    size_t off_layer_tower_roads = 0;
+    double worst_off_layer = 0.;
+    // Z-only descents of more than 1 mm to below the layer being printed, outside the tower footprint.
+    std::vector<std::string> plunges;
+};
+
+TowerPath tower_path(const std::string &gcode, double first_layer_height, double tolerance)
+{
+    struct Line { double x, y, z; bool has_xy, has_z, extrudes; std::string text; };
+    const auto number_after = [](const std::string &line, char axis, double &value) {
+        for (size_t at = line.find(axis); at != std::string::npos; at = line.find(axis, at + 1)) {
+            if (at == 0 || line[at - 1] != ' ')
+                continue;
+            char *end = nullptr;
+            value = std::strtod(line.c_str() + at + 1, &end);
+            return end != line.c_str() + at + 1;
+        }
+        return false;
+    };
+    TowerPath path;
+    // Pass 1: the tower's footprint, grown by 3 mm.
+    double min_x = std::numeric_limits<double>::max(), min_y = min_x;
+    double max_x = -min_x, max_y = -min_x;
+    {
+        std::istringstream lines(gcode);
+        std::string line, feature;
+        bool in_tower = false;
+        double x = 0., y = 0.;
+        while (std::getline(lines, line)) {
+            if (line.rfind("; FEATURE:", 0) == 0) feature = line.substr(10);
+            if (line.rfind("; WIPE_TOWER_START", 0) == 0) in_tower = true;
+            if (line.rfind("; WIPE_TOWER_END", 0) == 0) in_tower = false;
+            if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0 && line.rfind("G2 ", 0) != 0 && line.rfind("G3 ", 0) != 0)
+                continue;
+            const std::string code = line.substr(0, line.find(';'));
+            double e = 0.;
+            const bool has_x = number_after(code, 'X', x), has_y = number_after(code, 'Y', y);
+            if ((has_x || has_y) && number_after(code, 'E', e) && e > 0. &&
+                (in_tower || feature.find("Prime tower") != std::string::npos)) {
+                min_x = std::min(min_x, x); max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y); max_y = std::max(max_y, y);
+            }
+        }
+    }
+    const auto over_tower = [&](double x, double y) {
+        return x >= min_x - 3. && x <= max_x + 3. && y >= min_y - 3. && y <= max_y + 3.;
+    };
+    // Pass 2: tower levels, the first layer above the bed, and descents.
+    std::istringstream lines(gcode);
+    std::string line, feature;
+    bool in_tower = false;
+    int layer = 0;
+    double layer_z = 0., x = 0., y = 0., z = 0.;
+    size_t number = 0;
+    while (std::getline(lines, line)) {
+        ++number;
+        if (line.rfind("; CHANGE_LAYER", 0) == 0) { ++layer; feature.clear(); continue; }
+        if (line.rfind("; Z_HEIGHT:", 0) == 0) { layer_z = std::atof(line.c_str() + 11); continue; }
+        if (line.rfind("; FEATURE:", 0) == 0) { feature = line.substr(10); continue; }
+        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; CP_TOOLCHANGE_START", 0) == 0) in_tower = true;
+        if (line.rfind("; WIPE_TOWER_END", 0) == 0 || line.rfind("; CP_TOOLCHANGE_END", 0) == 0) in_tower = false;
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0 && line.rfind("G2 ", 0) != 0 && line.rfind("G3 ", 0) != 0)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        double nx = x, ny = y, nz = z, e = 0.;
+        const bool has_x = number_after(code, 'X', nx), has_y = number_after(code, 'Y', ny), has_z = number_after(code, 'Z', nz);
+        if (has_z && ! has_x && ! has_y && layer > 0 && z - nz > 1. && nz < layer_z - 0.5 && ! over_tower(x, y)) {
+            std::ostringstream plunge;
+            plunge << "line " << number << " layer " << layer << " at X" << x << " Y" << y << ": Z " << z << " -> " << nz;
+            path.plunges.push_back(plunge.str());
+        }
+        x = nx; y = ny; z = nz;
+        if (layer == 0 || ! (has_x || has_y) || ! number_after(code, 'E', e) || e <= 0.)
+            continue;
+        // A purge the change template lays away from the tower is not a tower level.
+        if ((in_tower || feature.find("Prime tower") != std::string::npos) && over_tower(x, y)) {
+            if (z < path.lowest_tower_z - EPSILON) {
+                path.lowest_tower_z = z;
+                path.lowest_tower_layer = layer;
+            }
+            const double off = std::abs(z - layer_z);
+            if (off > tolerance + EPSILON) {
+                ++path.off_layer_tower_roads;
+                path.worst_off_layer = std::max(path.worst_off_layer, off);
+            }
+        } else if (path.first_layer_above_bed == 0 && z > first_layer_height + EPSILON) {
+            path.first_layer_above_bed = layer;
+        }
+    }
+    return path;
+}
 
 // The L part from the app project, with the support base on fine PLA (1) and the PETG interface (2)
 // on the fine nozzle as well. Counts the tower's levels and every road the coarse nozzle lays.
-TowerTally slice_l_part_fine_support(Mode mode)
+TowerTally slice_l_part_fine_support(Mode mode, bool no_sparse_layers = true)
 {
     DynamicPrintConfig config = app_three_filament_config(mode, 0.10, 0.30, 3, k_normal);
     config.set_key_value("support_filament", new ConfigOptionInt(1));
     config.set_key_value("support_interface_filament", new ConfigOptionInt(2));
+    // The MN presets and setup's tower policy write "No sparse layers" on; stock Orca does not offer it on a
+    // Bambu tower, so the stock reference turns it off.
+    config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(no_sparse_layers));
     // Off prints the part in one filament, as stock does.
     if (mode == Mode::Off)
         for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
@@ -797,6 +904,10 @@ TowerTally slice_l_part_fine_support(Mode mode)
     TowerTally tally;
     tally.refusal = facts.refusal.string;
     tally.seconds = facts.seconds;
+    tally.gcode = facts.gcode;
+    tally.first_layer_height = config.opt_float("initial_layer_print_height");
+    const std::vector<double> &max_heights = config.option<ConfigOptionFloats>("max_layer_height")->values;
+    tally.max_layer_height = max_heights.empty() ? 0. : *std::max_element(max_heights.begin(), max_heights.end());
     std::set<long> levels;
     for (const Move &move : facts.moves) {
         if (move.type != EMoveType::Extrude)
@@ -808,24 +919,47 @@ TowerTally slice_l_part_fine_support(Mode mode)
     tally.tower_levels = levels.size();
     return tally;
 }
+
+// The prime tower stands from the first layer, keeps level with the print, and the nozzle never drops
+// through the part to reach it.
+void check_tower_from_first_layer(const TowerTally &tally)
+{
+    const TowerPath path = tower_path(tally.gcode, tally.first_layer_height, tally.max_layer_height);
+    CAPTURE(path.lowest_tower_z, path.lowest_tower_layer, path.first_layer_above_bed, path.off_layer_tower_roads,
+            path.worst_off_layer, path.plunges.size());
+    INFO((path.plunges.empty() ? std::string("no plunge") : "first plunge: " + path.plunges.front()));
+    REQUIRE(path.lowest_tower_layer > 0);
+    CHECK_THAT(path.lowest_tower_z, Catch::Matchers::WithinAbs(tally.first_layer_height, 0.001));
+    REQUIRE(path.first_layer_above_bed > 0);
+    CHECK(path.lowest_tower_layer < path.first_layer_above_bed);
+    CHECK(path.off_layer_tower_roads == 0);
+    CHECK(path.plunges.empty());
+}
 } // namespace
 
-TEST_CASE("Feature Split with no coarse work left builds the same short prime tower as Off", "[TestRebuild][Tower]")
+TEST_CASE("Feature Split with no coarse work left starts the prime tower on the first layer", "[TestRebuild][Tower]")
 {
     // The time check sends every coarse band of this plate back to the fine nozzle, so the only tool
-    // changes left are the two PETG interface changes under the arm. Off lays its short tower for
-    // them; Feature Split used to build a full-height tower and took about 1.6 times as long.
-    const TowerTally off = slice_l_part_fine_support(Mode::Off);
-    REQUIRE(off.refusal.empty());
+    // changes left are the two PETG interface changes under the arm, and the tower is planned as Off.
+    // With "No sparse layers" on, as the MN presets write it, Off's upstream ladder skipped the tower
+    // until the first change at 40 mm, laid its first levels at 0.1 mm beside the part, and on the next
+    // layer dropped the nozzle 40 mm in place through the part (R/LATE-TOWER.md). Stock Orca does not offer
+    // that option on a Bambu tower, so the tower now stands from the first layer as stock lays it.
     const TowerTally split = slice_l_part_fine_support(Mode::Feature);
     INFO(split.refusal);
     REQUIRE(split.refusal.empty());
-    CAPTURE(off.seconds, split.seconds, off.tower_levels, split.tower_levels, split.coarse_roads);
-    // The scene: the coarse nozzle prints nothing in either mode.
-    REQUIRE(off.coarse_roads == 0);
+    // The scene: the coarse nozzle prints nothing, so this is the as-Off tower path.
     REQUIRE(split.coarse_roads == 0);
+    check_tower_from_first_layer(split);
+
+    // Off with "No sparse layers" off is stock Orca on a Bambu tower.
+    const TowerTally off = slice_l_part_fine_support(Mode::Off, false);
+    INFO(off.refusal);
+    REQUIRE(off.refusal.empty());
+    REQUIRE(off.coarse_roads == 0);
+    check_tower_from_first_layer(off);
+    CAPTURE(off.seconds, split.seconds, off.tower_levels, split.tower_levels);
     CHECK(split.tower_levels == off.tower_levels);
-    CHECK(split.tower_levels <= 2);
     CHECK(std::abs(split.seconds - off.seconds) <= 0.01 * off.seconds);
 }
 

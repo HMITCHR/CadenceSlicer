@@ -284,6 +284,17 @@ inline MixedNozzleSetupPlan stage_mixed_nozzle_setup(
             else plan.proposed_project_config.set_key_value(MIXED_NOZZLE_TOWER_POLICY_OPTION,
                 new ConfigOptionString(remaining.serialize()));
         }
+        // Stock OrcaSlicer offers "No sparse layers" only for a Type 2 tower on a non-Bambu printer.
+        // The MN Feature presets and Automatic turn it on, so once no plate uses Cadence it would
+        // stay on, hidden, and hold the stock tower back to the first filament change: the head then
+        // comes down beside parts already printed to lay it. Off goes back to the stock tower.
+        const auto *tower_type = plan.after.printer_config.option<ConfigOptionEnum<WipeTowerType>>("wipe_tower_type");
+        const bool stock_offers_no_sparse = !staged.is_bbl_vendor() && tower_type != nullptr &&
+                                            tower_type->value == WipeTowerType::Type2;
+        if (request.mode == MixedNozzleSlicingMode::Off && !evaluation.tower_required &&
+            policy.consuming_plate_ids.empty() && !stock_offers_no_sparse &&
+            plan.after.process_config.opt_bool(MIXED_NOZZLE_TOWER_NO_SPARSE_KEY))
+            plan.after.process_config.set_key_value(MIXED_NOZZLE_TOWER_NO_SPARSE_KEY, new ConfigOptionBool(false));
     }
     if (request.resolved_process_name || request.resolve_default_process)
         plan.proposed_project_config.erase("mixed_nozzle_coarse_layer_height");

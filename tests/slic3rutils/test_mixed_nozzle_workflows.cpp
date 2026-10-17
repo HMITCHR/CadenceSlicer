@@ -749,6 +749,86 @@ TEST_CASE("Turning Feature Split off clears the decision report on the reused Pr
     CHECK(ordinary.gcode != mixed.gcode);
 }
 
+namespace {
+
+// A plate whose second filament first prints at Z 3: a 4 mm body on slot 1 with a 1 mm top inlay on
+// slot 2, like text set into the top of a part.
+void add_top_inlay(WizardProject &project)
+{
+    project.add_object("inlay", {{"body", Vec3d(30., 20., 4.), Vec3d::Zero(), 1},
+                                 {"top", Vec3d(10., 10., 1.), Vec3d(10., 5., 3.), 2}},
+                       Vec2d(100., 100.));
+}
+
+void turn_off_current_plate(WizardProject &project)
+{
+    const MixedNozzleSetupRequest off = mixed_nozzle_off_request(false);
+    const MixedNozzleSetupPlan plan = stage_mixed_nozzle_setup(project.bundle, project.owners.plates, off,
+                                                               &project.plate);
+    INFO(plan.diagnostic);
+    REQUIRE(plan.diagnostic.empty());
+    const MixedNozzleSetupHooks hooks{[] {}, [](PartPlate &) {}, [] {}};
+    REQUIRE(commit_mixed_nozzle_setup_transaction(project.bundle, project.owners.plates, plan, off, hooks,
+                                                  &project.plate));
+    REQUIRE(project.plate.config()->opt_enum<MixedNozzleSlicingMode>("mixed_nozzle_slicing_mode") ==
+            MixedNozzleSlicingMode::Off);
+}
+
+// Layer changes before the first prime-tower block: 1 when the tower starts on the first layer.
+std::size_t layers_before_first_tower_block(const std::string &gcode)
+{
+    const std::size_t tower = gcode.find("; WIPE_TOWER_START");
+    if (tower == std::string::npos)
+        return 0;
+    std::size_t layers = 0;
+    for (std::size_t at = gcode.find("; CHANGE_LAYER"); at != std::string::npos && at < tower;
+         at = gcode.find("; CHANGE_LAYER", at + 1))
+        ++layers;
+    return layers;
+}
+
+void check_off_tower_starts_on_first_layer(WizardProject &project)
+{
+    // Stock OrcaSlicer only offers "No sparse layers" for a Type 2 tower on a non-Bambu printer.
+    // Left on here it would be hidden and still hold the stock tower back to the first filament
+    // change, so the head would come down beside parts already printed to lay it.
+    CHECK_FALSE(project.bundle.prints.get_edited_preset().config.opt_bool("wipe_tower_no_sparse_layers"));
+    const PlateSlice slice = require_slice(project);
+    REQUIRE(slice.gcode.find("; WIPE_TOWER_START") != std::string::npos);
+    CHECK(layers_before_first_tower_block(slice.gcode) == 1);
+}
+
+} // namespace
+
+TEST_CASE("After Turn off the stock prime tower starts on the first layer", "[TestRebuild][E2E][Off][Tower]")
+{
+    SECTION("Body Split on an MN Feature process, as the combined L project") {
+        WizardProject project(h2d_02_06_spec());
+        REQUIRE(project.bundle.prints.select_preset_by_name("MN Feature 0.2-0.6 0.10-0.30 Standard @BBL", true));
+        REQUIRE(project.bundle.prints.get_edited_preset().config.opt_bool("wipe_tower_no_sparse_layers"));
+        add_top_inlay(project);
+        SetupChoice choice = body_choice(0.10, 3);
+        choice.keep_current_process = true;
+        run_wizard_setup(project, choice);
+        turn_off_current_plate(project);
+        check_off_tower_starts_on_first_layer(project);
+    }
+    SECTION("Body Split on the process setup picks") {
+        WizardProject project(h2d_02_06_spec());
+        add_top_inlay(project);
+        run_wizard_setup(project, body_choice(0.10, 3));
+        turn_off_current_plate(project);
+        check_off_tower_starts_on_first_layer(project);
+    }
+    SECTION("Feature Split") {
+        WizardProject project(h2d_02_06_spec());
+        add_top_inlay(project);
+        run_wizard_setup(project, feature_choice(0.10, 3));
+        turn_off_current_plate(project);
+        check_off_tower_starts_on_first_layer(project);
+    }
+}
+
 TEST_CASE("Snapmaker J1 after Feature Split setup slices", "[TestRebuild][E2E][OtherPrinters][J1]")
 {
     WizardProject project(j1_spec());

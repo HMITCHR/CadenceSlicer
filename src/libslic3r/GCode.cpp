@@ -1205,9 +1205,13 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         // A lagging block below the head must be reached before descending, so the Z drop happens
         // over the tower rather than through the part.
         const double tower_z_start = tcr.tower_z_start > 0.f ? double(tcr.tower_z_start) : double(tcr.print_z);
+        // Off's no-sparse ladder passes a Z below the part too (a project that kept the option on):
+        // reach the tower before that descent as well, as upstream's crash guard (#15485) does.
+        const double head_z = gcodegen.writer().get_position().z();
         const bool reach_tower_before_descending =
-            ! tcr.priming && is_mixed_nozzle_slicing_enabled(*m_print_config) &&
-            tower_z_start < gcodegen.writer().get_position().z() - EPSILON;
+            ! tcr.priming &&
+            ((is_mixed_nozzle_slicing_enabled(*m_print_config) && tower_z_start < head_z - EPSILON) ||
+             (z >= 0. && z < head_z - EPSILON));
         if (!tcr.priming && (tcr.is_finish_first || reach_tower_before_descending)) {
             // Move over the wipe tower.
             gcode += gcodegen.retract();
@@ -2238,7 +2242,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     // resulting in a wipe tower with sparse layers.
                     double wipe_tower_z  = -1;
                     bool   ignore_sparse = false;
-                    if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
+                    if (m_print_config->wipe_tower_no_sparse_layers.value) {
                         ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
                                          m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool &&
                                          m_layer_idx != 0);
@@ -2279,7 +2283,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     const WipeTower::ToolChangeResult &first = m_tool_changes[m_layer_idx].front();
                     wipe_tower_z = first.tower_z_start > 0.f ? double(first.tower_z_start) : double(first.print_z);
                 }
-            } else if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
+            } else if (m_print_config->wipe_tower_no_sparse_layers.value) {
                 // Upstream's no-sparse-layers behaviour.
                 wipe_tower_z  = m_last_wipe_tower_print_z;
                 ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
@@ -2331,7 +2335,7 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             ignore_sparse = gcodegen.wipe_tower_type() != WipeTowerType::Type2
                 ? ! m_wipe_tower_emit[m_layer_idx]
                 : (m_tool_changes[m_layer_idx].size() == 1 && m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool);
-        } else if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
+        } else if (m_print_config->wipe_tower_no_sparse_layers.value) {
             // Upstream's test, as in tool_change()'s Off branch.
             ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
                              m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool);
