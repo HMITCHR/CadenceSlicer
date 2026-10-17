@@ -777,6 +777,12 @@ void PerimeterGenerator::split_top_surfaces(const ExPolygons &orig_polygons, ExP
 
     // skip if the exposed area is smaller than "min_width_top_surface"
     double min_width_top_surface = std::max(double(ext_perimeter_spacing / 2. + 10), scale_(config->min_width_top_surface.get_abs_value(unscale_(perimeter_width))));
+    // Cadence: min_width_top_surface is a share of the line width, so on the coarse nozzle of a Body Split body
+    // (300 % of 0.66 mm) it takes about 2 mm around anything standing on the top, such as raised text, out of
+    // the top surface. That band then gets rings of 0.66 mm walls meeting at odd angles between the letters,
+    // with open slivers left between them. Keep only the floor.
+    if (this->one_wall_top_forced)
+        min_width_top_surface = double(ext_perimeter_spacing / 2. + 10);
 
     // get the Polygons upper the polygon this layer
     Polygons upper_polygons_series_clipped;
@@ -1398,6 +1404,12 @@ void PerimeterGenerator::process_classic()
     // topmost and first layers - sees the same answer.
     const bool only_one_wall_top         = (this->config->only_one_wall_top || this->one_wall_top_forced) && has_top_shell_layers(*this->config);
     const bool only_one_wall_first_layer = this->config->only_one_wall_first_layer && has_bottom_shell_layers(*this->config);
+    // Cadence: whether the layer above covers nothing of this island beyond slicing noise along its edges.
+    auto nothing_over = [this, ext_perimeter_width](const ExPolygon &island) {
+        const BoundingBox bbox  = get_extents(island).inflated(SCALED_EPSILON);
+        const Polygons    upper = ClipperUtils::clip_clipper_polygons_with_subject_bbox(*this->upper_slices, bbox);
+        return opening_ex(intersection_ex(offset_ex(island, -float(ext_perimeter_width)), upper), float(scale_(0.05))).empty();
+    };
     for (size_t order_idx = 0; order_idx < surface_order.size(); order_idx++) {
         const Surface &surface = all_surfaces[surface_order[order_idx]];
         // detect how many perimeters must be generated for this island
@@ -1407,8 +1419,13 @@ void PerimeterGenerator::process_classic()
             loop_number++;
         if (this->layer_id == object_config->raft_layers && only_one_wall_first_layer)
             loop_number = 0;
+        // Cadence: a coarse Body Split island with nothing of the object over it, apart from what stands in its
+        // own holes (text sunk part way into it and standing proud, a body passing through it), is the top of the
+        // body there, so it is laid like the object's topmost layer: one wall, and the gap search below.
+        const bool topmost_island = this->upper_slices == nullptr ||
+            (this->one_wall_top_forced && only_one_wall_top && nothing_over(surface.expolygon));
         // Set the topmost layer to be one wall
-        if (loop_number > 0 && only_one_wall_top && this->upper_slices == nullptr)
+        if (loop_number > 0 && only_one_wall_top && topmost_island)
             loop_number = 0;
 
         ExPolygons last        = union_ex(surface.expolygon.simplify_p(surface_simplify_resolution));
@@ -1487,6 +1504,11 @@ void PerimeterGenerator::process_classic()
                     //FIXME Is this offset correct if the line width of the inner perimeters differs
                     // from the line width of the infill?
                     coord_t distance = (i == 1) ? ext_perimeter_spacing2 : perimeter_spacing;
+                    // Cadence: a coarse Body Split top laid with one wall looks for the gap left between two walls
+                    // (two letters of sunk text 1.3 to 1.5 mm apart) on spacing, not width. With precise_outer_wall
+                    // the width-based distance leaves a sliver under the gap-fill minimum, which then stays open.
+                    if (i == 1 && loop_number == 0 && this->one_wall_top_forced && only_one_wall_top && topmost_island)
+                        distance = coord_t(0.5 * (ext_perimeter_spacing + perimeter_spacing));
                     //BBS
                     //offsets = this->config->thin_walls ?
                         // This path will ensure, that the perimeters do not overfill, as in
@@ -1560,7 +1582,7 @@ void PerimeterGenerator::process_classic()
 
                 //BBS: refer to superslicer
                 //store surface for top infill if only_one_wall_top
-                if (i == 0 && i!=loop_number && only_one_wall_top && !surface.is_bridge() && this->upper_slices != NULL) {
+                if (i == 0 && i!=loop_number && only_one_wall_top && !surface.is_bridge() && !topmost_island) {
                     if (top_fill_replaces_inner_walls(*this->config)) {
                         // ORCA: take the top fill and the keep-out region but leave `last` as the real geometry,
                         // so the onion follows it and the walls over the top are reduced in one step below.
@@ -1881,11 +1903,19 @@ void PerimeterGenerator::process_classic()
         coord_t infill_peri_overlap = 0;
         coord_t top_infill_peri_overlap = 0;
         if (inset > 0) {
-            if(this->layer_id == 0 || this->upper_slices == nullptr){
-                infill_peri_overlap = coord_t(scale_(this->config->top_bottom_infill_wall_overlap.get_abs_value(unscale<double>(inset + solid_infill_spacing / 2))));
+            const double overlap_base = unscale<double>(inset + solid_infill_spacing / 2);
+            const double bottom_overlap = this->config->top_bottom_infill_wall_overlap.get_abs_value(overlap_base);
+            // Cadence: a coarse Body Split top pulls its top lines at least 40 % into the wall. Where a 0.66 mm top
+            // line meets a curved or angled wall (around text) it stops short, and the wedge left is too sharp
+            // for gap fill to reach its corner; 25 % (the MN presets) left about 1.9 mm2 of such wedges open
+            // around the owner's sunk text, 40 % about 0.7. The overlap is 0.24 mm instead of 0.15 on a 0.6.
+            const double top_overlap = (this->one_wall_top_forced && only_one_wall_top) ?
+                std::max(bottom_overlap, 0.4 * overlap_base) : bottom_overlap;
+            if(this->layer_id == 0 || topmost_island){
+                infill_peri_overlap = coord_t(scale_(topmost_island ? top_overlap : bottom_overlap));
             }else{
-                infill_peri_overlap = coord_t(scale_(this->config->infill_wall_overlap.get_abs_value(unscale<double>(inset + solid_infill_spacing / 2))));
-                top_infill_peri_overlap = coord_t(scale_(this->config->top_bottom_infill_wall_overlap.get_abs_value(unscale<double>(inset + solid_infill_spacing / 2))));
+                infill_peri_overlap = coord_t(scale_(this->config->infill_wall_overlap.get_abs_value(overlap_base)));
+                top_infill_peri_overlap = coord_t(scale_(top_overlap));
             }
             inset -= infill_peri_overlap;
         }

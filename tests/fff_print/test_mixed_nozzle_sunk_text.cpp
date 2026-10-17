@@ -3,6 +3,7 @@
 #include "mixed_nozzle_harness.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -39,6 +40,9 @@ struct Variant {
     double      fine        = 0.1;
     // The project in tests/data.
     std::string file        = "body-split-sunk-text-L.3mf";
+    // Moves the text up (mm) and stretches it along X about its own centre, to vary how it meets the base.
+    double      text_dz      = 0.;
+    double      text_scale_x = 1.;
 };
 
 struct SlicedProject {
@@ -70,9 +74,14 @@ std::unique_ptr<SlicedProject> slice_l_project(const Variant &variant)
     config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(variant.organic ? stTreeAuto : stNormalAuto));
     config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(variant.organic ? smsTreeOrganic : smsDefault));
     config.set_key_value("layer_height", new ConfigOptionFloat(variant.fine));
-    for (ModelVolume *volume : out->model.objects.front()->volumes)
-        volume->config.set_key_value("regional_layer_height",
-                                     new ConfigOptionFloat(volume->name == "L" || volume->name == "block" ? variant.coarse : variant.fine));
+    for (ModelVolume *volume : out->model.objects.front()->volumes) {
+        const bool base = volume->name == "L" || volume->name == "block";
+        volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(base ? variant.coarse : variant.fine));
+        if (!base && variant.text_dz != 0.)
+            volume->set_offset(volume->get_offset() + Vec3d(0., 0., variant.text_dz));
+        if (!base && variant.text_scale_x != 1.)
+            volume->set_scaling_factor(X, volume->get_scaling_factor(X) * variant.text_scale_x);
+    }
     out->print.is_BBL_printer() = true;
     out->print.apply(out->model, config);
     out->print.set_status_silent();
@@ -524,6 +533,327 @@ TEST_CASE("The coarse base's top around sunk text is laid as top surface and not
              << area[erExternalPerimeter] << ", gap fill " << area[erGapFill] << " (top share " << top_share << ")";
         INFO(what.str());
         if (total < 500. || top_share < 0.6 || area[erPerimeter] > 0.)
+            failures.push_back(what.str());
+    }
+    INFO(report(failures));
+    CHECK(failures.empty());
+}
+
+namespace {
+// What the coarse body leaves open on its top layer within 4 mm of the text, like topcov.py on the G-code:
+// the base's top outline less the letters (grown 0.05 mm) and its edge (0.11 mm), minus the area its roads
+// cover at their width.
+struct CoarseTopGaps {
+    double top_z   = 0.;
+    double near    = 0.; // mm2 of base top within 4 mm of the letters
+    double open    = 0.; // mm2 of it no road covers
+    double largest = 0.;
+    size_t spots   = 0;  // open spots of 0.1 mm2 or more
+    size_t gap_fill_roads = 0;
+};
+
+size_t count_gap_fill(const ExtrusionEntity &entity)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        size_t n = 0;
+        for (const ExtrusionEntity *child : collection->entities)
+            n += count_gap_fill(*child);
+        return n;
+    }
+    return entity.role() == erGapFill ? 1 : 0;
+}
+
+// The area each road covers, by role: its centreline grown by half its width with round ends and joins, as
+// the plastic lies (ExtrusionPath::polygons_covered_by_width cuts each piece square, which leaves notches
+// where a wall is split into pieces).
+void road_cover(const ExtrusionEntity &entity, std::map<ExtrusionRole, Polygons> &out)
+{
+    auto path_cover = [&out](const ExtrusionPath &path) {
+        const Polyline line = path.polyline.to_polyline();
+        if (line.size() >= 2)
+            polygons_append(out[path.role()], offset(line, float(scale_(path.width / 2.)), ClipperLib::jtRound,
+                                                     double(scale_(0.005)), ClipperLib::etOpenRound));
+    };
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            road_cover(*child, out);
+    } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity))
+        path_cover(*path);
+    else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
+        for (const ExtrusionPath &piece : multipath->paths)
+            path_cover(piece);
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+        for (const ExtrusionPath &piece : loop->paths)
+            path_cover(piece);
+    }
+}
+
+CoarseTopGaps coarse_top_gaps(const PrintObject &object, size_t l_region)
+{
+    CoarseTopGaps gaps;
+    const Layer       *top   = nullptr;
+    const LayerRegion *l_top = nullptr;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions())
+            if (size_t(region->region().print_object_region_id()) == l_region && !region->perimeters.empty() &&
+                (top == nullptr || layer->print_z > top->print_z)) {
+                top   = layer;
+                l_top = region;
+            }
+    if (top == nullptr)
+        return gaps;
+    gaps.top_z = top->print_z;
+    // The letters: the text in the base's top cell (sunk) or in the cell above it (raised).
+    const double cell = l_top->height();
+    ExPolygons letters;
+    for (const Layer *layer : object.layers())
+        if (layer->print_z > top->print_z - cell + EPSILON && layer->print_z < top->print_z + cell + EPSILON)
+            for (const LayerRegion *region : layer->regions())
+                if (size_t(region->region().print_object_region_id()) != l_region)
+                    append(letters, to_expolygons(region->slices.surfaces));
+    letters = union_ex(letters);
+    std::map<ExtrusionRole, Polygons> roles;
+    road_cover(l_top->perimeters, roles);
+    road_cover(l_top->fills, roles);
+    road_cover(l_top->thin_fills, roles);
+    Polygons covered;
+    for (const auto &[role, polygons] : roles)
+        append(covered, polygons);
+    gaps.gap_fill_roads = count_gap_fill(l_top->perimeters) + count_gap_fill(l_top->fills) + count_gap_fill(l_top->thin_fills);
+    ExPolygons outline = to_expolygons(l_top->slices.surfaces);
+    append(outline, letters);
+    const ExPolygons target = offset_ex(union_ex(outline), -float(scale_(0.11)));
+    const ExPolygons near   = intersection_ex(diff_ex(target, offset_ex(letters, float(scale_(0.05)))),
+                                              offset_ex(letters, float(scale_(4.))));
+    const double mm2 = SCALING_FACTOR * SCALING_FACTOR;
+    for (const ExPolygon &piece : near)
+        gaps.near += piece.area() * mm2;
+    const ExPolygons open = diff_ex(near, union_(covered));
+    for (const ExPolygon &hole : open) {
+        const double a = hole.area() * mm2;
+        gaps.open += a;
+        gaps.largest = std::max(gaps.largest, a);
+        if (a >= 0.1)
+            ++gaps.spots;
+    }
+    return gaps;
+}
+} // namespace
+
+TEST_CASE("The coarse base's top leaves no open gaps around text on it", "[TestRebuild][BodySplit]")
+{
+    // Owner print of the combined L (build 9): the 0.6 left 3.3 mm2 open in the blue top around the sunk
+    // letters, in 29 spots. Most were crescents and wedges where the last 0.66 mm top line stops short of a
+    // curved or angled wall (the plate has gap_fill_target "nowhere"), and one was a clear line between the
+    // walls around E and N, 0.08 mm wide, just under the smallest gap the walls' gap fill takes. A coarse
+    // Body Split top now gap-fills both and pulls its top lines further into the wall. Text standing proud
+    // (half sunk) used to leave the base's top laid with four walls, and raised text took about 2 mm around
+    // its letters out of the top (min_width_top_surface at 300 % of a 0.66 mm line) and ringed it with walls.
+    // Measured before the change (this test on build 10): sunk 3.8 mm2, letters 0.95 wide 2.1, 1.05 wide 3.6,
+    // half sunk 6.8, raised 2.1. Letter notches narrower than a 0.6 road stay.
+    std::vector<std::string> failures;
+    Variant narrow{"sunk, letters 0.95 wide"};
+    narrow.text_scale_x = 0.95;
+    Variant wide{"sunk, letters 1.05 wide"};
+    wide.text_scale_x = 1.05;
+    Variant half{"half sunk (0.4 mm proud)"};
+    half.text_dz = 0.4;
+    Variant raised{"raised on the top"};
+    raised.text_dz = 0.8;
+    for (const Variant &variant : {Variant{"sunk (owner plate)"}, narrow, wide, half, raised,
+                                   Variant{"raised 0.10/0.16 fine 0.08", 0.1, 0.16, true, true, 0.08, "body-split-L-text-raised-0208.3mf"}}) {
+        const std::unique_ptr<SlicedProject> project = slice_l_project(variant);
+        if (!project->failure.empty()) {
+            failures.push_back(project->failure);
+            continue;
+        }
+        const CoarseTopGaps gaps = coarse_top_gaps(the_object(*project), coarse_region(the_object(*project)));
+        std::ostringstream what;
+        what << variant.name << ": top Z " << gaps.top_z << ", base top near the letters " << gaps.near << " mm2, open "
+             << gaps.open << " mm2, " << gaps.spots << " spots of 0.1 mm2 or more, largest " << gaps.largest << ", "
+             << gaps.gap_fill_roads << " gap fill roads";
+        INFO(what.str());
+        CHECK(gaps.near > 50.);
+        if (gaps.near < 50. || gaps.open >= 1.)
+            failures.push_back(what.str());
+    }
+    INFO(report(failures));
+    CHECK(failures.empty());
+}
+
+namespace {
+// How full the coarse body's top layer lays each pocket the text walls in: for each letter, its convex hull
+// less the letters (the counter, open or closed), and for each pair of neighbouring letters their joint hull
+// less the letters and both counters (the space between them), each cut to the part the letters wall in (the
+// letters' outline closed by 2.5 mm; a hull also takes in open ground past the letters' tips, where extra
+// plastic can spread). Fill is the coarse roads' volume there (the centreline inside, times the road's mm3
+// per mm, from the G-code) over the pocket's area times the layer height.
+struct PocketFill {
+    std::string name;
+    double      area = 0.;
+    double      fill = 0.;
+};
+
+// The plastic the coarse nozzle lays inside region on the layer at top_z, from the G-code moves (each move's
+// length inside times its mm3 per mm, flow ratios included).
+double volume_inside(const std::vector<Move> &moves, double top_z, const Point &shift, const ExPolygons &region)
+{
+    // The coarse nozzle: the one laying top surface with roads wider than the 0.2 can lay.
+    int extruder = -1;
+    for (const Move &move : moves)
+        if (move.type == EMoveType::Extrude && move.extrusion_role == erTopSolidInfill && move.width > 0.45f &&
+            std::abs(double(move.position.z()) - top_z) < 1e-3)
+            extruder = move.extruder_id;
+    double      volume   = 0.;
+    const Move *previous = nullptr;
+    for (const Move &move : moves) {
+        if (previous != nullptr && move.type == EMoveType::Extrude && int(move.extruder_id) == extruder &&
+            move.extrusion_role != erWipeTower && std::abs(double(move.position.z()) - top_z) < 1e-3) {
+            // The moves are on the bed, the region in the object's own coordinates.
+            const Polyline line(Point(Point::new_scale(previous->position.x(), previous->position.y()) - shift),
+                                Point(Point::new_scale(move.position.x(), move.position.y()) - shift));
+            for (const Polyline &piece : intersection_pl(Polylines{line}, region))
+                volume += unscale<double>(piece.length()) * double(move.mm3_per_mm);
+        }
+        previous = &move;
+    }
+    return volume;
+}
+
+std::vector<PocketFill> coarse_top_pocket_fill(const PrintObject &object, size_t l_region, const std::vector<Move> &moves)
+{
+    const Layer       *top   = nullptr;
+    const LayerRegion *l_top = nullptr;
+    for (const Layer *layer : object.layers())
+        for (const LayerRegion *region : layer->regions())
+            if (size_t(region->region().print_object_region_id()) == l_region && !region->perimeters.empty() &&
+                (top == nullptr || layer->print_z > top->print_z)) {
+                top   = layer;
+                l_top = region;
+            }
+    std::vector<PocketFill> out;
+    if (top == nullptr)
+        return out;
+    ExPolygons letters;
+    for (const LayerRegion *region : top->regions())
+        if (size_t(region->region().print_object_region_id()) != l_region)
+            append(letters, to_expolygons(region->slices.surfaces));
+    letters = union_ex(letters);
+    std::sort(letters.begin(), letters.end(), [](const ExPolygon &a, const ExPolygon &b) {
+        return get_extents(a).min.x() < get_extents(b).min.x();
+    });
+    const ExPolygons base = intersection_ex(to_expolygons(l_top->slices.surfaces), closing_ex(letters, float(scale_(2.5))));
+    const double     mm2  = SCALING_FACTOR * SCALING_FACTOR;
+    auto hull_less = [&](const Polygons &hull_of, const ExPolygons &also_less) {
+        ExPolygons less = letters;
+        append(less, also_less);
+        return intersection_ex(diff_ex(ExPolygons{ExPolygon(Geometry::convex_hull(hull_of))}, less), base);
+    };
+    auto measure = [&](const std::string &name, const ExPolygons &pocket) {
+        double area = 0.;
+        for (const ExPolygon &piece : pocket)
+            area += piece.area() * mm2;
+        if (area < 5.)
+            return;
+        const double volume = volume_inside(moves, top->print_z, object.instances().front().shift, pocket);
+        out.push_back({name, area, volume / (area * l_top->height())});
+    };
+    std::vector<ExPolygons> counters;
+    for (size_t i = 0; i < letters.size(); ++i) {
+        counters.push_back(hull_less(to_polygons(letters[i]), {}));
+        measure("counter " + std::to_string(i + 1), counters.back());
+    }
+    for (size_t i = 0; i + 1 < letters.size(); ++i) {
+        Polygons pair = to_polygons(letters[i]);
+        append(pair, to_polygons(letters[i + 1]));
+        ExPolygons both = counters[i];
+        append(both, counters[i + 1]);
+        measure("between " + std::to_string(i + 1) + "-" + std::to_string(i + 2), hull_less(pair, both));
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("The coarse base's top fills the pockets the text walls in with no more than they hold", "[TestRebuild][BodySplit]")
+{
+    // Owner prints of the combined L with the gap fix (MC-1): lumps in the letter counters and between the
+    // letters on the blue top. The 0.6 laid 2 to 9 % more plastic there than the room between the black
+    // walls (build 9 laid 0.95 to 1.03 and had no lumps). A pocket the text walls in at full height has
+    // nowhere to put the extra. Its top lines and gap fill now run at a lower flow there, so each pocket gets
+    // at most what it holds, while the gaps around the letters stay closed (the test above).
+    std::vector<std::string> failures;
+    Variant half{"half sunk (0.4 mm proud)"};
+    half.text_dz = 0.4;
+    for (const Variant &variant : {Variant{"sunk (owner plate)"}, half}) {
+        const std::unique_ptr<SlicedProject> project = slice_l_project(variant);
+        if (!project->failure.empty()) {
+            failures.push_back(project->failure);
+            continue;
+        }
+        const std::vector<PocketFill> pockets = coarse_top_pocket_fill(the_object(*project), coarse_region(the_object(*project)), project->facts.moves);
+        std::ostringstream what;
+        what << variant.name << ":";
+        double fullest = 0., emptiest = 10.;
+        for (const PocketFill &pocket : pockets) {
+            what << " " << pocket.name << " " << pocket.fill << " (" << pocket.area << " mm2);";
+            fullest  = std::max(fullest, pocket.fill);
+            emptiest = std::min(emptiest, pocket.fill);
+        }
+        INFO(what.str());
+        // Seven letters: seven counters (the E's arms count) and six spaces between them.
+        CHECK(pockets.size() >= 12);
+        if (pockets.size() < 12 || fullest > 1.0 || emptiest < 0.85)
+            failures.push_back(what.str());
+    }
+    INFO(report(failures));
+    CHECK(failures.empty());
+}
+
+TEST_CASE("The coarse base's top lays its gap fill and the pockets the text walls in at gap fill speed", "[TestRebuild][BodySplit]")
+{
+    // Owner prints of the combined L with the gap fix (MC-1), on an MN Feature preset: lumps in the letter
+    // counters and between the letters on the blue top. The gap fill MC-1 forces there ran at about
+    // 209 mm/s and up to 31 mm3/s (the preset's coarse gap infill speed is 250, stock 0.6 values). A coarse
+    // Body Split top now lays its gap fill, and its top lines inside the pockets the text walls in, at no more
+    // than 50 mm/s (the MN Body presets' value). The open top keeps the preset's speed.
+    std::vector<std::string> failures;
+    Variant half{"half sunk (0.4 mm proud)"};
+    half.text_dz = 0.4;
+    for (const Variant &variant : {Variant{"sunk (owner plate)"}, half}) {
+        const std::unique_ptr<SlicedProject> project = slice_l_project(variant);
+        if (!project->failure.empty()) {
+            failures.push_back(project->failure);
+            continue;
+        }
+        // The coarse top: the highest top surface laid with roads wider than the 0.2 can lay.
+        double top_z    = 0.;
+        int    extruder = -1;
+        for (const Move &move : project->facts.moves)
+            if (move.type == EMoveType::Extrude && move.extrusion_role == erTopSolidInfill && move.width > 0.45f &&
+                double(move.position.z()) > top_z) {
+                top_z    = double(move.position.z());
+                extruder = move.extruder_id;
+            }
+        size_t gap_fill = 0;
+        double fastest_gap_fill = 0., slow_top = 0., fast_top = 0.;
+        const Move *previous = nullptr;
+        for (const Move &move : project->facts.moves) {
+            if (previous != nullptr && move.type == EMoveType::Extrude && int(move.extruder_id) == extruder &&
+                std::abs(double(move.position.z()) - top_z) < 1e-3) {
+                const double length = double((move.position - previous->position).head<2>().norm());
+                if (move.extrusion_role == erGapFill) {
+                    ++gap_fill;
+                    fastest_gap_fill = std::max(fastest_gap_fill, double(move.feedrate));
+                } else if (move.extrusion_role == erTopSolidInfill)
+                    (move.feedrate <= 50.01f ? slow_top : fast_top) += length;
+            }
+            previous = &move;
+        }
+        std::ostringstream what;
+        what << variant.name << ": top Z " << top_z << ", " << gap_fill << " gap fill moves, fastest " << fastest_gap_fill
+             << " mm/s; top surface at 50 mm/s or less " << slow_top << " mm, faster " << fast_top << " mm";
+        INFO(what.str());
+        if (gap_fill == 0 || fastest_gap_fill > 50.01 || slow_top < 10. || fast_top < slow_top)
             failures.push_back(what.str());
     }
     INFO(report(failures));

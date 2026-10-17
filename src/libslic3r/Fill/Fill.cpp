@@ -2,6 +2,8 @@
 #include <limits>
 #include <stdio.h>
 #include <memory>
+#include <algorithm>
+#include <functional>
 
 #include "../ClipperUtils.hpp"
 #include "../Geometry.hpp"
@@ -1304,6 +1306,384 @@ void export_group_fills_to_svg(const char *path, const std::vector<SurfaceFill> 
 }
 #endif
 
+namespace {
+bool lays_top_surface(const ExtrusionEntity &entity)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity))
+        return std::any_of(collection->entities.begin(), collection->entities.end(),
+                           [](const ExtrusionEntity *child) { return lays_top_surface(*child); });
+    return entity.role() == erTopSolidInfill;
+}
+
+// Cadence: a Body Split cell the coarse nozzle lays. coarse_body_split_cell() also holds for a painted child of
+// the coarse body that the fine nozzle lays, because a painted region copies its body's regional_layer_height.
+// Such a child counts as fine here, so the pocket flow and speed caps below leave it alone.
+bool laid_by_coarse_nozzle(const LayerRegion &layerm)
+{
+    if (!layerm.coarse_body_split_cell())
+        return false;
+    const std::vector<double> &nozzles = layerm.layer()->object()->print()->config().nozzle_diameter.values;
+    if (nozzles.empty())
+        return true;
+    return layerm.flow(frTopSolidInfill).nozzle_diameter() > *std::min_element(nozzles.begin(), nozzles.end()) + EPSILON;
+}
+
+// Cadence: the parts of a coarse Body Split cell's top that a fine body at the same height walls in: the
+// counters of sunk letters, the space between letters and other nooks narrower than about eight coarse
+// lines. They are the fine bodies' footprint closed by four coarse lines, less the footprint, inside the
+// cell. Empty unless the cell lays top surface on this layer and a fine body stands at its height.
+ExPolygons coarse_top_pockets(const Layer &layer, const LayerRegion &layerm, double &line_width)
+{
+    if (!laid_by_coarse_nozzle(layerm) || !lays_top_surface(layerm.fills))
+        return {};
+    Polygons fine;
+    for (const LayerRegion *other : layer.regions())
+        if (other != &layerm && other->has_cell() && !laid_by_coarse_nozzle(*other))
+            polygons_append(fine, to_polygons(other->slices.surfaces));
+    if (fine.empty())
+        return {};
+    line_width = layerm.flow(frTopSolidInfill).width();
+    ExPolygons pockets = intersection_ex(diff_ex(closing_ex(fine, float(scale_(4. * line_width))), fine),
+                                         to_expolygons(layerm.slices.surfaces));
+    const double speck = sqr(scale_(line_width));
+    pockets.erase(std::remove_if(pockets.begin(), pockets.end(), [speck](const ExPolygon &pocket) { return pocket.area() < speck; }),
+                  pockets.end());
+    return pockets;
+}
+
+// Calls fn on every path in entity (loops, multi paths and collections included).
+void for_each_path(const ExtrusionEntity &entity, const std::function<void(const ExtrusionPath &)> &fn)
+{
+    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            for_each_path(*child, fn);
+    } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity))
+        fn(*path);
+    else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
+        for (const ExtrusionPath &piece : multipath->paths)
+            fn(piece);
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
+        for (const ExtrusionPath &piece : loop->paths)
+            fn(piece);
+    }
+}
+
+// Cadence (MC-1 lumps, candidate L1): a coarse Body Split top fills the pockets a fine body walls in with no
+// more plastic than they hold. The top lines' 40 % overlap and the forced gap fill (see PerimeterGenerator
+// and Fill::_create_gap_fill) close the gaps around sunk text, but in a counter or between two letters,
+// walled in at full height, they put in 2 to 9 % more than the room there (owner prints of the combined L:
+// lumps in the counters and between the letters). Every half millimetre of top line or gap fill in a pocket
+// looks at the pocket within 2 mm of it: where the roads there hold more than its area times the layer
+// height, it runs at a lower flow, so that the top lines and gap fill there fit. The roads keep their place
+// and planned width (the line spacing does not change), so the gaps around the letters stay closed; the open
+// top elsewhere is unchanged.
+void cap_coarse_top_pocket_flow(const Layer &layer, LayerRegion &layerm)
+{
+    // The share of the room the coarse roads may fill (planned volume; the filament flow ratio takes about
+    // 2 % more off in the G-code), how far around a piece of road to look, the least flow a top line keeps,
+    // and the raster and piece sizes.
+    static constexpr double pocket_fill = 0.99;
+    static constexpr double reach       = 2.0;
+    static constexpr double least_flow  = 0.75;
+    static constexpr double cell        = 0.2;
+    static constexpr double piece       = 0.5;
+    double           line_width = 0.;
+    const ExPolygons pockets    = coarse_top_pockets(layer, layerm, line_width);
+    if (pockets.empty())
+        return;
+    // Raster the pockets' room and the volume the roads put in them.
+    BoundingBox box = get_extents(pockets);
+    box.offset(scale_(reach + cell));
+    const coord_t c  = coord_t(scale_(cell));
+    const int     nx = int((box.max.x() - box.min.x()) / c) + 1;
+    const int     ny = int((box.max.y() - box.min.y()) / c) + 1;
+    std::vector<BoundingBox> boxes;
+    for (const ExPolygon &pocket : pockets)
+        boxes.push_back(get_extents(pocket));
+    std::vector<char>   inside(size_t(nx) * ny, 0);
+    std::vector<double> room(size_t(nx) * ny, 0.), held(size_t(nx) * ny, 0.), adjustable(size_t(nx) * ny, 0.);
+    const double        cell_room = cell * cell * layerm.height() * pocket_fill;
+    for (int i = 0; i < nx; ++i)
+        for (int j = 0; j < ny; ++j) {
+            const Point centre(box.min.x() + i * c + c / 2, box.min.y() + j * c + c / 2);
+            for (size_t k = 0; k < pockets.size(); ++k)
+                if (boxes[k].contains(centre) && pockets[k].contains(centre)) {
+                    inside[size_t(i) * ny + j] = 1;
+                    room[size_t(i) * ny + j]   = cell_room;
+                    break;
+                }
+        }
+    auto cell_of = [&](double x, double y) -> long {
+        const int i = int(std::floor((x - box.min.x()) / c)), j = int(std::floor((y - box.min.y()) / c));
+        return i < 0 || j < 0 || i >= nx || j >= ny || !inside[size_t(i) * ny + j] ? -1 : long(size_t(i) * ny + j);
+    };
+    auto deposit = [&](const ExtrusionPath &path, bool fill) {
+        if (path.is_force_no_extrusion() || path.mm3_per_mm <= 0.)
+            return;
+        const bool top = fill && (path.role() == erTopSolidInfill || path.role() == erGapFill);
+        for (size_t k = 0; k + 1 < path.polyline.points.size(); ++k) {
+            const Point3 &a = path.polyline.points[k], &b = path.polyline.points[k + 1];
+            const double  length = unscale<double>(Vec2d(double(b.x() - a.x()), double(b.y() - a.y())).norm());
+            const int     n      = std::max(1, int(length / 0.05));
+            for (int s = 0; s < n; ++s) {
+                const double t  = (s + 0.5) / n;
+                const long   at = cell_of(a.x() + t * (b.x() - a.x()), a.y() + t * (b.y() - a.y()));
+                if (at < 0)
+                    continue;
+                held[at] += length / n * path.mm3_per_mm;
+                if (top)
+                    adjustable[at] += length / n * path.mm3_per_mm;
+            }
+        }
+    };
+    for_each_path(layerm.perimeters, [&deposit](const ExtrusionPath &path) { deposit(path, false); });
+    for_each_path(layerm.fills, [&deposit](const ExtrusionPath &path) { deposit(path, true); });
+    // Summed-area tables, so each piece reads its window's totals at once.
+    auto summed = [nx, ny](const std::vector<double> &grid) {
+        std::vector<double> out(size_t(nx + 1) * (ny + 1), 0.);
+        for (int i = 0; i < nx; ++i)
+            for (int j = 0; j < ny; ++j)
+                out[size_t(i + 1) * (ny + 1) + j + 1] = grid[size_t(i) * ny + j] + out[size_t(i) * (ny + 1) + j + 1] +
+                                                        out[size_t(i + 1) * (ny + 1) + j] - out[size_t(i) * (ny + 1) + j];
+        return out;
+    };
+    const std::vector<double> room_sum = summed(room), held_sum = summed(held), adjustable_sum = summed(adjustable);
+    const int r = int(std::round(reach / cell));
+    auto window = [&](const std::vector<double> &sum, long at) {
+        const int i = int(at / ny), j = int(at % ny);
+        const int i0 = std::max(0, i - r), i1 = std::min(nx, i + r + 1), j0 = std::max(0, j - r), j1 = std::min(ny, j + r + 1);
+        return sum[size_t(i1) * (ny + 1) + j1] - sum[size_t(i0) * (ny + 1) + j1] - sum[size_t(i1) * (ny + 1) + j0] +
+               sum[size_t(i0) * (ny + 1) + j0];
+    };
+    auto flow_at = [&](double x, double y) {
+        const long at = cell_of(x, y);
+        if (at < 0)
+            return 1.;
+        const double space = window(room_sum, at), put = window(held_sum, at), movable = window(adjustable_sum, at);
+        if (movable <= 0. || put <= space)
+            return 1.;
+        // In steps of 1 %, so neighbouring pieces with the same flow stay one road.
+        return std::round(std::clamp((space - (put - movable)) / movable, least_flow, 1.) * 100.) / 100.;
+    };
+    // Cut each top line and gap fill into pieces at most half a millimetre long and give each its flow; a road
+    // that changes becomes one multi path, so its pieces stay together and in order.
+    auto rework = [&](const ExtrusionPath &path, ExtrusionPaths &out) {
+        bool changed = false;
+        if (!path.is_force_no_extrusion() && (path.role() == erTopSolidInfill || path.role() == erGapFill)) {
+            double current = -1.;
+            for (size_t k = 0; k + 1 < path.polyline.points.size(); ++k) {
+                const Point3 &a = path.polyline.points[k], &b = path.polyline.points[k + 1];
+                const double  length = unscale<double>(Vec2d(double(b.x() - a.x()), double(b.y() - a.y())).norm());
+                const int     n      = std::max(1, int(std::ceil(length / piece)));
+                for (int s = 0; s < n; ++s) {
+                    const double t0 = double(s) / n, t1 = double(s + 1) / n, tm = 0.5 * (t0 + t1);
+                    const double f  = flow_at(a.x() + tm * (b.x() - a.x()), a.y() + tm * (b.y() - a.y()));
+                    changed |= f < 1.;
+                    auto at = [&a, &b](double t) {
+                        return Point3(coord_t(std::round(a.x() + t * (b.x() - a.x()))), coord_t(std::round(a.y() + t * (b.y() - a.y()))),
+                                      coord_t(std::round(a.z() + t * (b.z() - a.z()))));
+                    };
+                    if (f != current) {
+                        ExtrusionPath part(Polyline3(Points3{s == 0 ? a : at(t0)}), path);
+                        part.mm3_per_mm = path.mm3_per_mm * f;
+                        out.emplace_back(std::move(part));
+                        current = f;
+                    }
+                    out.back().polyline.points.push_back(s + 1 == n ? b : at(t1));
+                }
+            }
+        }
+        if (!changed) {
+            out.clear();
+            out.push_back(path);
+        }
+        return changed;
+    };
+    std::function<void(ExtrusionEntityCollection &)> rework_all = [&](ExtrusionEntityCollection &collection) {
+        for (ExtrusionEntity *&child : collection.entities) {
+            if (auto *nested = dynamic_cast<ExtrusionEntityCollection *>(child))
+                rework_all(*nested);
+            else if (auto *path = dynamic_cast<ExtrusionPath *>(child)) {
+                ExtrusionPaths pieces;
+                if (rework(*path, pieces)) {
+                    auto *multipath  = new ExtrusionMultiPath();
+                    multipath->paths = std::move(pieces);
+                    if (!path->can_reverse())
+                        multipath->set_reverse();
+                    delete child;
+                    child = multipath;
+                }
+            } else if (auto *multipath = dynamic_cast<ExtrusionMultiPath *>(child)) {
+                ExtrusionPaths all;
+                for (const ExtrusionPath &part : multipath->paths) {
+                    ExtrusionPaths pieces;
+                    rework(part, pieces);
+                    append(all, std::move(pieces));
+                }
+                multipath->paths = std::move(all);
+            }
+        }
+    };
+    rework_all(layerm.fills);
+}
+struct Pockets {
+    ExPolygons               shapes;
+    std::vector<BoundingBox> boxes;
+    std::vector<Lines>       outlines;
+    explicit Pockets(ExPolygons pockets) : shapes(std::move(pockets))
+    {
+        for (const ExPolygon &shape : shapes) {
+            boxes.push_back(get_extents(shape));
+            outlines.push_back(to_lines(shape));
+        }
+    }
+    int at(const Point &point) const
+    {
+        for (size_t i = 0; i < shapes.size(); ++i)
+            if (boxes[i].contains(point) && shapes[i].contains(point))
+                return int(i);
+        return -1;
+    }
+};
+
+// A path's polyline cut where it crosses a pocket outline, in order, each piece with the pocket it lies in
+// (-1 for none). Z is interpolated along each cut segment.
+struct PocketPiece {
+    Points3 points;
+    int     pocket = -1;
+};
+
+std::vector<PocketPiece> split_by_pockets(const Polyline3 &line, const Pockets &pockets)
+{
+    std::vector<PocketPiece> pieces;
+    auto add = [&pieces](const Point3 &from, const Point3 &to, int pocket) {
+        if (pieces.empty() || pieces.back().pocket != pocket) {
+            pieces.push_back({{from}, pocket});
+        }
+        pieces.back().points.push_back(to);
+    };
+    for (size_t i = 0; i + 1 < line.points.size(); ++i) {
+        const Point3 &a = line.points[i];
+        const Point3 &b = line.points[i + 1];
+        const Vec2d   pa(double(a.x()), double(a.y()));
+        const Vec2d   r = Vec2d(double(b.x()), double(b.y())) - pa;
+        BoundingBox   box(Point(a.x(), a.y()), Point(a.x(), a.y()));
+        box.merge(Point(b.x(), b.y()));
+        std::vector<double> cuts{0., 1.};
+        for (size_t p = 0; p < pockets.shapes.size(); ++p) {
+            if (!pockets.boxes[p].overlap(box))
+                continue;
+            for (const Line &edge : pockets.outlines[p]) {
+                const Vec2d  q = edge.a.cast<double>();
+                const Vec2d  s = (edge.b - edge.a).cast<double>();
+                const double d = r.x() * s.y() - r.y() * s.x();
+                if (std::abs(d) < 1e-9)
+                    continue;
+                const Vec2d  qp = q - pa;
+                const double t  = (qp.x() * s.y() - qp.y() * s.x()) / d;
+                const double u  = (qp.x() * r.y() - qp.y() * r.x()) / d;
+                if (t > 1e-6 && t < 1. - 1e-6 && u >= 0. && u <= 1.)
+                    cuts.push_back(t);
+            }
+        }
+        std::sort(cuts.begin(), cuts.end());
+        Point3 from = a;
+        for (size_t c = 1; c < cuts.size(); ++c) {
+            if (cuts[c] - cuts[c - 1] < 1e-9)
+                continue;
+            const auto at = [&a, &b](double t) {
+                return Point3(coord_t(std::round(a.x() + t * (b.x() - a.x()))), coord_t(std::round(a.y() + t * (b.y() - a.y()))),
+                              coord_t(std::round(a.z() + t * (b.z() - a.z()))));
+            };
+            const Point3 to  = c + 1 == cuts.size() ? b : at(cuts[c]);
+            const double mid = 0.5 * (cuts[c - 1] + cuts[c]);
+            add(from, to, pockets.at(Point(coord_t(std::round(pa.x() + mid * r.x())), coord_t(std::round(pa.y() + mid * r.y())))));
+            from = to;
+        }
+    }
+    return pieces;
+}
+
+// Replaces each top surface and gap fill path of the fills that crosses a pocket by its pieces (as one multi
+// path, so they stay together and in order), with change(piece, pocket) applied to each piece in a pocket.
+void rework_pocket_paths(ExtrusionEntityCollection &collection, const Pockets &pockets,
+                         const std::function<bool(ExtrusionPath &, int)> &change)
+{
+    auto rework = [&pockets, &change](const ExtrusionPath &path, ExtrusionPaths &out) {
+        bool changed = false;
+        if (!path.is_force_no_extrusion() && (path.role() == erTopSolidInfill || path.role() == erGapFill))
+            for (PocketPiece &piece : split_by_pockets(path.polyline, pockets)) {
+                ExtrusionPath part(Polyline3(piece.points), path);
+                if (piece.pocket >= 0)
+                    changed |= change(part, piece.pocket);
+                out.emplace_back(std::move(part));
+            }
+        if (!changed) {
+            out.clear();
+            out.push_back(path);
+        }
+        return changed;
+    };
+    for (ExtrusionEntity *&child : collection.entities) {
+        if (auto *nested = dynamic_cast<ExtrusionEntityCollection *>(child))
+            rework_pocket_paths(*nested, pockets, change);
+        else if (auto *path = dynamic_cast<ExtrusionPath *>(child)) {
+            ExtrusionPaths pieces;
+            if (rework(*path, pieces)) {
+                auto *multipath = new ExtrusionMultiPath();
+                multipath->paths = std::move(pieces);
+                if (!path->can_reverse())
+                    multipath->set_reverse();
+                delete child;
+                child = multipath;
+            }
+        } else if (auto *multipath = dynamic_cast<ExtrusionMultiPath *>(child)) {
+            ExtrusionPaths all;
+            for (const ExtrusionPath &piece : multipath->paths) {
+                ExtrusionPaths pieces;
+                rework(piece, pieces);
+                append(all, std::move(pieces));
+            }
+            multipath->paths = std::move(all);
+        }
+    }
+}
+
+// Cadence (MC-1 lumps, candidate L2): a coarse Body Split top lays its gap fill, and its top lines inside the
+// pockets a fine body walls in, no faster than 50 mm/s (the MN Body presets' coarse gap infill speed),
+// whatever the process preset says. On an MN Feature preset the coarse gap infill runs at 250 mm/s (stock
+// 0.6 nozzle values), and the gap fill MC-1 forces into the counters and between sunk letters ran at about
+// 209 mm/s and up to 31 mm3/s on segments mostly too short to reach speed (owner prints of the combined L:
+// lumps in the counters and between the letters).
+void cap_coarse_top_pocket_speed(const Layer &layer, LayerRegion &layerm)
+{
+    static constexpr double pocket_speed = 50.;
+    if (!laid_by_coarse_nozzle(layerm) || !lays_top_surface(layerm.fills))
+        return;
+    double line_width = 0.;
+    const Pockets pockets(coarse_top_pockets(layer, layerm, line_width));
+    if (!pockets.shapes.empty())
+        rework_pocket_paths(layerm.fills, pockets, [](ExtrusionPath &piece, int) {
+            piece.speed_cap = pocket_speed;
+            return true;
+        });
+    std::function<void(ExtrusionEntity &)> cap_gap_fill = [&cap_gap_fill](ExtrusionEntity &entity) {
+        if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(&entity)) {
+            for (ExtrusionEntity *child : collection->entities)
+                cap_gap_fill(*child);
+        } else if (auto *path = dynamic_cast<ExtrusionPath *>(&entity)) {
+            if (path->role() == erGapFill)
+                path->speed_cap = pocket_speed;
+        } else if (auto *multipath = dynamic_cast<ExtrusionMultiPath *>(&entity)) {
+            for (ExtrusionPath &piece : multipath->paths)
+                if (piece.role() == erGapFill)
+                    piece.speed_cap = pocket_speed;
+        }
+    };
+    cap_gap_fill(layerm.fills);
+}
+} // namespace
+
 // friend to Layer
 void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree,
                        FillLightning::Generator* lightning_generator, const std::function<bool()> &cancelled)
@@ -1350,6 +1730,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
+        // Cadence: a coarse Body Split top laid with 0.6 lines leaves crescents and wedges between the last
+        // top line and the wall (around sunk text, up to about half a line wide). Fill them.
+        f->top_gap_fill_forced = layerm->coarse_body_split_cell();
 		if (surface_fill.params.pattern == ipConcentricInternal) {
             FillConcentricInternal *fill_concentric = dynamic_cast<FillConcentricInternal *>(f.get());
             assert(fill_concentric != nullptr);
@@ -1516,6 +1899,13 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 	        collection.entities.push_back(thin_fill->clone());
 	    }
 
+    // Cadence: no pocket a fine body walls in on a coarse Body Split top gets more plastic than it holds.
+    for (LayerRegion *layerm : m_regions)
+        cap_coarse_top_pocket_flow(*this, *layerm);
+    // Cadence: a coarse Body Split top lays its gap fill and its pockets slowly.
+    for (LayerRegion *layerm : m_regions)
+        cap_coarse_top_pocket_speed(*this, *layerm);
+
 #ifndef NDEBUG
 	for (LayerRegion *layerm : m_regions)
 	    for (size_t i = 0; i < layerm->fills.entities.size(); ++ i)
@@ -1676,6 +2066,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
         f->print_config        = &this->object()->print()->config();
         f->print_object_config = &this->object()->config();
+        f->top_gap_fill_forced = layerm.coarse_body_split_cell();
 
         if (surface_fill.params.pattern == ipLightning)
             dynamic_cast<FillLightning::Filler *>(f.get())->generator = lightning_generator;

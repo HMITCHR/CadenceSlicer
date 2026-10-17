@@ -202,8 +202,10 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
     if (this->print_object_config == nullptr) return;
 
     // Orca: Enable gap fill as per the user preference. Return early if gap fill is to not be applied.
-    if ((this->print_object_config->gap_fill_target.value == gftNowhere) ||
-        (surface->surface_type == stInternalSolid && this->print_object_config->gap_fill_target.value != gftEverywhere))
+    const bool forced_top = this->top_gap_fill_forced && surface->surface_type == stTop;
+    if (!forced_top &&
+        ((this->print_object_config->gap_fill_target.value == gftNowhere) ||
+         (surface->surface_type == stInternalSolid && this->print_object_config->gap_fill_target.value != gftEverywhere)))
         return;
 
     Flow new_flow = params.flow;

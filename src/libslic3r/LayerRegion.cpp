@@ -150,9 +150,14 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
 // left alone, and so are Off mode and Feature Split, where no region is a coarse Body Split cell.
 bool LayerRegion::one_wall_top() const
 {
+    return this->region().config().only_one_wall_top.value || this->coarse_body_split_cell();
+}
+
+// A Body Split body's cell on the coarse nozzle: its regional layer height is above the object's base layer
+// height and it was not moved to the fine nozzle by fine skins.
+bool LayerRegion::coarse_body_split_cell() const
+{
     const PrintRegionConfig &region_config = this->region().config();
-    if (region_config.only_one_wall_top.value)
-        return true;
     if (!this->has_cell() || !is_mixed_nozzle_body_split(this->layer()->object()->print()->config()))
         return false;
     const double base = this->layer()->object()->config().layer_height.value;

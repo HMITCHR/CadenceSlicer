@@ -8548,6 +8548,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         if (skirt_speed > 0.0)
         speed = skirt_speed;
     }
+    // Cadence: a path that carries its own speed cap (see cap_coarse_top_pocket_speed() in Fill.cpp).
+    if (path.speed_cap > 0.)
+        speed = std::min(speed, path.speed_cap);
     //BBS: remove this config
     //else if (this->object_layer_over_raft())
     //    speed = m_config.get_abs_value("first_layer_speed_over_raft", speed);

@@ -50,6 +50,8 @@ public:
     // Whether this region's walls drop to one wall over a top surface: only_one_wall_top, or a Body Split
     // body on the coarse nozzle. See LayerRegion.cpp.
     bool        one_wall_top() const;
+    // Whether this region is a Body Split body's cell on the coarse nozzle (not a fine-skin cell). See LayerRegion.cpp.
+    bool        coarse_body_split_cell() const;
     coordf_t    height() const;
     coordf_t    bottom_z() const;
     coordf_t    slice_z() const;

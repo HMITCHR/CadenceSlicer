@@ -153,6 +153,9 @@ public:
     // BBS: all no overlap expolygons in same layer
     ExPolygons  no_overlap_expolygons;
     bool dont_alternate_fill_direction = false;
+    // Cadence: fill the gaps a top surface leaves (between its lines and the walls) whatever gap_fill_target
+    // says. Set for a Body Split body on the coarse nozzle, see Layer::make_fills().
+    bool top_gap_fill_forced = false;
 
     static float infill_anchor;
     static float infill_anchor_max;
