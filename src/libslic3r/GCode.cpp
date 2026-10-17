@@ -5949,7 +5949,8 @@ void GCode::compute_farthest_point(const std::vector<LayerToPrint> &layers, int 
         // Single nozzle with AMS: all virtual extruders share one physical nozzle,
         // so the nozzle is always the photo head regardless of which filament is used.
         bool single_nozzle = (m_config.nozzle_diameter.size() <= 1);
-        m_farthest_point_timelapse.farthest_is_photo_head = single_nozzle || (m_farthest_point_timelapse.farthest_extruder_id == most_used_extruder);
+        m_farthest_point_timelapse.farthest_is_photo_head = single_nozzle || m_farthest_point_timelapse.any_nozzle ||
+            (m_farthest_point_timelapse.farthest_extruder_id == most_used_extruder);
     }
 }
 
@@ -6254,6 +6255,13 @@ LayerResult GCode::process_layer(
         && printer_structure != PrinterStructure::psI3;
     m_farthest_point_timelapse.most_used_extruder = most_used_extruder;
     m_farthest_point_timelapse.inserted_this_layer = false;
+    // Body Split alternates the nozzles from layer to layer, so a photo head would take some layers' photos
+    // inline and park for the rest, and the video jumps between the two. Instead every layer's photo is
+    // the inline one, taken by whichever nozzle prints the farthest point (M971 names no nozzle; a stock
+    // print on either nozzle alone takes the same photo with that nozzle).
+    m_farthest_point_timelapse.any_nozzle = m_farthest_point_timelapse.enabled
+        && is_mixed_nozzle_body_split(print.config())
+        && m_config.nozzle_diameter.values.size() == 2;
 
     bool need_insert_timelapse_gcode_for_traditional = false;
     if ((!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
@@ -7331,11 +7339,33 @@ LayerResult GCode::process_layer(
             gcode += this->retract(false, false, auto_lift_type, true);
         }
         m_writer.add_object_change_labels(gcode);
-        gcode += insert_timelapse_gcode();
+        if (m_farthest_point_timelapse.any_nozzle && writer().filament()) {
+            // Body Split: the nozzle went past the farthest point without stopping there (the point fell in a
+            // clipped seam, say). Go back to it with the nozzle already printing and take the same inline
+            // photo there, so this layer's frame matches the others.
+            gcode += this->retract(false, false, auto_lift_type, true);
+            const Vec2d to = m_farthest_point_timelapse.farthest_gcode_pos - m_origin;
+            gcode += this->travel_to(Point(scale_(to.x()), scale_(to.y())), erNone, "move to the timelapse photo point");
+            gcode += generate_timelapse_gcode(print, print_z, int(get_extruder_id(writer().filament()->id())),
+                                              &layer_object_label_ids, &m_printed_objects, true);
+        } else
+            gcode += insert_timelapse_gcode();
         has_insert_timelapse_gcode = true;
     }
 
     if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
+        // Body Split has layers that only one nozzle prints (the fine layers between coarse layers, and
+        // heights where only one body exists). When such a layer ends on the nozzle that is not the photo
+        // head, take this layer's photo with the nozzle already printing, as a one-nozzle print on that
+        // nozzle does, instead of calling the photo head in for it. Stock and Feature Split prints keep
+        // the photo head.
+        int photo_extruder = most_used_extruder;
+        if (is_mixed_nozzle_body_split(print.config())
+            && m_config.nozzle_diameter.values.size() == 2
+            && m_config.timelapse_type.value == TimelapseType::tlTraditional
+            && writer().filament())
+            photo_extruder = int(get_extruder_id(writer().filament()->id()));
+
         // The traditional model of thin-walled object will have flaws for I3
         if (m_support_traditional_timelapse
             && printer_structure == PrinterStructure::psI3
@@ -7346,7 +7376,7 @@ LayerResult GCode::process_layer(
         if (m_config.nozzle_diameter.values.size() == 2
             && m_support_traditional_timelapse
             && m_config.timelapse_type.value == TimelapseType::tlTraditional
-            && (writer().filament() && get_extruder_id(writer().filament()->id()) != most_used_extruder)) {
+            && (writer().filament() && get_extruder_id(writer().filament()->id()) != photo_extruder)) {
             m_support_traditional_timelapse = false;
         }
         if (FILAMENT_CONFIG(retract_when_changing_layer)) {
@@ -7354,7 +7384,8 @@ LayerResult GCode::process_layer(
         }
         m_writer.add_object_change_labels(gcode);
 
-        gcode += insert_timelapse_gcode();
+        gcode += photo_extruder == most_used_extruder ? insert_timelapse_gcode() :
+                 generate_timelapse_gcode(print, print_z, photo_extruder, &layer_object_label_ids, &m_printed_objects);
     }
 
     result.gcode = std::move(gcode);
@@ -8890,8 +8921,12 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         if (!m_farthest_point_timelapse.enabled || !m_farthest_point_timelapse.farthest_is_photo_head || m_farthest_point_timelapse.inserted_this_layer)
             return;
         // Inline M971 only when current extruder is the photo head; other nozzles may pass through nearby
-        // coordinates but their physical position differs.
-        if (!m_writer.filament() || get_extruder_id(m_writer.filament()->id()) != m_farthest_point_timelapse.most_used_extruder)
+        // coordinates but their physical position differs. Body Split (any_nozzle) takes it with whichever
+        // nozzle is printing the farthest point.
+        if (!m_writer.filament())
+            return;
+        const int curr_extruder = int(get_extruder_id(m_writer.filament()->id()));
+        if (!m_farthest_point_timelapse.any_nozzle && curr_extruder != m_farthest_point_timelapse.most_used_extruder)
             return;
         // Compare in the global print frame to match farthest_gcode_pos, which is unscale(farthest_point)
         // without the per-extruder nozzle offset. Using point_to_gcode() here would subtract extruder_offset
@@ -8902,7 +8937,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             return;
         if (!m_print || !m_layer)
             return;
-        std::string timelapse_gcode = generate_timelapse_gcode(*m_print, m_layer->print_z, m_farthest_point_timelapse.most_used_extruder,
+        std::string timelapse_gcode = generate_timelapse_gcode(*m_print, m_layer->print_z,
+                                                               m_farthest_point_timelapse.any_nozzle ? curr_extruder : m_farthest_point_timelapse.most_used_extruder,
                                                                &m_farthest_point_timelapse.layer_object_label_ids, &m_printed_objects, true);
         if (!timelapse_gcode.empty()) {
             gcode += timelapse_gcode;

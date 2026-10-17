@@ -2164,6 +2164,47 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
+    // Smooth timelapse and clumping detection keep the prime tower level with the part
+    // (mixed_nozzle_tower_lagging), so the coarse nozzle lays its tower levels at the object's layer
+    // height. Below that nozzle's minimum the tower audit failed later with an internal
+    // SRL-TOWER-STRUCTURE message. Refused here, naming the setting.
+    if (is_mixed_nozzle_feature_split(m_config) &&
+        (m_config.timelapse_type.value == TimelapseType::tlSmooth || m_config.enable_wrapping_detection.value)) {
+        // The coarse nozzle is the wider one; it lays tower levels whenever any filament this plate prints is on it.
+        const int    coarse_extruder = mixed_nozzle_tower_coarse_extruder(m_config);
+        const double coarse_minimum  = coarse_extruder >= 0 ? resolved_min_layer_height(m_config, size_t(coarse_extruder)) : 0.;
+        const std::vector<unsigned int> used = this->extruders();
+        const bool coarse_prints = std::any_of(used.begin(), used.end(), [this, coarse_extruder](unsigned int filament) {
+            const std::optional<size_t> extruder = physical_extruder_for_filament(m_config, filament);
+            return extruder && int(*extruder) == coarse_extruder;
+        });
+        if (coarse_extruder >= 0 && std::isfinite(coarse_minimum) && coarse_minimum > 0. && coarse_prints) {
+            const double coarse_diameter = m_config.nozzle_diameter.get_at(size_t(coarse_extruder));
+            for (const PrintObject *object : m_objects) {
+                const double layer_height = object->config().layer_height.value;
+                if (coarse_minimum <= layer_height + EPSILON)
+                    continue;
+                const bool smooth   = m_config.timelapse_type.value == TimelapseType::tlSmooth;
+                const bool clumping = m_config.enable_wrapping_detection.value;
+                const std::string cause = smooth && clumping ? "Timelapse is set to Smooth and clumping detection is on, which keep" :
+                                          smooth             ? "Timelapse is set to Smooth, which keeps" :
+                                                               "Clumping detection is on, which keeps";
+                const std::string change = smooth && clumping ? "Set Timelapse to Traditional and turn off Enable clumping detection" :
+                                           smooth             ? "Set Timelapse to Traditional" :
+                                                                "Turn off Enable clumping detection";
+                StringObjectException error;
+                error.string = Slic3r::format(
+                    "[SRL-F17] %1% the prime tower level with the part. The %2% mm nozzle would have to lay %3% mm "
+                    "layers on the tower, but it lays layers from %4% mm. %5% (Others > Special mode), or set Layer "
+                    "height to at least %4% mm.",
+                    cause, coarse_diameter, layer_height, coarse_minimum, change);
+                error.object  = object->model_object();
+                error.opt_key = smooth ? "timelapse_type" : "enable_wrapping_detection";
+                return error;
+            }
+        }
+    }
+
     // Every synchronized refusal has a stable code. The sentence explains it to a person; the code is
     // what tests, logs and the plan export match on. Defined above both mode branches because the
     // shared prime tower checks below run for either mode.
@@ -2882,12 +2923,23 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                               body_split_unlayable_reason(m_config, nozzle, base_cadence, regional_cadences[region_id],
                                                           shared_first_layer));
             if (!body_split_tool_envelope_admitted(envelope, with_prime_tower, lagging_tower_available))
-                return reject(object, "SRL-A38", "timelapse_type", Slic3r::format(
+                return reject(object, "SRL-A38",
+                              m_config.timelapse_type.value == TimelapseType::tlSmooth ? "timelapse_type" : "enable_wrapping_detection",
+                              Slic3r::format(
                     "Nozzle %1% cannot lay the %2% mm base layer or the %3% mm first layer, so its body starts "
                     "on the bed with a thicker first cell, and the prime tower has to lag behind the part to give each "
-                    "nozzle a layer it can lay. Smooth timelapse and wrapping detection keep the tower level with the "
-                    "part. Turn those off, or pick a base layer height of at least %4% mm.",
-                    nozzle + 1, base_cadence, shared_first_layer, resolved_min_layer_height(m_config, nozzle)));
+                    "nozzle a layer it can lay. %4% the tower level with the part. %5% (Others > Special mode), or pick "
+                    "a base layer height of at least %6% mm.",
+                    nozzle + 1, base_cadence, shared_first_layer,
+                    m_config.timelapse_type.value == TimelapseType::tlSmooth && m_config.enable_wrapping_detection.value ?
+                        "Timelapse set to Smooth and clumping detection keep" :
+                    m_config.timelapse_type.value == TimelapseType::tlSmooth ? "Timelapse set to Smooth keeps" :
+                                                                               "Clumping detection keeps",
+                    m_config.timelapse_type.value == TimelapseType::tlSmooth && m_config.enable_wrapping_detection.value ?
+                        "Set Timelapse to Traditional and turn off Enable clumping detection" :
+                    m_config.timelapse_type.value == TimelapseType::tlSmooth ? "Set Timelapse to Traditional" :
+                                                                               "Turn off Enable clumping detection",
+                    resolved_min_layer_height(m_config, nozzle)));
         }
         } // end per-object loop
 
@@ -7971,6 +8023,19 @@ void Print::_make_wipe_tower()
         const auto tower_rejection_for_user = [this](const std::string &rejection) {
             if (m_config.nozzle_diameter.values.size() != 2)
                 return rejection;
+            // Smooth timelapse and clumping detection keep the tower level with the part, so a nozzle can be
+            // asked for a tower level thinner than it lays. Validate refuses the cases it can see up front
+            // (SRL-F17, SRL-A38); name the setting for anything that still reaches here.
+            if ((is_mixed_nozzle_feature_split(m_config) || is_mixed_nozzle_body_split(m_config)) &&
+                (m_config.timelapse_type.value == TimelapseType::tlSmooth || m_config.enable_wrapping_detection.value) &&
+                rejection.find("under the emitting nozzle's minimum") != std::string::npos)
+                return std::string(m_config.timelapse_type.value == TimelapseType::tlSmooth ?
+                           "Timelapse is set to Smooth, which keeps the prime tower level with the part, and one nozzle "
+                           "cannot lay the tower layers that needs. Set Timelapse to Traditional (Others > Special mode) "
+                           "and slice again.\n" :
+                           "Clumping detection keeps the prime tower level with the part, and one nozzle cannot lay the "
+                           "tower layers that needs. Turn off Enable clumping detection (Others > Special mode) and "
+                           "slice again.\n") + rejection;
             // The tower keeps materials that do not stick to each other (PLA and PETG, say) in
             // separate blocks. When the two nozzles share no material, the fine nozzle's block is
             // not laid on the levels the coarse nozzle takes, and the next fine level has no

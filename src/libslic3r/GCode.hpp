@@ -687,6 +687,9 @@ private:
         bool    farthest_is_photo_head{false};
         // Whether inline timelapse gcode has already been inserted on this layer
         bool    inserted_this_layer{false};
+        // Body Split on two nozzles: whichever nozzle prints the farthest point takes the inline photo there,
+        // so every layer's photo is taken the same way. False for every other print.
+        bool    any_nozzle{false};
         // The extruder used most on this layer, chosen as the photo head
         int     most_used_extruder{0};
         // Object labels for the current layer, used when inline timelapse is inserted from extrusion code.
