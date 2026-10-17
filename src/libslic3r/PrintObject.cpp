@@ -5427,8 +5427,13 @@ void PrintObject::combine_infill()
     // Work on each region separately.
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         const PrintRegion &region = this->printing_region(region_id);
+        // A region at 100% density has no sparse infill: prepare_fill_surfaces() already turned all of it
+        // into internal solid infill, which belongs to the fine tool at the fine layer height. Combining it
+        // would merge that solid infill into coarse-height bands that the fine tool then prints, thicker
+        // than its nozzle allows, while the coarse tool prints nothing.
         const bool feature_split_region = is_mixed_nozzle_feature_split(print_config) &&
-                                          region.config().sparse_infill_density.value > 0.;
+                                          region.config().sparse_infill_density.value > 0. &&
+                                          region.config().sparse_infill_density.value < 100. - EPSILON;
         //BBS
         bool enable_combine_infill = region.config().infill_combination.value;
         double feature_coarse_height = 0.;
@@ -5463,6 +5468,30 @@ void PrintObject::combine_infill()
                 print_config.mixed_nozzle_coarse_layer_height.value,
                 size_t(fine_owner - 1), size_t(sparse_owner - 1));
             if (!resolved) {
+                // Two nozzles of the same size have no larger one for the sparse infill. Say that
+                // plainly, as Body Split does, rather than as a coarse layer height problem.
+                if (resolved.diagnostic.has_value() &&
+                    resolved.diagnostic->code == MixedNozzleDiagnosticCode::CadenceCoarseNozzleNotLarger) {
+                    const MixedNozzleToolResolution fine_tool = resolve_mixed_nozzle_tool(
+                        print_config, size_t(fine_owner - 1), MixedNozzleResolveScope::PhysicalToolOnly);
+                    const MixedNozzleToolResolution coarse_tool = resolve_mixed_nozzle_tool(
+                        print_config, size_t(sparse_owner - 1), MixedNozzleResolveScope::PhysicalToolOnly);
+                    if (fine_tool && coarse_tool && is_approx(fine_tool.tool->nozzle_diameter, coarse_tool.tool->nozzle_diameter))
+                        throw Slic3r::SlicingError(Slic3r::format("Feature Split needs a printer with two nozzles of different sizes. [%1%]",
+                                                                  resolved.diagnostic->stable_code()),
+                                                   this->model_object()->id().id);
+                }
+                // Outer walls and sparse infill on one nozzle: say so, and what to set back.
+                if (resolved.diagnostic.has_value() &&
+                    resolved.diagnostic->code == MixedNozzleDiagnosticCode::CadencePhysicalToolsNotDistinct) {
+                    const PrintRegionConfig &plate_split = this->print()->default_region_config();
+                    throw Slic3r::SlicingError(mixed_nozzle_feature_roles_one_nozzle_message(
+                                                   print_config, fine_owner, sparse_owner,
+                                                   plate_split.outer_wall_filament_id.value,
+                                                   plate_split.sparse_infill_filament_id.value) +
+                                                   Slic3r::format(" [%1%]", resolved.diagnostic->stable_code()),
+                                               this->model_object()->id().id);
+                }
                 const std::string diagnostic = resolved.diagnostic.has_value() ?
                     Slic3r::format(" [%1%] %2%", resolved.diagnostic->stable_code(), resolved.diagnostic->message()) : "";
                 throw Slic3r::SlicingError("Feature Split sparse infill needs a coarse layer height that both nozzles can print." + diagnostic,

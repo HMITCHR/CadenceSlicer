@@ -149,6 +149,13 @@ MixedNozzleCadenceResolution resolve_mixed_nozzle_cadence(
     const PrintConfig &config, double fine_height, double coarse_height,
     size_t fine_logical_filament, size_t coarse_logical_filament);
 
+// Feature Split refuses a region whose outer walls and sparse infill land on one nozzle (MNS-CAD-A05).
+// The words say which nozzle and what to set back. Filaments are 1-based; the default ones are the
+// plate's split as setup wrote it.
+std::string mixed_nozzle_feature_roles_one_nozzle_message(const PrintConfig &config, int outer_wall_filament,
+                                                          int sparse_filament, int default_outer_wall_filament,
+                                                          int default_sparse_filament);
+
 // Restore a dissimilar physical nozzle pair and its per-tool height limits from a loaded project
 // after its printer preset is selected. Homogeneous printers stay preset-owned.
 bool restore_loaded_mixed_nozzle_nozzle_override(DynamicPrintConfig &project,

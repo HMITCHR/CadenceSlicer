@@ -1156,6 +1156,10 @@ private:
             wxPostEvent(plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
             return true;
         }
+        // "plate" is 1-based, as the plate list shows it.
+        if (what == "select_plate")
+            return plater->select_plate(s.at("plate").get<int>() - 1) == 0 ||
+                   (error = "select_plate failed", false);
         if (what == "plate_settings") {
             wxCommandEvent event;
             plater->open_platesettings_dialog(event);

@@ -5,7 +5,7 @@
 	"from": "system",
 	"setting_id": "nfpqj9ORrkem7vH9",
 	"instantiation": "true",
-	"description": "Body Split starting point for a 0.4 mm fine nozzle and a 0.6 mm coarse nozzle. Assign the fine body to the smaller nozzle at the base height and the coarse body to the larger nozzle at the named coarse height. For Feature Split, pick an MN Feature preset instead. Not yet print-tested with every material.",
+	"description": "Body Split starting point for a 0.4 mm fine nozzle and a 0.6 mm coarse nozzle. Assign the fine body to the smaller nozzle at the base height and the coarse body to the larger nozzle at the named coarse height. For Feature Split, pick an MN Feature preset instead. Not yet print-tested on this nozzle pair.",
 	"layer_height": "0.12",
 	"mixed_nozzle_coarse_layer_height": "0.24",
 	"mixed_nozzle_allowed_cadence_ratios": [

@@ -191,4 +191,51 @@ void MixedNozzleRankingController::notify()
         m_hooks.changed();
 }
 
+WizardEstimate wizard_ranking_estimate(const MixedNozzleSliceTime &time)
+{
+    WizardEstimate estimate;
+    estimate.status = WizardEstimateStatus::Unavailable;
+    switch (time.status) {
+    case MixedNozzleSliceTimeStatus::Estimated:
+        estimate = wizard_estimate(time.seconds, time.switches, time.tower_mm3);
+        estimate.sparse_infill = time.sparse_infill;
+        estimate.all_solid = time.all_solid;
+        return estimate;
+    case MixedNozzleSliceTimeStatus::Refused:
+        estimate.note = "slicing would refuse this choice";
+        estimate.refused = true;
+        estimate.refusal = time.diagnostic;
+        break;
+    case MixedNozzleSliceTimeStatus::Cancelled:
+        estimate.note = "not estimated";
+        break;
+    case MixedNozzleSliceTimeStatus::Failed:
+        // A row that fails to slice says so on its own row.
+        estimate.status = WizardEstimateStatus::Failed;
+        break;
+    }
+    return estimate;
+}
+
+MixedNozzleRankingSlice wizard_baseline_ranking_slice(MixedNozzleRankingSlice row,
+                                                      std::optional<std::size_t> fine_logical_filament,
+                                                      double fine_height)
+{
+    // Setup refused the row, so there is no staged model to print on one nozzle.
+    if (!row.model)
+        return row;
+    if (!fine_logical_filament) {
+        MixedNozzleRankingSlice none;
+        none.diagnostic = "choose the fine material first";
+        return none;
+    }
+    // A row the engine would refuse at Slice still has its staged model. The one-nozzle print is
+    // mode Off, which those checks (Body Split's density and pattern) do not apply to, so it gets a
+    // time all the same. It used to share the row's "Slice would refuse this row.".
+    row.diagnostic.clear();
+    mixed_nozzle_single_nozzle_baseline(*row.model, row.config, *fine_logical_filament, fine_height);
+    row.key = mixed_nozzle_ranking_key(row.plate_id, *row.model, row.config);
+    return row;
+}
+
 } // namespace Slic3r::GUI

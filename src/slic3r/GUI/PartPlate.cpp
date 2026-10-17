@@ -2279,13 +2279,20 @@ Vec3d PartPlate::estimate_wipe_tower_size(const DynamicPrintConfig & config, con
     double depth;
     double filament_change_volume=0.;
     {
+        // The passed config first: setup sizes the tower of a staged plate whose Print is not
+        // applied yet (or, in a test, absent).
+        const auto floats = [this, &config](const char *key) -> const ConfigOptionFloats * {
+            if (const auto *opt = config.option<ConfigOptionFloats>(key))
+                return opt;
+            return m_print != nullptr ? m_print->config().option<ConfigOptionFloats>(key) : nullptr;
+        };
         std::vector<double>             filament_change_lengths;
-        auto                filament_change_lengths_opt = m_print->config().option<ConfigOptionFloats>("filament_change_length");
+        auto                filament_change_lengths_opt = floats("filament_change_length");
         if (filament_change_lengths_opt) filament_change_lengths = filament_change_lengths_opt->values;
         double length = filament_change_lengths.empty() ? 0 : *std::max_element(filament_change_lengths.begin(), filament_change_lengths.end());
         double diameter = 1.75;
         std::vector<double> diameters;
-        auto                filament_diameter_opt = m_print->config().option<ConfigOptionFloats>("filament_diameter");
+        auto                filament_diameter_opt = floats("filament_diameter");
         if (filament_diameter_opt) diameters = filament_diameter_opt->values;
         diameter = diameters.empty() ? diameter : *std::max_element(diameters.begin(), diameters.end());
         filament_change_volume = length * PI * diameter * diameter / 4.;
@@ -2305,7 +2312,10 @@ Vec3d PartPlate::estimate_wipe_tower_size(const DynamicPrintConfig & config, con
             double volume_depth         = depth;
             depth = std::max((double) min_wipe_tower_depth, depth);
             rib_width = std::min(rib_width, depth / 2);
-            depth = rib_width / std::sqrt(2) + std::max(depth + m_print->config().wipe_tower_extra_rib_length.value, volume_depth);
+            const auto *extra_rib_opt = config.option<ConfigOptionFloat>("wipe_tower_extra_rib_length");
+            const double extra_rib = extra_rib_opt != nullptr ? extra_rib_opt->value
+                : m_print != nullptr ? m_print->config().wipe_tower_extra_rib_length.value : 0.;
+            depth = rib_width / std::sqrt(2) + std::max(depth + extra_rib, volume_depth);
             wipe_tower_size(0) = wipe_tower_size(1) = depth;
         }
     }
@@ -4452,34 +4462,16 @@ void PartPlateList::release_icon_textures()
     }
 }
 
-void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool init_pos, bool preserve_position)
+// Where set_default_wipe_tower_pos_for_plate stores the tower of `plate` (plate-local corner):
+// `pos` clamped onto the bed with the tower's brim margin, and on a plate with objects moved clear
+// of their bounding box when it overlaps it. A safe position is kept. Setup's Apply asks the same
+// for a staged plate, so its step 3 times use the tower spot Apply stores.
+Vec2d wipe_tower_pos_on_plate(PartPlate &plate, const DynamicPrintConfig &full_config, int nozzle_nums,
+                              Vec2d pos, bool init_pos, int tower_filaments)
 {
-    DynamicConfig &     proj_cfg     = wxGetApp().preset_bundle->project_config;
-    ConfigOptionFloats *wipe_tower_x = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_x");
-    ConfigOptionFloats *wipe_tower_y = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_y");
-    wipe_tower_x->values.resize(m_plate_list.size(), wipe_tower_x->values.front());
-    wipe_tower_y->values.resize(m_plate_list.size(), wipe_tower_y->values.front());
-
-    auto printer_structure_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
-    // set the default position, the same with print config(left top)
-    float x = WIPE_TOWER_DEFAULT_X_POS;
-    float y = WIPE_TOWER_DEFAULT_Y_POS;
-    if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
-        x = I3_WIPE_TOWER_DEFAULT_X_POS;
-        y = I3_WIPE_TOWER_DEFAULT_Y_POS;
-    }
-
-    std::string printer_type = wxGetApp().preset_bundle->printers.get_edited_preset().get_printer_type(wxGetApp().preset_bundle);
-    // Note: printer_type == "N9" and printer_structure_opt->value == PrinterStructure::psI3 can both be true
-    if (printer_type == "N9") {
-        y = N9_WIPE_TOWER_DEFAULT_Y_POS;
-    }
-
-    if (preserve_position) {
-        x = wipe_tower_x->get_at(plate_idx);
-        y = wipe_tower_y->get_at(plate_idx);
-    }
-    PartPlate *part_plate = get_plate(plate_idx);
+    PartPlate *part_plate = &plate;
+    // float, as the stored position always was computed
+    float x = float(pos.x()), y = float(pos.y());
     Vec3d plate_origin = part_plate->get_origin();
     BoundingBoxf3 plate_bbox = part_plate->get_bounding_box();
     BoundingBoxf plate_bbox_2d(Vec2d(plate_bbox.min(0), plate_bbox.min(1)), Vec2d(plate_bbox.max(0), plate_bbox.max(1)));
@@ -4494,22 +4486,13 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool ini
     coordf_t plate_bbox_x_max_local_coord = plate_bbox_2d.max(0) - plate_origin(0);
     coordf_t plate_bbox_y_max_local_coord = plate_bbox_2d.max(1) - plate_origin(1);
 
-    std::vector<int> filament_maps = part_plate->get_real_filament_maps(proj_cfg);
-    // Keep this composition consistent with the apply-time injection (plate volume map, else
-    // per-extruder defaults); the config below currently only feeds scalar reads, but a
-    // divergent volume map would silently mis-resolve any future per-filament read here.
-    std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
-    if (f_volume_maps.empty()) {
-        f_volume_maps = wxGetApp().preset_bundle->get_default_nozzle_volume_types_for_filaments(filament_maps);
-    }
-    DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config(false, filament_maps, f_volume_maps);
     float w = dynamic_cast<const ConfigOptionFloat *>(full_config.option("prime_tower_width"))->value;
     float v = dynamic_cast<const ConfigOptionFloat *>(full_config.option("prime_volume"))->value;
     bool enable_wrapping = false;
     const ConfigOptionBool *wrapping_opt = dynamic_cast<const ConfigOptionBool *>(full_config.option("enable_wrapping_detection"));
     if (wrapping_opt) enable_wrapping = wrapping_opt->value;
-    int nozzle_nums = wxGetApp().preset_bundle->get_printer_extruder_count();
-    Vec3d wipe_tower_size = part_plate->estimate_wipe_tower_size(full_config, w, v, nozzle_nums, init_pos ? 2 : 0, false, enable_wrapping);
+    Vec3d wipe_tower_size = part_plate->estimate_wipe_tower_size(full_config, w, v, nozzle_nums,
+        init_pos ? 2 : tower_filaments, false, enable_wrapping);
 
     if (!init_pos && (is_approx(wipe_tower_size(0), 0.0) || is_approx(wipe_tower_size(1), 0.0))) {
         wipe_tower_size = part_plate->estimate_wipe_tower_size(full_config, w, v, nozzle_nums, 2, false, enable_wrapping);
@@ -4586,6 +4569,51 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool ini
             }
         }
     }
+
+    return Vec2d(x, y);
+}
+
+void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool init_pos, bool preserve_position)
+{
+    DynamicConfig &     proj_cfg     = wxGetApp().preset_bundle->project_config;
+    ConfigOptionFloats *wipe_tower_x = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_x");
+    ConfigOptionFloats *wipe_tower_y = proj_cfg.opt<ConfigOptionFloats>("wipe_tower_y");
+    wipe_tower_x->values.resize(m_plate_list.size(), wipe_tower_x->values.front());
+    wipe_tower_y->values.resize(m_plate_list.size(), wipe_tower_y->values.front());
+
+    auto printer_structure_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
+    // set the default position, the same with print config(left top)
+    float x = WIPE_TOWER_DEFAULT_X_POS;
+    float y = WIPE_TOWER_DEFAULT_Y_POS;
+    if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
+        x = I3_WIPE_TOWER_DEFAULT_X_POS;
+        y = I3_WIPE_TOWER_DEFAULT_Y_POS;
+    }
+
+    std::string printer_type = wxGetApp().preset_bundle->printers.get_edited_preset().get_printer_type(wxGetApp().preset_bundle);
+    // Note: printer_type == "N9" and printer_structure_opt->value == PrinterStructure::psI3 can both be true
+    if (printer_type == "N9") {
+        y = N9_WIPE_TOWER_DEFAULT_Y_POS;
+    }
+
+    if (preserve_position) {
+        x = wipe_tower_x->get_at(plate_idx);
+        y = wipe_tower_y->get_at(plate_idx);
+    }
+    PartPlate *part_plate = get_plate(plate_idx);
+    std::vector<int> filament_maps = part_plate->get_real_filament_maps(proj_cfg);
+    // Keep this composition consistent with the apply-time injection (plate volume map, else
+    // per-extruder defaults); the config below currently only feeds scalar reads, but a
+    // divergent volume map would silently mis-resolve any future per-filament read here.
+    std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
+    if (f_volume_maps.empty()) {
+        f_volume_maps = wxGetApp().preset_bundle->get_default_nozzle_volume_types_for_filaments(filament_maps);
+    }
+    DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config(false, filament_maps, f_volume_maps);
+    const Vec2d placed = wipe_tower_pos_on_plate(*part_plate, full_config,
+        wxGetApp().preset_bundle->get_printer_extruder_count(), Vec2d(x, y), init_pos);
+    x = float(placed.x());
+    y = float(placed.y());
 
     ConfigOptionFloat wt_x_opt(x);
     ConfigOptionFloat wt_y_opt(y);

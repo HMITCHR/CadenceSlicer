@@ -63,6 +63,15 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
+std::string mixed_nozzle_tower_too_thin_message(bool smooth_timelapse)
+{
+    return smooth_timelapse ?
+               "Timelapse is set to Smooth, which keeps the prime tower level with the part, and one nozzle cannot "
+               "lay tower layers that thin. Set Timelapse to Traditional (Others > Special mode) and slice again." :
+               "Clumping detection keeps the prime tower level with the part, and one nozzle cannot lay tower layers "
+               "that thin. Turn off Enable clumping detection (Others > Special mode) and slice again.";
+}
+
 Print::SlicingPipelineHookFn Print::s_slicing_pipeline_hook_fn = nullptr;
 
 template class PrintState<PrintStep, psCount>;
@@ -1813,6 +1822,20 @@ static MixedNozzleSupportRefusal mixed_nozzle_support_refusal(const PrintConfig 
     return {};
 }
 
+// SRL-F01 / SRL-A29: the support interface is on a larger nozzle than the base. The interface belongs on the
+// fine nozzle. Default follows the base, which is right for Normal support and rafts, but Organic trees with
+// a coarse base need the interface on the fine nozzle (SRL-F14 / SRL-A53), so trees are told that instead.
+std::string mixed_nozzle_interface_on_larger_nozzle_message(const PrintObjectConfig &config, bool via_support)
+{
+    std::string text = "The support interface is on a larger nozzle than the support base. The interface is what "
+                       "touches the model, so ";
+    if (via_support && is_tree(config.support_type.value))
+        return text + "put Support/raft interface on a filament on the fine nozzle. Tree support needs its interface "
+                      "on the fine nozzle even when its base is on the coarse one.";
+    return text + "set Support/raft interface to Default (it then follows the base) or to a filament on the base's "
+                  "nozzle or a finer one.";
+}
+
 // The feature a *_filament_id key prints, in words.
 static std::string mixed_nozzle_role_words(const std::string &key)
 {
@@ -1833,11 +1856,11 @@ static std::string body_split_unlayable_reason(const PrintConfig &config, size_t
     const double maximum  = std::min(resolved_max_layer_height(config, nozzle), diameter);
     const bool   fine     = std::abs(cadence - base) <= EPSILON;
     if (minimum > cadence + EPSILON || cadence > maximum + EPSILON)
-        return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm, but its %4% body is set to %5% mm layers. "
-                              "Change Layer height, or that body's Regional layer height, so its layers fit the nozzle.",
+        return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm, but its %4% part is set to %5% mm layers. "
+                              "Change Layer height, or that part's layer in the Mixed Nozzle section of the sidebar, so its layers fit the nozzle.",
                               diameter, minimum, maximum, fine ? "fine" : "coarse", cadence);
     if (fine)
-        return Slic3r::format("The first layer is %1% mm, but the fine body's %2% mm nozzle, which lays the first layer, "
+        return Slic3r::format("The first layer is %1% mm, but the fine part's %2% mm nozzle, which lays the first layer, "
                               "lays layers from %3% mm to %4% mm. Set First layer height to %5% mm.",
                               first_layer, diameter, minimum, maximum,
                               first_layer < minimum ? Slic3r::format("at least %1%", minimum) : Slic3r::format("at most %1%", maximum));
@@ -1845,8 +1868,8 @@ static std::string body_split_unlayable_reason(const PrintConfig &config, size_t
         return Slic3r::format("The first layer is %1% mm, but the %2% mm nozzle lays layers from %3% mm to %4% mm. "
                               "Set First layer height to at most %4% mm.",
                               first_layer, diameter, minimum, maximum);
-    return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm. It cannot lay the %4% mm first layer, so its body "
-                          "starts on the bed with a first cell of %5% mm, which is too tall for it. Set First layer height to at "
+    return Slic3r::format("The %1% mm nozzle lays layers from %2% mm to %3% mm. It cannot lay the %4% mm first layer, so its part's "
+                          "first layer on the bed is %5% mm, which is too tall for it. Set First layer height to at "
                           "least %2% mm.",
                           diameter, minimum, maximum, first_layer, body_split_first_cell_height(first_layer, base, minimum));
 }
@@ -1930,7 +1953,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 const double interface_dmr = m_config.nozzle_diameter.get_at(interface_tool.tool->physical_extruder);
                 if (interface_dmr > base_dmr) {
                     StringObjectException error;
-                    error.string  = Slic3r::format("[%1%] The support interface is on a larger nozzle than the support base. The interface is what touches the model, so set Support/raft interface to Default or to a filament on the base's nozzle or a finer one.", code);
+                    error.string  = Slic3r::format("[%1%] ", code) + mixed_nozzle_interface_on_larger_nozzle_message(object->config(), via_support);
                     error.object  = object->model_object();
                     error.opt_key = "support_interface_filament";
                     return error;
@@ -2238,7 +2261,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                                     "Feature Split and Body Split need the prime tower rotation at 0 degrees.");
             if (m_config.prime_tower_flat_ironing.value)
                 return reject_tower("prime_tower_flat_ironing",
-                                    "Prime-tower flat ironing is not supported: it retraces the tower top stepping by the shared bead width, which is not the width the fine tool draws.");
+                                    "Prime tower flat ironing doesn't work with Feature Split or Body Split.");
             if (m_config.enable_tower_interface_features.value)
                 return reject_tower("enable_tower_interface_features",
                                     "Prime tower interface features are not supported by Feature Split or Body Split.");
@@ -2413,7 +2436,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 const double interface_dmr = m_config.nozzle_diameter.get_at(interface_tool.tool->physical_extruder);
                 if (interface_dmr > base_dmr)
                     return reject(object, "SRL-A29", "support_interface_filament",
-                                  "The support interface is on a larger nozzle than the support base. The interface is what touches the model, so set Support/raft interface to Default or to a filament on the base's nozzle or a finer one.");
+                                  mixed_nozzle_interface_on_larger_nozzle_message(object->config(), via_support));
                 // Feature Split starts such a raft on the bed at the coarse nozzle's thinnest layer; a Body Split plate
                 // shares its first layer with the Body Split objects, which cannot follow.
                 if (object->has_raft() && base_dmr > *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end()) + EPSILON)
@@ -2578,7 +2601,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                        region.internal_solid_filament_id.value != logical_filament ||
                        region.top_surface_filament_id.value != logical_filament ||
                        region.bottom_surface_filament_id.value != logical_filament) {
-                return reject(object, "SRL-A11", "outer_wall_filament_id", "Every feature of each body must use one filament.");
+                return reject(object, "SRL-A11", "outer_wall_filament_id",
+                              "In Body Split each part prints all its features with one filament. To print a coarse "
+                              "part's top and bottom with the fine nozzle, tick Fine skins for that part in the "
+                              "Mixed Nozzle section of the sidebar and click Apply.");
             }
             // Every filament was resolved above, so this cannot fail; it is still read fail-closed.
             const MixedNozzleToolResolution resolution = resolve_mixed_nozzle_tool(
@@ -2596,7 +2622,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
             if (! regional_band_admits_sparse_infill_pattern(region.sparse_infill_pattern.value))
                 return reject(object, "SRL-A13", "sparse_infill_pattern",
-                              "This sparse infill pattern is not identical on both layers of a coarse band, so committing the pair would not print what the fine layers would have. Use grid, triangles, stars, or aligned rectilinear.");
+                              "Body Split needs a sparse infill pattern that is the same on every layer. Use grid, triangles, stars or aligned rectilinear.");
             if (! regional_band_admits_sparse_infill_density(region.sparse_infill_density.value))
                 return reject(object, "SRL-A14", "sparse_infill_density", "Body Split needs a sparse infill density above 0% and below 100%.");
             if (region.fill_multiline.value != 1)
@@ -2606,7 +2632,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             // what makes narrow features inside a coarse region bandable at all.
             if (! is_approx(region.minimum_sparse_infill_area.value, 0.))
                 return reject(object, "SRL-A16", "minimum_sparse_infill_area",
-                              "Set the minimum sparse infill threshold to 0 mm2 for Body Split: a nonzero threshold re-types small sparse islands as solid infill, which a coarse band cannot commit.");
+                              "Body Split needs Minimum sparse infill threshold set to 0 mm2. Above 0 it turns small areas of sparse infill into solid infill, which the coarse layers can't print.");
             if (region.infill_combination.value)
                 return reject(object, "SRL-A17", "infill_combination", "Turn off infill combination for Body Split.");
             if (! is_approx(region.top_shell_thickness.value, 0.) || ! is_approx(region.bottom_shell_thickness.value, 0.))
@@ -2872,7 +2898,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             const double interface_dmr = m_config.nozzle_diameter.get_at(interface_tool.tool->physical_extruder);
             if (interface_dmr > base_dmr)
                 return reject(object, "SRL-A29", "support_interface_filament",
-                              "The support interface is on a larger nozzle than the support base. The interface is what touches the model, so set Support/raft interface to Default or to a filament on the base's nozzle or a finer one.");
+                              mixed_nozzle_interface_on_larger_nozzle_message(object->config(), via_support));
             // Same tree support admission as the Feature Split block above.
             if (const MixedNozzleSupportRefusal refusal = mixed_nozzle_support_refusal(m_config, object->config(), base_dmr, interface_dmr, via_support);
                 ! refusal.why.empty())
@@ -2926,8 +2952,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject(object, "SRL-A38",
                               m_config.timelapse_type.value == TimelapseType::tlSmooth ? "timelapse_type" : "enable_wrapping_detection",
                               Slic3r::format(
-                    "Nozzle %1% cannot lay the %2% mm base layer or the %3% mm first layer, so its body starts "
-                    "on the bed with a thicker first cell, and the prime tower has to lag behind the part to give each "
+                    "Nozzle %1% cannot lay the %2% mm base layer or the %3% mm first layer, so its part starts "
+                    "with a thicker first layer, and the prime tower has to lag behind the part to give each "
                     "nozzle a layer it can lay. %4% the tower level with the part. %5% (Others > Special mode), or pick "
                     "a base layer height of at least %6% mm.",
                     nozzle + 1, base_cadence, shared_first_layer,
@@ -2972,7 +2998,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject(any_object, "SRL-A36", "filament_adaptive_volumetric_speed", "Adaptive volumetric speed is not supported by Body Split.");
         if (std::any_of(m_config.slicing_pipeline_plugin.values.begin(), m_config.slicing_pipeline_plugin.values.end(),
                         [](const std::string &plugin) { return ! plugin.empty(); }))
-            return reject(any_object, "SRL-A37", "slicing_pipeline_plugin", "Mutating slicing-pipeline plugins are not supported by Body Split.");
+            return reject(any_object, "SRL-A37", "slicing_pipeline_plugin", "Slicing Pipeline Plugin (Others) doesn't work with Body Split. Remove the plugin for this project.");
         // Fully manual nozzle mapping resolves extruders from filament_map like any manual mode. The
         // engine also builds a nozzle-level grouping from filament_volume_map and filament_nozzle_map and
         // silently skips it when either is mis-sized, which stale projects can produce. Report it.
@@ -3006,10 +3032,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         const size_t export_heads   = m_config.flush_multiplier.size();
         if (export_heads == 0)
             return reject(any_object, "SRL-A40", "flush_multiplier",
-                          "The flush multiplier is empty. The export divides the flush volume matrix by the number of flush-multiplier heads, so at least one is required.");
+                          "The flushing volumes have no multiplier. Open Flushing volumes, set a multiplier, and slice again.");
         if (export_colours > 1 && m_config.flush_volumes_matrix.size() != export_colours * export_colours * export_heads)
             return reject(any_object, "SRL-A40", "flush_volumes_matrix",
-                          Slic3r::format("The flush volume matrix has %1% entries, but the export rebuilds it as %2% filament colours across %3% flush-multiplier heads, needing %4%.",
+                          Slic3r::format("The flushing volumes table has %1% entries, but %2% filaments on %3% nozzles need %4%. Open Flushing volumes and check it.",
                                          m_config.flush_volumes_matrix.size(), export_colours, export_heads,
                                          export_colours * export_colours * export_heads));
     }
@@ -6855,6 +6881,13 @@ void Print::select_feature_infill_by_time()
                        cfg.bottom_surface_filament_id.value})
             if (id > 0 && (unsigned int)(id - 1) == filament)
                 return true;
+        // A region at 0% or 100% lays no sparse infill (100% is all internal solid infill on the
+        // fine tool), so its sparse filament is never asked for. Without this, a 100% part beside
+        // a 15% one made every height look as if the coarse tool stayed busy, and the all-fine plan
+        // was priced with the plan's tower and switches.
+        const double density = cfg.sparse_infill_density.value;
+        if (!(density > 0.) || density >= 100. - EPSILON)
+            return false;
         return !sparse_fine_owned && cfg.sparse_infill_filament_id.value > 0 &&
                (unsigned int)(cfg.sparse_infill_filament_id.value - 1) == filament;
     };
@@ -8029,13 +8062,8 @@ void Print::_make_wipe_tower()
             if ((is_mixed_nozzle_feature_split(m_config) || is_mixed_nozzle_body_split(m_config)) &&
                 (m_config.timelapse_type.value == TimelapseType::tlSmooth || m_config.enable_wrapping_detection.value) &&
                 rejection.find("under the emitting nozzle's minimum") != std::string::npos)
-                return std::string(m_config.timelapse_type.value == TimelapseType::tlSmooth ?
-                           "Timelapse is set to Smooth, which keeps the prime tower level with the part, and one nozzle "
-                           "cannot lay the tower layers that needs. Set Timelapse to Traditional (Others > Special mode) "
-                           "and slice again.\n" :
-                           "Clumping detection keeps the prime tower level with the part, and one nozzle cannot lay the "
-                           "tower layers that needs. Turn off Enable clumping detection (Others > Special mode) and "
-                           "slice again.\n") + rejection;
+                return mixed_nozzle_tower_too_thin_message(m_config.timelapse_type.value == TimelapseType::tlSmooth) +
+                       "\n" + rejection;
             // The tower keeps materials that do not stick to each other (PLA and PETG, say) in
             // separate blocks. When the two nozzles share no material, the fine nozzle's block is
             // not laid on the levels the coarse nozzle takes, and the next fine level has no
@@ -8314,9 +8342,8 @@ void Print::_make_wipe_tower()
                                                  line_clearance_floor);
             if (!std::isfinite(width_cap) || width_cap + EPSILON < minimum_width)
                 throw Slic3r::SlicingError(Slic3r::format(
-                    "Automatic mixed-nozzle prime-tower padding cannot fit within the prime_tower_width cap of %1% mm; "
-                    "the configured width range and line clearance require at least %2% mm. "
-                    "Raise Prime tower > Width in the process settings, or choose a different cadence in Mixed-Nozzle setup.",
+                    "The prime tower needs to be at least %2% mm wide, but Prime tower > Width is %1% mm. "
+                    "Raise the width in the process settings, or pick a different coarse layer in the Mixed Nozzle section of the sidebar.",
                     width_cap, minimum_width));
 
             // The share of the idle re-prime the search is trying to fit. It starts at the full re-prime and
@@ -8537,19 +8564,15 @@ void Print::_make_wipe_tower()
                     if (walk.above_cap_width > 0.f &&
                         (above_cap_width <= 0.f || walk.above_cap_width < above_cap_width))
                         above_cap_width = walk.above_cap_width;
-                const size_t tool_count = used_filament_ids.size();
                 if (above_cap_width > 0.f)
                     throw Slic3r::SlicingError(Slic3r::format(
-                        "Automatic mixed-nozzle prime-tower padding did not converge within the prime_tower_width cap of %1% mm "
-                        "with %2% tools. The planner asked for a tower of %3% mm, wider than the cap. "
-                        "Raise Prime tower > Width in the process settings (with Auto-size mixed-nozzle pad on, it is the "
-                        "cap and stays editable for rib walls too), or choose a different cadence in Mixed-Nozzle setup.",
-                        width_cap, tool_count, above_cap_width));
+                        "The prime tower needs to be %2% mm wide, but Prime tower > Width is %1% mm. "
+                        "Raise the width in the process settings, or pick a different coarse layer in the Mixed Nozzle section of the sidebar.",
+                        width_cap, above_cap_width));
                 throw Slic3r::SlicingError(Slic3r::format(
-                    "Automatic mixed-nozzle prime-tower padding did not converge within the prime_tower_width cap of %1% mm "
-                    "with %2% tools. Every tower the planner drew for this plate fit inside the cap, so the cap is not what "
-                    "stopped it. A different cadence in Mixed-Nozzle setup changes the schedule the tower is sized for.",
-                    width_cap, tool_count));
+                    "Cadence could not work out a prime tower size for this plate. Prime tower > Width (%1% mm) is not "
+                    "what stops it. Pick a different coarse layer in the Mixed Nozzle section of the sidebar and slice again.",
+                    width_cap));
             }
 
             auto_wipe_tower = std::move(best_candidate->tower);

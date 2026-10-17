@@ -4078,6 +4078,14 @@ void PresetCollection::update_vendor_ptrs_after_copy(const VendorMap &new_vendor
             assert(it != new_vendors.end());
             preset.vendor = &it->second;
         }
+    // The edited and saved copies of the selected preset carry a vendor pointer too. Left alone they
+    // keep pointing into the bundle this one was copied from, so a vendor test on the edited preset
+    // (the mixed-nozzle machine values of the other nozzle size) saw two different vendors.
+    for (Preset *preset : {&m_edited_preset, &m_saved_preset})
+        if (preset->vendor != nullptr) {
+            auto it = new_vendors.find(preset->vendor->id);
+            preset->vendor = it == new_vendors.end() ? nullptr : &it->second;
+        }
 }
 
 void PresetCollection::update_map_alias_to_profile_name()

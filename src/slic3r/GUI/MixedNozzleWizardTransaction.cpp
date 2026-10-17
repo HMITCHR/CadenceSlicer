@@ -9,6 +9,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -926,10 +927,9 @@ bool add_plate_deltas(const WizardDraft &draft,
             prepared.diagnostic = "Mixed-Nozzle wizard affected plate is unavailable.";
             return false;
         }
-        if (plate->is_locked()) {
-            prepared.diagnostic = "Mixed-Nozzle wizard affected plate is locked.";
-            return false;
-        }
+        // A locked plate is only kept out of Arrange and auto placement (as in OrcaSlicer); its
+        // settings stay editable, so setup writes them too. Refusing it refused every row and Apply
+        // for a project with any locked plate.
         DynamicPrintConfig after = *plate->config();
         // The wizard writes the plate filament map itself, so an automatic map never needs the
         // grouping dialog first. Slots the wizard does not own keep their mapping.
@@ -953,6 +953,18 @@ bool add_plate_deltas(const WizardDraft &draft,
                                     "internal_solid_filament_id", "top_surface_filament_id",
                                     "bottom_surface_filament_id", "sparse_infill_filament_id"})
                 after.erase(key);
+        }
+        // The Feature materials are plate settings. The current plate gets them from the Feature
+        // request (add_feature_delta); every other plate that prints Feature Split after this setup
+        // (the whole-project scope) needs them too, or it slices with no fine or coarse material and
+        // Slice refuses it ("The fine and coarse materials must print on different nozzles").
+        if (draft.mode == MixedNozzleSlicingMode::FeatureSplit && after_mode == MixedNozzleSlicingMode::FeatureSplit &&
+            plate != owners.current_plate && draft.fine_logical_filament && draft.coarse_logical_filament) {
+            for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id",
+                                    "internal_solid_filament_id", "top_surface_filament_id",
+                                    "bottom_surface_filament_id"})
+                after.set_key_value(key, new ConfigOptionInt(int(*draft.fine_logical_filament + 1)));
+            after.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(int(*draft.coarse_logical_filament + 1)));
         }
         if (after != *plate->config())
             prepared.plate_deltas.push_back({plate, plate_id, std::move(after)});
@@ -1202,6 +1214,27 @@ DynamicPrintConfig staged_plate_slice_config(PresetBundle &staged_bundle, PartPl
                                              const PreparedWizardApply &prepared)
 {
     staged_bundle.project_config = prepared.project_config;
+    // Select the presets Apply will select, not only their values: the composition reads the
+    // selected printer's system parent to tell the user's own values from the vendor's (the other
+    // nozzle size's retraction). Setup from a 0.8 printer moves to the 0.4 one; with the 0.8 still
+    // selected, its 3 mm retraction read as the user's own and the 0.8 nozzle kept 0.8 mm.
+    // By index, whatever the preset's visibility, as Apply's prepared selection does.
+    const auto select_staged = [](PresetCollection &presets, const std::string &name) {
+        if (name.empty() || presets.get_edited_preset().name == name)
+            return;
+        const Preset *target = presets.find_preset(name, false, true);
+        if (target == nullptr)
+            return;
+        // lbegin(): select_preset() counts from the first preset, the defaults included.
+        std::size_t index = 0;
+        for (auto it = presets.lbegin(); it != presets.end(); ++it, ++index)
+            if (&*it == target) {
+                presets.select_preset(index);
+                return;
+            }
+    };
+    select_staged(staged_bundle.printers, prepared.setup_plan.after.printer_name);
+    select_staged(staged_bundle.prints, prepared.setup_plan.after.process_name);
     staged_bundle.prints.get_edited_preset().config = prepared.setup_plan.after.process_config;
     staged_bundle.printers.get_edited_preset().config = prepared.setup_plan.after.printer_config;
     const auto delta = std::find_if(prepared.plate_deltas.begin(), prepared.plate_deltas.end(),
@@ -1223,6 +1256,53 @@ DynamicPrintConfig staged_plate_slice_config(PresetBundle &staged_bundle, PartPl
     config.apply(plate_config, true);
     config.set_key_value("filament_map", new ConfigOptionInts(maps));
     return config;
+}
+
+// Setup gives every plate it sets up a second tool, so a tower, at the spot the project stores for
+// that plate. A project saved while it printed one material can store a spot inside its parts (the
+// tester's 8-plate file: plates 2, 3 and 5 to 8). Where the spot overlaps the plate's parts it moves
+// clear of them, as the sidebar's Apply already does (set_default_wipe_tower_pos_for_plate); a safe
+// spot stays. Staged here, so step 3's slices use the spot Apply stores. Returns the 1-based numbers
+// of the plates whose tower moved.
+std::vector<int> move_colliding_towers_clear(const WizardNativeOwners &owners,
+                                             PreparedWizardApply &prepared)
+{
+    std::vector<int> lines;
+    auto *xs = prepared.project_config.option<ConfigOptionFloats>("wipe_tower_x");
+    auto *ys = prepared.project_config.option<ConfigOptionFloats>("wipe_tower_y");
+    if (xs == nullptr || ys == nullptr || xs->values.empty() || ys->values.empty())
+        return lines;
+    std::optional<PresetBundle> staged;
+    for (PartPlate *plate : owners.plates) {
+        if (plate == nullptr || plate->get_index() < 0 || plate->empty() ||
+            std::find(prepared.affected_plate_ids.begin(), prepared.affected_plate_ids.end(), plate->id().id) ==
+                prepared.affected_plate_ids.end())
+            continue;
+        // A plate with no bed outline (not laid out yet) has nowhere to check against.
+        if (plate->get_shared_printable_polygon().empty())
+            continue;
+        if (!staged) {
+            staged.emplace(*owners.preset_bundle);
+            if (prepared.filament_presets_changed)
+                staged->filament_presets = prepared.filament_presets;
+        }
+        DynamicPrintConfig config = staged_plate_slice_config(*staged, *plate, prepared);
+        config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(prepared.draft.mode));
+        const std::size_t index = std::size_t(plate->get_index());
+        const Vec2d stored(xs->get_at(index), ys->get_at(index));
+        // Setup's plate prints its fine and its coarse material, so the tower serves two.
+        const Vec2d placed = wipe_tower_pos_on_plate(*plate, config, staged->get_printer_extruder_count(), stored,
+                                                     false, 2);
+        if (float(placed.x()) == float(stored.x()) && float(placed.y()) == float(stored.y()))
+            continue;
+        const std::size_t count = std::max(index + 1, owners.plates.size());
+        xs->values.resize(std::max(xs->values.size(), count), xs->values.front());
+        ys->values.resize(std::max(ys->values.size(), count), ys->values.front());
+        xs->values[index] = float(placed.x());
+        ys->values[index] = float(placed.y());
+        lines.push_back(int(index + 1));
+    }
+    return lines;
 }
 
 // Only the instances on this plate are printed, as Slice prints them.
@@ -1963,6 +2043,20 @@ PreparedWizardApply prepare_wizard_apply(const WizardDraft &draft,
 
     prepared.setup_plan.after.process_config = process_after;
     prepared.setup_plan.proposed_project_config = prepared.project_config;
+    if (draft.mode != MixedNozzleSlicingMode::Off) {
+        const std::vector<int> moved = move_colliding_towers_clear(owners, prepared);
+        if (!moved.empty()) {
+            // One short line, like the other "Also changed" entries: "Prime tower: moved clear of
+            // the parts on plates 3, 4 and 5".
+            std::string line = "Prime tower: moved clear of the parts on plate";
+            line += moved.size() > 1 ? "s " : " ";
+            for (std::size_t i = 0; i < moved.size(); ++i)
+                line += (i == 0 ? "" : i + 1 == moved.size() ? " and " : ", ") + std::to_string(moved[i]);
+            prepared.review_notes.push_back(line);
+            prepared.also_changed.push_back(line);
+        }
+        prepared.setup_plan.proposed_project_config = prepared.project_config;
+    }
     prepared.printer_selection = owners.preset_bundle->printers.prepare_preset_selection(
         prepared.setup_plan.after.printer_name, prepared.setup_plan.after.printer_config);
     prepared.process_selection = owners.preset_bundle->prints.prepare_preset_selection(
@@ -1996,6 +2090,18 @@ PreparedWizardApply prepare_wizard_apply(const WizardDraft &draft,
         prepared.review_notes.push_back(fix.line);
         if (fix.correctable)
             prepared.also_changed.push_back(fix.line);
+    }
+    // A preset switch can lower the strength the user set on the process (100% infill to 15%, 5 walls
+    // to 2). Step 4 says so outside the collapsed list. Object and part values are not touched.
+    if (draft.mode != MixedNozzleSlicingMode::Off) {
+        const DynamicPrintConfig &process_before = prepared.before.process_config;
+        const DynamicPrintConfig &process_final = prepared.setup_plan.after.process_config;
+        std::vector<WizardKeyDelta> strength;
+        for (const std::string &key : wizard_strength_keys())
+            if (process_before.has(key) && process_final.has(key))
+                strength.push_back({key, process_before.opt_serialize(key), process_final.opt_serialize(key),
+                                    "Process preset", "Shared process", {}});
+        prepared.strength_line = wizard_strength_change_line(strength, !draft.keep_current_process);
     }
     if (stock_process && !reapply_process_deltas) {
         prepared.review_notes.push_back(wizard_preset_switch_line("Process preset",
@@ -2197,6 +2303,7 @@ MixedNozzleRankingSlice wizard_staged_slice(const PreparedWizardApply &prepared,
 
         slice.is_bbl_printer = staged_bundle.is_bbl_vendor();
         slice.plate_origin = plate.get_origin();
+        slice.plate_index = std::max(0, plate.get_index());
         slice.plate_id = plate.id().id;
         slice.key = mixed_nozzle_ranking_key(slice.plate_id, *model, slice.config);
         slice.model = std::move(model);
@@ -2224,14 +2331,18 @@ MixedNozzleRankingSlice wizard_candidate_staged_slice(const WizardDraft &draft,
     const WizardReview review = build_wizard_review(staged, candidate);
     const PreparedWizardApply prepared = prepare_wizard_apply(staged, review, owners);
     if (!prepared.diagnostic.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "Setup refuses step 3 row " << candidate.stable_id << " (fine "
+                                   << candidate.fine_height << ", coarse " << candidate.coarse_height.value_or(0.)
+                                   << "): " << prepared.diagnostic;
         MixedNozzleRankingSlice refused;
-        refused.diagnostic = "Setup would refuse this row.";
+        refused.diagnostic = wizard_setup_row_refusal(prepared.diagnostic);
         return refused;
     }
     MixedNozzleRankingSlice slice = wizard_staged_slice(prepared, owners);
-    // The engine would refuse it at Slice; Review says why.
+    // The engine would refuse it at Slice. The row says why, as a row setup refuses does (a Body
+    // Split part at 100% density only said "Slice would refuse this row." until step 4).
     if (slice.diagnostic.empty() && !prepared.admission_refusal.empty())
-        slice.diagnostic = "Slice would refuse this row.";
+        slice.diagnostic = "Slice would refuse this row. " + prepared.admission_refusal;
     return slice;
 }
 

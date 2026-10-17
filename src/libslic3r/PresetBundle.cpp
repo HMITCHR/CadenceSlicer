@@ -4506,8 +4506,11 @@ static void apply_mixed_nozzle_sibling_machine_values(DynamicPrintConfig &out, c
             continue;
         const Preset *sibling = nullptr;
         for (const Preset &candidate : printers) {
+            // Vendors are compared by id: a copied bundle (setup's staged slices) holds its own
+            // vendor map, so the same vendor can sit at two addresses.
+            const VendorProfile *candidate_vendor = printers.get_preset_with_vendor_profile(candidate).vendor;
             if (!candidate.is_system || candidate.config.opt_string("printer_model") != model ||
-                (vendor != nullptr && printers.get_preset_with_vendor_profile(candidate).vendor != vendor))
+                (vendor != nullptr && (candidate_vendor == nullptr || candidate_vendor->id != vendor->id)))
                 continue;
             const auto *nozzles = candidate.config.option<ConfigOptionFloats>("nozzle_diameter");
             if (nozzles && nozzles->values.size() == 2 &&

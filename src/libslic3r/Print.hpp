@@ -52,6 +52,13 @@ class ExtrusionLayers;
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
+
+// The words for a Smooth timelapse (or clumping detection) that keeps the mixed-nozzle tower level with
+// the part, when one nozzle cannot lay a tower level that thin.
+std::string mixed_nozzle_tower_too_thin_message(bool smooth_timelapse);
+// The SRL-F01 / SRL-A29 words for a support interface on a larger nozzle than the support base, with
+// advice that fits the support type.
+std::string mixed_nozzle_interface_on_larger_nozzle_message(const PrintObjectConfig &config, bool via_support);
 // BBS: move from PrintObjectSlice.cpp
 struct VolumeSlices
 {

@@ -9,6 +9,8 @@
 #include "libslic3r/RegionalLayerBands.hpp"
 #include "libslic3r/Slicing.hpp"
 
+#include <boost/log/trivial.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1235,7 +1237,7 @@ static std::string wizard_cadence_selection_note(const WizardCadencePage &page,
             const WizardEstimate *estimate = estimated(row.estimate);
             return estimate != nullptr && wizard_seconds_slower(baseline->seconds, estimate->seconds);
         }))
-        lines.push_back("On this model, switching nozzles does not save time.");
+        lines.push_back("Two nozzles are slower than one on this plate.");
 
     const WizardEstimate *chosen = selected_row && *selected_row < page.rows.size()
         ? estimated(page.rows[*selected_row].estimate) : nullptr;
@@ -1495,8 +1497,8 @@ std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine
                        estimate_duration_text(baseline->seconds) + ".";
     if (wizard_switching_saves_no_time(page)) {
         const double faster = page.rows.front().estimate->seconds - baseline->seconds;
-        line += " On this model, switching nozzles does not save time. One nozzle only is " +
-                estimate_duration_text(faster) + " faster.";
+        line += " Two nozzles are slower than one on this plate. One nozzle only is " +
+                estimate_duration_text(faster) + " faster, so it is the better choice here.";
         return line;
     }
     if (page.ranked && !page.rows.empty() && page.rows.front().estimate &&
@@ -1504,9 +1506,50 @@ std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine
         line += " The fastest choice saves " +
                 estimate_duration_text(baseline->seconds - page.rows.front().estimate->seconds) + ".";
     const std::string note = wizard_cadence_selection_note(page, selected_row, explicit_pick);
-    if (!note.empty() && note.rfind("On this model", 0) != 0)
+    if (!note.empty() && note.rfind("Two nozzles are slower", 0) != 0)
         line += " " + note;
+    const std::string idle = wizard_idle_coarse_nozzle_note(page, selected_row);
+    if (!idle.empty())
+        line += " " + idle;
     return line;
+}
+
+std::string wizard_idle_coarse_nozzle_note(const WizardCadencePage &page, std::optional<std::size_t> selected_row)
+{
+    if (!page.feature_split || !selected_row || *selected_row >= page.rows.size())
+        return {};
+    const WizardCadenceRow &row = page.rows[*selected_row];
+    if (!row.estimate || row.estimate->status != WizardEstimateStatus::Estimated || row.estimate->switches != 0)
+        return {};
+    const std::string coarse = page.coarse_nozzle > 0. ? "The " + height_text(page.coarse_nozzle) + " mm nozzle"
+                                                       : std::string("The coarse nozzle");
+    const std::string fine = page.fine_nozzle > 0. ? "the " + height_text(page.fine_nozzle) + " mm nozzle"
+                                                   : std::string("the fine nozzle");
+    std::string note;
+    if (row.estimate->all_solid) {
+        // A solid plate (the tester's 100% parts): raising the density cannot help.
+        note = coarse + " has nothing to print on this plate. Feature Split gives it the sparse infill, and at 100% "
+                        "density there is none (the inside is all solid infill, which " + fine + " prints). To use "
+                        "both nozzles, lower the sparse infill density below 100%.";
+    } else if (!row.estimate->sparse_infill) {
+        note = coarse + " has nothing to print on this plate. Feature Split gives it the sparse infill, and no part "
+                        "here has any (its density is 0% or 100%). To use both nozzles, set a sparse infill density "
+                        "above 0% and below 100%.";
+    } else {
+        note = coarse + " prints nothing on this plate at these settings.";
+        const bool taller = std::any_of(page.rows.begin(), page.rows.end(), [&row](const WizardCadenceRow &other) {
+            return other.coarse_height > row.coarse_height + 1e-6;
+        });
+        note += taller ? " To use both nozzles, raise the sparse infill density or choose a taller coarse layer."
+                       : " To use both nozzles, raise the sparse infill density.";
+    }
+    note += " Or choose Print with one nozzle instead.";
+    return note;
+}
+
+bool wizard_offer_one_nozzle(const WizardCadencePage &page, std::optional<std::size_t> selected_row)
+{
+    return wizard_switching_saves_no_time(page) || !wizard_idle_coarse_nozzle_note(page, selected_row).empty();
 }
 
 std::string wizard_no_coarse_layer_line(double fine_height, const FullPrintConfig &copied_effective_config)
@@ -1585,6 +1628,7 @@ WizardCadencePage unranked_cadence_page(const std::vector<WizardCandidate> &cand
         // A row that would need a stable code or a review is not offered at all.
         row.label = "coarse " + height_text(row.coarse_height) + " mm, every " +
                     std::to_string(row.ratio) + " layers";
+        page.feature_split = page.feature_split || candidate.mode == MixedNozzleSlicingMode::FeatureSplit;
         page.rows.push_back(std::move(row));
     }
     std::sort(page.rows.begin(), page.rows.end(),
@@ -1596,6 +1640,10 @@ WizardCadencePage unranked_cadence_page(const std::vector<WizardCandidate> &cand
     const MixedNozzleCoarseEnvelope envelope = mixed_nozzle_coarse_envelope(copied_effective_config);
     if (!envelope.resolved)
         return page;
+    page.coarse_nozzle = envelope.nozzle_diameter;
+    if (!copied_effective_config.nozzle_diameter.values.empty())
+        page.fine_nozzle = *std::min_element(copied_effective_config.nozzle_diameter.values.begin(),
+                                             copied_effective_config.nozzle_diameter.values.end());
     const auto excluded = [&envelope, fine_height](int ratio) -> std::string {
         const double height = fine_height * double(ratio);
         const std::string layer = "A " + height_text(height) + " mm coarse layer (" + std::to_string(ratio) +
@@ -1993,12 +2041,12 @@ std::vector<WizardProcessFix> wizard_process_fixes(const ConfigBase &copied_effe
     };
     // Plain switches, turned off by Apply. The order is the order Print::validate checks them in.
     switch_off("prime_tower_flat_ironing", "Prime tower flat ironing");
-    switch_off("enable_tower_interface_features", "Prime tower interface features");
+    switch_off("enable_tower_interface_features", "Enable tower interface features");
     switch_off("ooze_prevention", "Ooze prevention");
     if (const auto *angle = copied_effective_config.option<ConfigOptionFloat>("wipe_tower_rotation_angle");
         angle != nullptr && !approximately_equal(angle->value, 0.))
         fixes.push_back({"wipe_tower_rotation_angle",
-                         "Prime tower rotation: " + height_text(angle->value) + " to 0 degrees", true});
+                         "Wipe tower rotation angle: " + height_text(angle->value) + " to 0 degrees", true});
     if (const auto *filament = copied_effective_config.option<ConfigOptionInt>("wipe_tower_filament");
         filament != nullptr && filament->value != 0)
         fixes.push_back({"wipe_tower_filament",
@@ -2013,34 +2061,34 @@ std::vector<WizardProcessFix> wizard_process_fixes(const ConfigBase &copied_effe
                                       printer_model->value.rfind("Bambu Lab", 0) != 0;
     if (const auto *tower_type = copied_effective_config.option<ConfigOptionEnum<WipeTowerType>>("wipe_tower_type");
         other_vendor_printer && tower_type != nullptr && tower_type->value != WipeTowerType::Type1)
-        fixes.push_back({"wipe_tower_type", "Prime tower type: Type 2 to Type 1, the tower mixed-nozzle slicing is built on", true});
+        fixes.push_back({"wipe_tower_type", "Wipe tower type: Type 2 to Type 1 (mixed-nozzle slicing needs Type 1)", true});
     // Those printers usually keep Type 2 tower settings, which the Type 1 tower rules refuse. The
     // first two are printer settings, so Apply writes them there.
     if (other_vendor_printer) {
-        switch_off("purge_in_prime_tower", "Purge into the prime tower");
-        switch_off("enable_filament_ramming", "Configurable filament ramming");
-        switch_off("single_extruder_multi_material_priming", "Priming all extruders at the start");
+        switch_off("purge_in_prime_tower", "Purge in prime tower");
+        switch_off("enable_filament_ramming", "Enable filament ramming");
+        switch_off("single_extruder_multi_material_priming", "Prime all printing extruders");
     }
     // Feature Split sizes its own infill combination from the cadence, and Body Split refuses
     // native combination, so both switches go off.
-    switch_off("infill_combination", "Combine infill");
+    switch_off("infill_combination", "Infill combination");
     // 0 and 100 percent both mean automatic; 100 percent is Orca's default, so only a real cap is
     // listed.
     if (const auto *cap = copied_effective_config.option<ConfigOptionFloatOrPercent>("infill_combination_max_layer_height");
         cap != nullptr && !approximately_equal(cap->value, 0.) && !(cap->percent && approximately_equal(cap->value, 100.)))
-        fixes.push_back({"infill_combination_max_layer_height", "Infill combination height limit: to 0 (automatic)", true});
+        fixes.push_back({"infill_combination_max_layer_height", "Infill combination - Max layer height: to 0 (automatic)", true});
     // Body Split admission asks these of the process. The MN presets already have them; a
     // printer with no MN preset keeps its own process, so Apply sets them.
     if (mode == MixedNozzleSlicingMode::BodySplit) {
         if (const auto *pattern = copied_effective_config.option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern");
             pattern != nullptr && !regional_band_admits_sparse_infill_pattern(pattern->value))
-            fixes.push_back({"sparse_infill_pattern", "Sparse infill pattern: to Grid, which a coarse part can lay in bands", true});
+            fixes.push_back({"sparse_infill_pattern", "Sparse infill pattern: to Grid (Body Split needs a pattern that is the same on every layer)", true});
         const auto nonzero = [&copied_effective_config](const char *key) {
             const auto *option = copied_effective_config.option<ConfigOptionFloat>(key);
             return option != nullptr && !approximately_equal(option->value, 0.);
         };
         if (nonzero("minimum_sparse_infill_area"))
-            fixes.push_back({"minimum_sparse_infill_area", "Minimum sparse infill area: to 0 mm2", true});
+            fixes.push_back({"minimum_sparse_infill_area", "Minimum sparse infill threshold: to 0 mm2", true});
         if (nonzero("top_shell_thickness"))
             fixes.push_back({"top_shell_thickness", "Top shell thickness: to 0, so the top shell layers count decides", true});
         if (nonzero("bottom_shell_thickness"))
@@ -2052,9 +2100,10 @@ std::vector<WizardProcessFix> wizard_process_fixes(const ConfigBase &copied_effe
         const auto *foot_layers = copied_effective_config.option<ConfigOptionInt>("elefant_foot_compensation_layers");
         if (nonzero("elefant_foot_compensation") && (foot_layers == nullptr || foot_layers->value > 0))
             fixes.push_back({"elefant_foot_compensation", "Elephant foot compensation: to 0", true});
-        for (const char *key : {"flush_into_infill", "flush_into_objects", "flush_into_support"})
-            if (boolean(key))
-                fixes.push_back({key, std::string("Flushing into the part: ") + key + " on to off", true});
+        // Named by their option labels, as the Flushing options show them.
+        switch_off("flush_into_infill", "Flush into objects' infill");
+        switch_off("flush_into_objects", "Flush into this object");
+        switch_off("flush_into_support", "Flush into objects' support");
     }
     // The rest are the user's choices, so they are named and left alone.
     if (const auto *relative = copied_effective_config.option<ConfigOptionBool>("use_relative_e_distances");
@@ -2522,9 +2571,48 @@ std::string wizard_review_reason_text(const std::string &raw_reason)
     return "Some of these choices need another look before setup can apply them.";
 }
 
+std::string wizard_setup_refusal_reason(const std::string &diagnostic)
+{
+    // Checks a project can fail on its own, not because it changed while setup was open.
+    static const std::vector<std::pair<const char *, const char *>> reasons = {
+        {"native binding requires an explicit project-wide review",
+         "Updating each material's settings for its nozzle has to cover every plate in the project. Open "
+         "setup again."},
+        {"native binding could not be staged",
+         "Setup could not update each material's settings for its nozzle. Untick \"Update each material's "
+         "settings for its nozzle\" in More options, or open setup again."},
+        {"Feature assignments are incomplete", "Pick a fine and a coarse material in step 2."},
+        {"Feature assignment is not admissible",
+         "The fine and coarse materials must print on different nozzles. Check them in step 2."},
+        {"material-to-tool binding was not staged",
+         "Setup could not put each material on its nozzle. Check the materials in step 2."},
+        {"process delta is locked", "A change here would touch a setting you locked."},
+        {"shared process changes require explicit scope approval",
+         "The new layer heights would change the other plates that share this process. Tick the box "
+         "above, or set this up for the whole project."},
+        {"coarse cadence requires explicit shared-process scope",
+         "The new coarse layer would change the other plates that share this process. Tick the box "
+         "above, or set this up for the whole project."},
+        {"Mixed-Nozzle setup process selection is unavailable.",
+         "The process preset setup picked does not fit this printer and its layer limits. Tick \"Keep my "
+         "current process preset instead\" in More options, or check the layer height limits in the "
+         "Printer settings."},
+        {"Mixed-Nozzle setup has no compatible process preset for the staged printer.",
+         "No process preset fits this printer and nozzle pair."},
+        {"Mixed-Nozzle setup printer selection is unavailable.",
+         "Setup could not find the printer profile for this nozzle pair."},
+    };
+    for (const auto &[needle, reason] : reasons)
+        if (diagnostic.find(needle) != std::string::npos)
+            return reason;
+    return {};
+}
+
 std::string wizard_setup_diagnostic_message(const std::string &diagnostic)
 {
     static const std::string internal = "Mixed-Nozzle wizard ";
+    if (const std::string reason = wizard_setup_refusal_reason(diagnostic); !reason.empty())
+        return reason;
     if (diagnostic.rfind(internal, 0) != 0)
         return diagnostic;
     // These mean the project moved under the open wizard.
@@ -2532,8 +2620,24 @@ std::string wizard_setup_diagnostic_message(const std::string &diagnostic)
                              "incomplete owner", "owners are", "invalid or duplicated"})
         if (diagnostic.find(word) != std::string::npos)
             return "Setup could not finish because the project changed while it was open. Open setup again.";
-    return "Setup could not finish with these choices. Go back over the materials and layer heights, or "
-           "open setup again.";
+    // The internal check name goes to the log for a report, not to the user.
+    BOOST_LOG_TRIVIAL(warning) << "Mixed-nozzle setup could not finish: " << diagnostic;
+    return "Setup could not finish with these choices. Go back over the materials and layer heights, or open "
+           "setup again.";
+}
+
+std::string wizard_setup_row_refusal(const std::string &diagnostic)
+{
+    static const std::string internal = "Mixed-Nozzle wizard ";
+    if (const std::string reason = wizard_setup_refusal_reason(diagnostic); !reason.empty())
+        return "Setup would refuse this row. " + reason;
+    if (diagnostic.rfind(internal, 0) == 0) {
+        // The internal check name goes to the log for a report, not to the user.
+        BOOST_LOG_TRIVIAL(warning) << "Mixed-nozzle setup would refuse a row: " << diagnostic;
+        return "Setup would refuse this row.";
+    }
+    return diagnostic.empty() ? std::string("Setup would refuse this row.")
+                              : "Setup would refuse this row. " + diagnostic;
 }
 
 std::string wizard_whole_project_label(std::size_t plate_count)
@@ -3028,6 +3132,67 @@ static std::string wizard_change_line(const WizardKeyDelta &delta)
     return name + ": " + value(delta.old_value) + " to " + value(delta.new_value);
 }
 
+const std::vector<std::string> &wizard_strength_keys()
+{
+    static const std::vector<std::string> keys{"sparse_infill_density", "wall_loops", "top_shell_layers",
+                                               "bottom_shell_layers"};
+    return keys;
+}
+
+std::string wizard_strength_change_line(const std::vector<WizardKeyDelta> &deltas, bool can_keep)
+{
+    const auto label_of = [](const std::string &key) {
+        const ConfigOptionDef *definition = print_config_def.get(key);
+        return definition != nullptr && !definition->label.empty() ? definition->label : key;
+    };
+    const auto find = [&deltas](const std::string &key) -> const WizardKeyDelta * {
+        for (const WizardKeyDelta &delta : deltas)
+            if (delta.key == key && !delta.old_value.empty() && !delta.new_value.empty() &&
+                delta.old_value != delta.new_value)
+                return &delta;
+        return nullptr;
+    };
+    // Shell layers are counted in layers, and an MN preset's thinner layers usually need more of them
+    // for the same thickness. Only fewer shell layers than before is worth saying.
+    const auto fewer = [](const WizardKeyDelta &delta) {
+        try {
+            return std::stoi(delta.new_value) < std::stoi(delta.old_value);
+        } catch (...) {
+            return true;
+        }
+    };
+    std::vector<std::string> parts;
+    for (const std::string &key : wizard_strength_keys()) {
+        const WizardKeyDelta *delta = find(key);
+        if (delta == nullptr)
+            continue;
+        if ((key == "top_shell_layers" || key == "bottom_shell_layers") && !fewer(*delta))
+            continue;
+        if (key == "bottom_shell_layers") {
+            // Top and bottom shells that move together are said once.
+            const WizardKeyDelta *top = find("top_shell_layers");
+            if (top != nullptr && fewer(*top) && top->old_value == delta->old_value && top->new_value == delta->new_value)
+                continue;
+        }
+        std::string name = label_of(key);
+        if (key == "top_shell_layers") {
+            const WizardKeyDelta *bottom = find("bottom_shell_layers");
+            if (bottom != nullptr && bottom->old_value == delta->old_value && bottom->new_value == delta->new_value)
+                name = "Top and bottom shell layers";
+        }
+        parts.push_back(name + " from " + delta->old_value + " to " + delta->new_value);
+    }
+    if (parts.empty())
+        return {};
+    std::string line = "This changes ";
+    for (std::size_t i = 0; i < parts.size(); ++i)
+        line += (i == 0 ? "" : i + 1 == parts.size() ? " and " : ", ") + parts[i];
+    line += ".";
+    if (can_keep)
+        line += " To keep yours, choose \"Keep my current process preset instead\" in More options.";
+    return line;
+}
+
 namespace {
 
 std::string nozzle_side_text(const WizardReviewSummaryInput &input, std::optional<std::size_t> physical)
@@ -3158,6 +3323,7 @@ WizardReviewSummary wizard_review_summary(const WizardReviewSummaryInput &input)
                 height_text(input.first_layer.preset_speed) + " mm/s, from the preset (was " +
                 height_text(input.first_layer.height) + " mm at " + height_text(input.first_layer.speed) + " mm/s)"});
         summary.also_changed = input.also_changed;
+        summary.strength_line = input.strength_line;
     }
 
     // The ready line: the first thing in the way, in plain words, and where it is fixed.
@@ -3205,12 +3371,13 @@ WizardModeCardText wizard_mode_card_text(const std::vector<double> &nozzle_diame
     const std::string fine = pair.empty() ? std::string("fine") : height_text(pair[0]) + " mm";
     const std::string coarse = pair.empty() ? std::string("coarse") : height_text(pair[1]) + " mm";
     WizardModeCardText text;
-    // The fine nozzle gets walls, top and bottom surfaces and solid infill; the coarse nozzle gets
-    // sparse infill. Supports follow the material slots the preset names, so they are described as
-    // movable rather than as a default.
-    text.feature = "Split by feature. By default the " + fine + " nozzle prints walls, top and bottom "
-                   "surfaces and solid infill, and the " + coarse + " nozzle prints sparse infill. You "
-                   "can change which nozzle prints each feature, supports included. Works on any model.";
+    // The split setup applies: the fine nozzle gets walls, top and bottom surfaces and solid infill, the
+    // coarse nozzle gets sparse infill at its own layer height. Supports follow the material slots the
+    // preset names and can go on either nozzle, with the tree support limits Slice checks.
+    text.feature = "Split by feature. The " + fine + " nozzle prints walls, top and bottom surfaces and "
+                   "solid infill, and the " + coarse + " nozzle prints sparse infill at its own thicker "
+                   "layer height. Supports can go on either nozzle, with some limits for tree supports. "
+                   "Works on any model.";
     text.body = "Split by part. Each part prints entirely on the nozzle you pick for it, outside "
                 "included. Selected for you when the plate has a multi-part or painted object.";
     return text;

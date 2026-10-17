@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <locale>
 #include <numeric>
 #include <set>
 #include <regex>
@@ -817,6 +818,47 @@ MixedNozzleCadenceResolution resolve_mixed_nozzle_cadence(
     MixedNozzleCadenceResolution result;
     result.cadence = MixedNozzleResolvedCadence{*fine.tool, *coarse.tool, fine_height, coarse_height, ratio};
     return result;
+}
+
+std::string mixed_nozzle_feature_roles_one_nozzle_message(const PrintConfig &config, int outer_wall_filament,
+                                                          int sparse_filament, int default_outer_wall_filament,
+                                                          int default_sparse_filament)
+{
+    const auto nozzle_of = [&config](int filament) -> std::optional<size_t> {
+        if (filament <= 0)
+            return std::nullopt;
+        const std::optional<size_t> nozzle = physical_extruder_for_filament(config, unsigned(filament - 1));
+        if (!nozzle || *nozzle >= config.nozzle_diameter.values.size())
+            return std::nullopt;
+        return nozzle;
+    };
+    std::string text = "Feature Split prints the outer walls on the fine nozzle and the sparse infill on the coarse "
+                       "nozzle, but here both are on ";
+    if (const std::optional<size_t> nozzle = nozzle_of(outer_wall_filament)) {
+        std::ostringstream size;
+        size.imbue(std::locale::classic());
+        size << config.nozzle_diameter.values[*nozzle];
+        text += "the " + size.str() + " mm nozzle.";
+    } else {
+        text += "one nozzle.";
+    }
+    // When the plate's own split is sound, the change is this object's, so name what to set back.
+    // Otherwise setup restores the plate's split.
+    const std::optional<size_t> default_fine   = nozzle_of(default_outer_wall_filament);
+    const std::optional<size_t> default_coarse = nozzle_of(default_sparse_filament);
+    std::vector<std::string> back;
+    if (default_fine && default_coarse && *default_fine != *default_coarse) {
+        if (outer_wall_filament != default_outer_wall_filament)
+            back.push_back("Outer walls back to filament " + std::to_string(default_outer_wall_filament));
+        if (sparse_filament != default_sparse_filament)
+            back.push_back("Infill back to filament " + std::to_string(default_sparse_filament));
+    }
+    if (back.empty())
+        return text + " Click Change... in the sidebar and apply setup again to restore them.";
+    text += " On this object, set " + back.front();
+    if (back.size() > 1)
+        text += " and " + back.back();
+    return text + ".";
 }
 
 bool clear_mixed_nozzle_nozzle_override(DynamicPrintConfig &project)

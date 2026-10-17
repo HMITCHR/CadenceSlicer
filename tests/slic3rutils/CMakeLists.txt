@@ -34,6 +34,8 @@ add_executable(${_TEST_NAME}_tests
     test_mixed_nozzle_high_flow.cpp
     test_mixed_nozzle_time_check.cpp
     test_mixed_nozzle_device_sync.cpp
+    test_mixed_nozzle_setup_refusal.cpp
+    test_mixed_nozzle_solid_part.cpp
     test_mixed_nozzle_mirrored.cpp
     ../fff_print/mixed_nozzle_fixtures.cpp
     wizard_apply_support.hpp

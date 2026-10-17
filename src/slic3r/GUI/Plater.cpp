@@ -20382,7 +20382,7 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
             // cannot quietly put the old pair back on the page.
             PresetBundle staged = entry_bundle;
             if (!mixed_nozzle_rebind_write(staged.project_config, rebind, accepted)) {
-                review.diagnostic = "The native material binding could not be staged.";
+                review.diagnostic = "Cadence couldn't update the material settings. Close this and try again.";
                 return review;
             }
             review.approval = WizardNativeBindingApproval{rebind, accepted};
@@ -20407,7 +20407,11 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
         WizardNativeReview result;
         const auto prepared = prepare_wizard_apply(proposal, review, owners);
         result.diagnostic = prepared.diagnostic;
-        if (!result.diagnostic.empty()) return result;
+        if (!result.diagnostic.empty()) {
+            // Step 4 shows this in plain words; the log keeps the check that stopped it.
+            BOOST_LOG_TRIVIAL(warning) << "Setup step 4 can't apply: " << result.diagnostic;
+            return result;
+        }
         for (const auto &note : prepared.review_notes)
             if (note != prepared.admission_refusal) result.notes.push_back(note);
         const auto &before = prepared.before.process_config;
@@ -20429,6 +20433,7 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
             speeds != nullptr && !speeds->values.empty())
             result.first_layer_speed = speeds->values.front();
         result.also_changed = prepared.also_changed;
+        result.strength_line = prepared.strength_line;
         // Which slots print the supports and the interface after Apply, for the summary rows.
         if (after.has("enable_support") && after.has("support_filament") && after.has("support_interface_filament")) {
             result.supports_read = true;
@@ -20560,13 +20565,20 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
     };
     const auto result = commit_wizard_apply(std::move(prepared), owners, hooks);
     if (!result.diagnostic.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "Setup Apply refused: " << result.diagnostic;
         // One plain sentence with a next step, never the transaction's own diagnostic.
         GUI::show_error(this, from_u8(wizard_setup_diagnostic_message(result.diagnostic)));
         return false;
     }
     if (result.applied && dialog.slice_after_apply() && plate_list.get_plate(index) == target &&
-        plate_list.get_curr_plate_index() == index)
+        plate_list.get_curr_plate_index() == index) {
+        // As the Slice button does (on_action_slice_plate): the automatic brim's inputs from the
+        // config Apply just published, not from whatever filled them last.
+        const DynamicPrintConfig &config = wxGetApp().preset_bundle->full_config();
+        Model::setExtruderParams(config, int(wxGetApp().preset_bundle->filament_presets.size()));
+        Model::setPrintSpeedTable(config, plate_list.get_current_fff_print().config());
         reslice();
+    }
     return result.applied;
 }
 

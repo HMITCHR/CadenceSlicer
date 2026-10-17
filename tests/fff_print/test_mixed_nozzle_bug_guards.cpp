@@ -372,3 +372,21 @@ TEST_CASE("A comma-decimal app language slices the same G-code as English", "[Te
         }
     }
 }
+
+// Feature Split on two nozzles of the same size used to be refused through the cadence check, which
+// spoke of a coarse layer height first. It says what is wrong, as Body Split does.
+TEST_CASE("Feature Split on two nozzles of the same size says it needs two different sizes",
+          "[TestRebuild][BugGuard][EqualNozzles]")
+{
+    CadenceTest::Scene scene = CadenceTest::feature_cube();
+    scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.4, 0.4});
+    std::string message;
+    try {
+        message = CadenceTest::slice(scene).refusal.string;
+    } catch (const std::exception &error) {
+        message = error.what();
+    }
+    INFO(message);
+    CHECK(message.find("Feature Split needs a printer with two nozzles of different sizes.") != std::string::npos);
+    CHECK(message.find("coarse layer height") == std::string::npos);
+}

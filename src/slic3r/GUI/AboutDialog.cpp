@@ -271,8 +271,8 @@ AboutDialog::AboutDialog()
     text_list.push_back(_L("Open-source slicing stands on a tradition of collaboration and attribution. Slic3r, created by Alessandro Ranellucci and the RepRap community, laid the foundation. PrusaSlicer by Prusa Research built on that work, Bambu Studio forked from PrusaSlicer, and SuperSlicer extended it with community-driven enhancements. Each project carried the work of its predecessors forward, crediting those who came before."));
     text_list.push_back(_L("OrcaSlicer began in that same spirit, drawing from PrusaSlicer, BambuStudio, SuperSlicer, and CuraSlicer. But it has since grown far beyond its origins — introducing advanced calibration tools, precise wall and seam control and hundreds of other features."));
     text_list.push_back(wxString::Format(
-        "Cadence Slicer is an independent HMR3D fork of OrcaSlicer, focused on mixed-nozzle Feature Split, Body Split, "
-        "and synchronized prime-pad deposition. Built on OrcaSlicer %s. It is distributed under the GNU AGPLv3, and "
+        "Cadence Slicer is a fork of OrcaSlicer by HMR3D. It prints with two different nozzle sizes in one print, "
+        "each at its own layer height, using Feature Split or Body Split. Built on OrcaSlicer %s. It is distributed under the GNU AGPLv3, and "
         "upstream credits and licence notices are kept. The source for this build is at the link below.",
         CADENCE_UPSTREAM_BASE_COMMIT));
 

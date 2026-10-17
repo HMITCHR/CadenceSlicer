@@ -257,15 +257,20 @@ inline WizardDraft wizard_entry_draft(const WizardProject &project)
     return draft;
 }
 
-// The wizard from entry to Apply, the way the Plater and the dialog run it: materials and the map
-// they derive, each material's nozzle, More options, the cadence page row, the body roles, Review,
-// then prepare and commit. Every step must pass; the committed result is returned.
-inline WizardApplyResult run_wizard_setup(WizardProject &project, const SetupChoice &choice)
+// What the wizard holds when step 4 opens: the draft after the picked row, that row, the parts'
+// roles and Review.
+struct WizardSetupStage {
+    WizardDraft draft;
+    WizardCandidate candidate;
+    std::vector<WizardBodyAssignment> body;
+    WizardReview review;
+};
+
+// The wizard from entry to Review, the way the Plater and the dialog run it: materials and the map
+// they derive, each material's nozzle, More options, the cadence page row, the body roles, Review.
+// Every step must pass.
+inline WizardSetupStage build_wizard_setup_stage(WizardProject &project, const SetupChoice &choice)
 {
-    INFO("test: " << Catch::getResultCapture().getCurrentTestName());
-    INFO("setup on " << project.bundle.printers.get_edited_preset().name << ": "
-         << (choice.mode == MixedNozzleSlicingMode::BodySplit ? "Body Split" : "Feature Split")
-         << " fine " << choice.fine_height << " ratio " << choice.ratio);
     WizardDraft draft = wizard_entry_draft(project);
     draft.requested_nozzle_diameters = choice.requested_nozzles;
     draft.requested_min_layer_heights = choice.requested_min_heights;
@@ -381,11 +386,27 @@ inline WizardApplyResult run_wizard_setup(WizardProject &project, const SetupCho
         }
     }
 
-    const WizardReview review = build_wizard_review(draft, *candidate);
-    for (const std::string &error : review.errors)
+    WizardSetupStage stage;
+    stage.review = build_wizard_review(draft, *candidate);
+    for (const std::string &error : stage.review.errors)
         UNSCOPED_INFO("review: " << error);
-    REQUIRE(review.can_apply);
-    PreparedWizardApply prepared = prepare_wizard_apply(draft, review, project.owners);
+    REQUIRE(stage.review.can_apply);
+    stage.draft = std::move(draft);
+    stage.candidate = *candidate;
+    stage.body = std::move(body);
+    return stage;
+}
+
+// The wizard from entry to Apply: build_wizard_setup_stage, then prepare and commit. Every step
+// must pass; the committed result is returned.
+inline WizardApplyResult run_wizard_setup(WizardProject &project, const SetupChoice &choice)
+{
+    INFO("test: " << Catch::getResultCapture().getCurrentTestName());
+    INFO("setup on " << project.bundle.printers.get_edited_preset().name << ": "
+         << (choice.mode == MixedNozzleSlicingMode::BodySplit ? "Body Split" : "Feature Split")
+         << " fine " << choice.fine_height << " ratio " << choice.ratio);
+    const WizardSetupStage stage = build_wizard_setup_stage(project, choice);
+    PreparedWizardApply prepared = prepare_wizard_apply(stage.draft, stage.review, project.owners);
     const auto config_value = [](const DynamicPrintConfig &config, const char *key) {
         return config.has(key) ? config.opt_serialize(key) : std::string("absent");
     };

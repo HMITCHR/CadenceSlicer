@@ -312,8 +312,90 @@ TEST_CASE("Tied rows each show their time; a hand pick outside a 2 percent tie s
                                                          wizard_estimate(20000., 0, 0.));
     CHECK(wizard_switching_saves_no_time(slower));
     const std::string line = wizard_speed_summary_line(slower, 0.12, std::size_t(0), false);
-    CHECK(has_text(line, "switching nozzles does not save time"));
-    CHECK(has_text(line, "One nozzle only is about 1 h 40 min faster."));
+    CHECK(has_text(line, "Two nozzles are slower than one on this plate."));
+    CHECK(has_text(line, "One nozzle only is about 1 h 40 min faster, so it is the better choice here."));
+    CHECK(wizard_offer_one_nozzle(slower, std::size_t(0)));
+    CHECK(line.find("\xE2\x80\x94") == std::string::npos);
+}
+
+TEST_CASE("A Feature Split row with no nozzle change says the coarse nozzle prints nothing",
+          "[TestRebuild][BugGuard][WizardSpeed]")
+{
+    // The tester's 0.4 / 0.8 plate after the fixes: the engine sends every band fine, so the 0.40 row
+    // is a one-nozzle print in disguise (same time as one nozzle only, no nozzle change).
+    PresetBundle bundle = installed_bbl_profiles();
+    const FullPrintConfig config = resolver_for_pair(bundle, 0.4, 0.8);
+    std::vector<WizardCandidate> candidates = build_wizard_candidates(
+        draft_for(MixedNozzleSlicingMode::FeatureSplit, 0.20, 0.40), config, {});
+    const WizardCadencePage unranked = wizard_cadence_page(candidates, 0.20, config);
+    REQUIRE(unranked.rows.size() == 1);
+    CHECK(unranked.feature_split);
+    CHECK(unranked.fine_nozzle == Catch::Approx(0.4));
+    CHECK(unranked.coarse_nozzle == Catch::Approx(0.8));
+    const std::size_t n2 = unranked.rows[0].candidate_index;
+
+    candidates[n2].estimate = wizard_estimate(9400., 0, 0.);
+    const WizardCadencePage idle = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
+    REQUIRE(idle.ranked);
+    const std::string line = wizard_speed_summary_line(idle, 0.20, std::size_t(0), false);
+    CHECK(has_text(line, "The 0.8 mm nozzle prints nothing on this plate at these settings. To use both nozzles"));
+    CHECK_FALSE(has_text(line, "This row prints on"));
+    // There is no taller coarse layer on this pair at 0.20, so the hint only names the density.
+    CHECK(has_text(line, "To use both nozzles, raise the sparse infill density. Or choose Print with one nozzle instead."));
+    CHECK_FALSE(has_text(line, "taller coarse layer"));
+    CHECK(wizard_offer_one_nozzle(idle, std::size_t(0)));
+    CHECK(line.find("\xE2\x80\x94") == std::string::npos);
+
+    // With a nozzle change the coarse nozzle prints, and nothing is said.
+    candidates[n2].estimate = wizard_estimate(8000., 68, 0.);
+    const WizardCadencePage busy = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
+    CHECK(wizard_idle_coarse_nozzle_note(busy, std::size_t(0)).empty());
+    CHECK_FALSE(has_text(wizard_speed_summary_line(busy, 0.20, std::size_t(0), false), "prints nothing"));
+    CHECK_FALSE(wizard_offer_one_nozzle(busy, std::size_t(0)));
+
+    // Slower on two nozzles than on one (the tester's plate on the 100% fix alone): the line says it plainly.
+    candidates[n2].estimate = wizard_estimate(10191., 68, 0.);
+    const WizardCadencePage slower = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
+    const std::string slower_line = wizard_speed_summary_line(slower, 0.20, std::size_t(0), false);
+    CHECK(has_text(slower_line, "Two nozzles are slower than one on this plate. One nozzle only is about 13 min faster"));
+    CHECK(wizard_offer_one_nozzle(slower, std::size_t(0)));
+
+    // A row with a taller coarse layer beside it names that too (0.2 / 0.8 at 0.08: N=2 to N=7).
+    const RankCube cube = rank_cube({{2, 9000.}, {3, 9000.}, {4, 9000.}, {5, 9000.}, {6, 9000.}, {7, 9000.}});
+    std::vector<WizardCandidate> cube_candidates = cube.candidates;
+    cube_candidates[cube.by_ratio.at(2)].estimate = wizard_estimate(9000., 0, 0.);
+    const WizardCadencePage cube_page = wizard_cadence_page(cube_candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
+    const std::optional<std::size_t> n2_row = row_of(cube_page, cube.by_ratio.at(2));
+    REQUIRE(n2_row);
+    const std::string cube_note = wizard_idle_coarse_nozzle_note(cube_page, n2_row);
+    CHECK(has_text(cube_note, "The 0.8 mm nozzle prints nothing"));
+    CHECK_FALSE(has_text(cube_note, "This row prints on"));
+    CHECK(has_text(cube_note, "raise the sparse infill density or choose a taller coarse layer."));
+
+    // No sparse infill at all (density 0% or 100% on every part, not all of them solid): the note says
+    // Feature Split gives the coarse nozzle only the sparse infill, with the sizes filled in.
+    WizardEstimate empty = wizard_estimate(9400., 0, 0.);
+    empty.sparse_infill = false;
+    candidates[n2].estimate = empty;
+    const WizardCadencePage no_sparse = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
+    CHECK(wizard_idle_coarse_nozzle_note(no_sparse, std::size_t(0)) ==
+          "The 0.8 mm nozzle has nothing to print on this plate. Feature Split gives it the sparse infill, and no "
+          "part here has any (its density is 0% or 100%). To use both nozzles, set a sparse infill density above "
+          "0% and below 100%. Or choose Print with one nozzle instead.");
+
+    // Without nozzle sizes the note falls back to "the coarse nozzle" and "the fine nozzle".
+    WizardCadencePage unsized = no_sparse;
+    unsized.coarse_nozzle = 0.;
+    unsized.fine_nozzle = 0.;
+    CHECK(wizard_idle_coarse_nozzle_note(unsized, std::size_t(0)).rfind(
+              "The coarse nozzle has nothing to print on this plate.", 0) == 0);
+    WizardEstimate solid = empty;
+    solid.all_solid = true;
+    unsized.rows[0].estimate = solid;
+    CHECK(wizard_idle_coarse_nozzle_note(unsized, std::size_t(0)) ==
+          "The coarse nozzle has nothing to print on this plate. Feature Split gives it the sparse infill, and at "
+          "100% density there is none (the inside is all solid infill, which the fine nozzle prints). To use both "
+          "nozzles, lower the sparse infill density below 100%. Or choose Print with one nozzle instead.");
 }
 
 TEST_CASE("Timed rows go on top fastest first while the rest wait in layer order",
@@ -1446,4 +1528,22 @@ TEST_CASE("File > New starts mixed-nozzle slicing Off and keeps the installed pa
     CHECK_FALSE(stray.has("nozzle_diameter"));
     CHECK_FALSE(stray.has("mixed_nozzle_coarse_layer_height"));
     CHECK(stray.opt_enum<MixedNozzleSlicingMode>("mixed_nozzle_slicing_mode") == MixedNozzleSlicingMode::Off);
+}
+
+TEST_CASE("The Feature Split mode card states the split setup applies and does not promise moving features",
+          "[TestRebuild][BugGuard][WizardModeCard]")
+{
+    // The card said "You can change which nozzle prints each feature, supports included." Only the split setup
+    // applies is supported, so the card states that split and that supports can go on either nozzle.
+    const WizardModeCardText sized = wizard_mode_card_text({0.6, 0.2});
+    CHECK(sized.feature == "Split by feature. The 0.2 mm nozzle prints walls, top and bottom surfaces and solid "
+                           "infill, and the 0.6 mm nozzle prints sparse infill at its own thicker layer height. "
+                           "Supports can go on either nozzle, with some limits for tree supports. Works on any model.");
+    const WizardModeCardText unsized = wizard_mode_card_text({});
+    CHECK(unsized.feature.rfind("Split by feature. The fine nozzle prints walls", 0) == 0);
+    for (const std::string &text : {sized.feature, unsized.feature}) {
+        CHECK(text.find("change which nozzle") == std::string::npos);
+        CHECK(text.find("By default") == std::string::npos);
+        CHECK(text.find("\xE2\x80\x94") == std::string::npos);
+    }
 }

@@ -3589,8 +3589,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         const RegionalLayerPlanExport plan = print.regional_layer_plan_export();
         if (plan.block.empty())
             throw Slic3r::SlicingError("[SRL-C02] Feature Split and Body Split write their layer plan right after the G-code configuration block, "
-                                       "and this export writes no configuration block at the head of the file. Export to a printer profile that emits one, "
-                                       "and leave gcode_skip_config_block off.");
+                                       "and this export writes no configuration block at the head of the file. Turn off Skip G-code config block "
+                                       "in the printer settings and export again.");
         file.write(plan.block);
     }
 

@@ -69,30 +69,6 @@ wxString wizard_review_message(const std::string &reason)
     return from_u8(wizard_review_reason_text(reason));
 }
 
-// What a finished ranking slice means for its row.
-WizardEstimate ranking_estimate(const MixedNozzleSliceTime &time)
-{
-    WizardEstimate estimate;
-    estimate.status = WizardEstimateStatus::Unavailable;
-    switch (time.status) {
-    case MixedNozzleSliceTimeStatus::Estimated:
-        return wizard_estimate(time.seconds, time.switches, time.tower_mm3);
-    case MixedNozzleSliceTimeStatus::Refused:
-        estimate.note = "slicing would refuse this choice";
-        estimate.refused = true;
-        estimate.refusal = time.diagnostic;
-        break;
-    case MixedNozzleSliceTimeStatus::Cancelled:
-        estimate.note = "not estimated";
-        break;
-    case MixedNozzleSliceTimeStatus::Failed:
-        // A row that fails to slice says so on its own row.
-        estimate.status = WizardEstimateStatus::Failed;
-        break;
-    }
-    return estimate;
-}
-
 double ranking_clock_seconds()
 {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -114,9 +90,9 @@ MixedNozzleIntroDialog::MixedNozzleIntroDialog(wxWindow *parent)
     };
     paragraph(from_u8(wizard_intro_lead_line()), false);
     paragraph(_L("Feature Split"), true);
-    paragraph(_L("Split by feature. By default the fine nozzle prints walls, top and bottom surfaces and solid "
-                 "infill, and the coarse nozzle prints sparse infill. You can change which nozzle prints each "
-                 "feature, supports included. Works on any model."), false);
+    paragraph(_L("Split by feature. The fine nozzle prints walls, top and bottom surfaces and solid infill, and "
+                 "the coarse nozzle prints sparse infill at its own thicker layer height. Supports can go on "
+                 "either nozzle, with some limits for tree supports. Works on any model."), false);
     paragraph(_L("Body Split"), true);
     paragraph(_L("Split by part. Each part prints entirely on the nozzle you pick for it, outside included."), false);
     paragraph(_L("It needs two different nozzles, a material on each, and a prime tower. Setup sets the rest."), false);
@@ -495,6 +471,8 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
     m_review_rows = new wxPanel(review_page, wxID_ANY);
     m_review_rows->SetSizer(new wxFlexGridSizer(2, FromDIP(4), FromDIP(16)));
     review_page->GetSizer()->Add(m_review_rows, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(16));
+    m_review_strength = label(review_page, review_page->GetSizer(), wxEmptyString);
+    m_review_strength->Hide();
     m_review_also = label(review_page, review_page->GetSizer(), wxEmptyString);
     // Consent for a shared process sits next to its consequence, and only when needed.
     m_shared_consent = new wxCheckBox(review_page, wxID_ANY, wxEmptyString);
@@ -729,8 +707,9 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
                 m_ranking_thread.join();
             std::weak_ptr<MixedNozzleRankingController> controller = m_ranking;
             m_ranking_thread = std::thread([controller, job, row, slice = std::move(slice), cancel]() {
-                const WizardEstimate estimate = ranking_estimate(mixed_nozzle_slice_time(
-                    *slice.model, slice.config, slice.is_bbl_printer, slice.plate_origin, {}, *cancel));
+                const WizardEstimate estimate = wizard_ranking_estimate(mixed_nozzle_slice_time(
+                    *slice.model, slice.config, slice.is_bbl_printer, slice.plate_origin, {}, *cancel,
+                    slice.plate_index));
                 wxGetApp().CallAfter([controller, job, row, estimate] {
                     if (const auto live = controller.lock())
                         live->deliver(job, row, estimate);
@@ -1147,7 +1126,7 @@ void MixedNozzleWizardDialog::refresh_cadence_time_line()
     // progress line.
     set_wrapped(m_speed_summary, from_u8(wizard_speed_summary_line(m_cadence_page, m_input.draft.chosen_fine_height,
                                                                 selected_row, explicit_pick)));
-    m_one_nozzle_link->Show(wizard_switching_saves_no_time(m_cadence_page));
+    m_one_nozzle_link->Show(wizard_offer_one_nozzle(m_cadence_page, selected_row));
     set_wrapped(m_cadence_time, from_u8(wizard_speed_progress_line(m_cadence_page, bool(m_ranking))));
     const WizardSpeedProgress progress = wizard_speed_progress(m_cadence_page);
     m_times_gauge->SetRange(int(std::max<std::size_t>(1, progress.total)));
@@ -1279,15 +1258,9 @@ MixedNozzleRankingSlice MixedNozzleWizardDialog::compose_ranking_row(const std::
         return none;
     }
     MixedNozzleRankingSlice slice = m_input.compose_ranking_slice(m_input.draft, *candidate, body);
-    if (baseline && slice.model && slice.diagnostic.empty()) {
-        if (!m_input.draft.fine_logical_filament) {
-            none.diagnostic = "choose the fine material first";
-            return none;
-        }
-        mixed_nozzle_single_nozzle_baseline(*slice.model, slice.config,
-                                            *m_input.draft.fine_logical_filament, candidate->fine_height);
-        slice.key = mixed_nozzle_ranking_key(slice.plate_id, *slice.model, slice.config);
-    }
+    if (baseline)
+        return wizard_baseline_ranking_slice(std::move(slice), m_input.draft.fine_logical_filament,
+                                             candidate->fine_height);
     return slice;
 }
 
@@ -1557,6 +1530,7 @@ bool MixedNozzleWizardDialog::refresh_review()
         summary.process_before = native.process_before;
         summary.process_after = native.process_after;
         summary.also_changed = native.also_changed;
+        summary.strength_line = native.strength_line;
         if (native.supports_read)
             set_supports(native.supports, native.support_filament, native.support_interface_filament,
                          native.support_interface_top_layers);
@@ -1635,6 +1609,8 @@ void MixedNozzleWizardDialog::show_review_summary(const WizardReviewSummary &sum
     wxString also;
     for (const std::string &line : summary.also_changed)
         also += (also.empty() ? _L("Also changed:") + " " : wxString("; ")) + from_u8(line);
+    set_wrapped(m_review_strength, from_u8(summary.strength_line));
+    m_review_strength->Show(!summary.strength_line.empty());
     set_wrapped(m_review_also, also);
     m_review_also->Show(!also.empty());
     set_wrapped(m_ready_line, from_u8(summary.ready_line));

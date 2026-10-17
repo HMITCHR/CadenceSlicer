@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 #include "mixed_nozzle_harness.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -281,6 +282,21 @@ TEST_CASE("Feature Split with Smooth timelapse on a coarse nozzle that cannot la
         CHECK(facts.refusal.string.empty());
         CHECK_FALSE(facts.gcode.empty());
     }
+}
+
+TEST_CASE("The late tower refusal for Smooth timelapse or clumping detection says the tower layers are too thin",
+          "[TestRebuild][Timelapse][Admission]")
+{
+    // Shown when a tower level under a nozzle's minimum still reaches the tower build (Validate refuses
+    // the cases it can see first, SRL-F17 and SRL-A38). It used to end "the tower layers that needs."
+    CHECK(mixed_nozzle_tower_too_thin_message(true) ==
+          "Timelapse is set to Smooth, which keeps the prime tower level with the part, and one nozzle cannot lay "
+          "tower layers that thin. Set Timelapse to Traditional (Others > Special mode) and slice again.");
+    CHECK(mixed_nozzle_tower_too_thin_message(false) ==
+          "Clumping detection keeps the prime tower level with the part, and one nozzle cannot lay tower layers "
+          "that thin. Turn off Enable clumping detection (Others > Special mode) and slice again.");
+    for (const bool smooth : {true, false})
+        CHECK(mixed_nozzle_tower_too_thin_message(smooth).find("that needs") == std::string::npos);
 }
 
 TEST_CASE("Body Split's Smooth timelapse refusal names the Timelapse setting and the value to pick",

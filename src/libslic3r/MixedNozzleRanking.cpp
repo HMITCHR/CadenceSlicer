@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -40,6 +41,17 @@ struct AttachedPrint {
     ~AttachedPrint() { cancel.attach(nullptr); }
 };
 
+// Model's process-wide automatic-brim inputs, saved on construction and put back on destruction.
+struct BrimInputs {
+    std::map<size_t, ExtruderParams> extruders = Model::extruderParamsMap;
+    GlobalSpeedMap speeds = Model::printSpeedMap;
+    ~BrimInputs()
+    {
+        Model::extruderParamsMap = extruders;
+        Model::printSpeedMap = speeds;
+    }
+};
+
 void remove_quietly(const boost::filesystem::path &path)
 {
     boost::system::error_code ignored;
@@ -48,10 +60,20 @@ void remove_quietly(const boost::filesystem::path &path)
 
 } // namespace
 
+void mixed_nozzle_set_brim_inputs(const DynamicPrintConfig &config)
+{
+    const auto *types = config.option<ConfigOptionStrings>("filament_type");
+    Model::setExtruderParams(config, types != nullptr ? int(types->values.size()) : 1);
+    PrintConfig print_config;
+    print_config.apply(config, true);
+    Model::setPrintSpeedTable(config, print_config);
+}
+
 MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPrintConfig &config,
                                              bool is_bbl_printer, const Vec3d &plate_origin,
                                              const std::string &temp_dir,
-                                             MixedNozzleRankingCancel &cancel)
+                                             MixedNozzleRankingCancel &cancel,
+                                             int plate_index)
 {
     MixedNozzleSliceTime out;
     if (cancel.cancelled()) {
@@ -66,6 +88,15 @@ MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPr
         // on the first and the G-code coordinates on the second.
         print.is_BBL_printer() = is_bbl_printer;
         print.set_plate_origin(plate_origin);
+        // PartPlate's Print carries its plate index; the tower spot is read per plate. Without it
+        // every plate's row was timed with plate 1's tower spot.
+        print.set_plate_index(plate_index);
+        // The automatic brim reads the materials and speeds from Model's process-wide tables. The
+        // plater fills them when Slice is pressed, but nothing filled them for step 3, so a row
+        // timed a different brim (none, on the tester's file) than the slice after Apply printed.
+        // Put back afterwards, so a ranking slice leaves nothing behind for anyone else.
+        const BrimInputs restore;
+        mixed_nozzle_set_brim_inputs(config);
         const AttachedPrint attached(cancel, print);
         // Applied twice, as PartPlate does: the second apply sees the objects the first created.
         print.apply(model, config);
@@ -94,6 +125,20 @@ MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPr
         out.switches = statistics.total_physical_tool_changes;
         for (const auto &[extruder, volume] : statistics.wipe_tower_volumes_per_extruder)
             out.tower_mm3 += volume;
+        bool any_region = false;
+        out.sparse_infill = false;
+        out.all_solid = true;
+        for (const PrintObject *object : print.objects())
+            for (std::size_t region = 0; region < object->num_printing_regions(); ++region) {
+                const double density = object->printing_region(region).config().sparse_infill_density.value;
+                any_region = true;
+                out.sparse_infill = out.sparse_infill || (density > 0. && density < 100.);
+                out.all_solid = out.all_solid && density >= 100.;
+            }
+        if (!any_region) {
+            out.sparse_infill = true;
+            out.all_solid = false;
+        }
         out.status = MixedNozzleSliceTimeStatus::Estimated;
     } catch (const CanceledException &) {
         out = MixedNozzleSliceTime{};

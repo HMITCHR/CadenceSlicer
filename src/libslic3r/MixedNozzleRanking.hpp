@@ -39,6 +39,8 @@ struct MixedNozzleRankingSlice {
     DynamicPrintConfig config;
     bool is_bbl_printer {false};
     Vec3d plate_origin {Vec3d::Zero()};
+    // The plate's place in the project (PartPlate::get_index()): the tower spot is stored per plate.
+    int plate_index {0};
     std::size_t plate_id {0};
     // Plate id, model hash and config hash. Equal keys slice the same way.
     std::string key;
@@ -61,6 +63,10 @@ struct MixedNozzleSliceTime {
     unsigned int switches {0};
     // Tower volume over every extruder, mm3.
     double tower_mm3 {0.};
+    // Some printed part has sparse infill (density above 0% and below 100%). Without any, Feature
+    // Split has nothing for the coarse nozzle. `all_solid`: every printed part is at 100%.
+    bool sparse_infill {true};
+    bool all_solid {false};
     std::string diagnostic;
 };
 
@@ -68,10 +74,18 @@ struct MixedNozzleSliceTime {
 // G-code export) and reads the time from the G-code processor, so the tower, re-prime and tool
 // changes are priced exactly as the real slice prices them. The G-code goes to a temporary file
 // under `temp_dir` (the system temporary directory when empty) and is removed afterwards.
+// `plate_index` is the plate's place in the project, as the plate's own Print has it (the tower
+// spot is read per plate). The automatic brim's inputs (Model's material and speed tables) are
+// filled from `config` first, as the plater fills them from its config when Slice is pressed.
 MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPrintConfig &config,
                                              bool is_bbl_printer, const Vec3d &plate_origin,
                                              const std::string &temp_dir,
-                                             MixedNozzleRankingCancel &cancel);
+                                             MixedNozzleRankingCancel &cancel,
+                                             int plate_index = 0);
+
+// Fills Model's process-wide automatic-brim inputs (each filament's material, the print speeds and
+// the bed) from a composed config, as Plater does before every Slice.
+void mixed_nozzle_set_brim_inputs(const DynamicPrintConfig &config);
 
 // The all-fine single-nozzle baseline, made from a composed mixed-nozzle slice in place: mode
 // Off, `fine_height` everywhere, every material slot on the fine material's nozzle, every feature

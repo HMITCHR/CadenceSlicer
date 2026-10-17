@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_nozzle_printers.cpp
 	test_mixed_nozzle_feature_support.cpp
 	test_mixed_nozzle_feature.cpp
+	test_mixed_nozzle_fine_solid_height.cpp
 	test_mixed_nozzle_cooling.cpp
 	test_mixed_nozzle_tower.cpp
 	test_mixed_nozzle_tower_first_layer.cpp

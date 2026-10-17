@@ -195,6 +195,9 @@ struct WizardEstimate {
     // An Unavailable row whose slice was refused, with the reason the slicer gave.
     bool refused {false};
     std::string refusal;
+    // From the row's slice: some part has sparse infill, and every part is at 100% (solid).
+    bool sparse_infill {true};
+    bool all_solid {false};
 };
 
 // True when the row's slice failed or was refused, so Apply would give a plate that cannot slice.
@@ -392,6 +395,11 @@ struct WizardCadencePage {
     std::optional<WizardEstimate> baseline_estimate;
     // The one-nozzle slice is running now.
     bool baseline_slicing {false};
+    // The rows are Feature Split rows, and the two nozzle sizes (fine, coarse), 0 when unresolved.
+    // A Feature Split row with no nozzle change prints nothing on the coarse nozzle.
+    bool feature_split {false};
+    double fine_nozzle {0.};
+    double coarse_nozzle {0.};
 };
 // With estimates, times are added to the labels and the rows are ranked.
 WizardCadencePage wizard_cadence_page(const std::vector<WizardCandidate> &candidates,
@@ -639,9 +647,17 @@ std::string wizard_body_process_guard_text(const WizardBodyProcessChoice &choice
 // reaches the text.
 std::string wizard_review_reason_text(const std::string &reason);
 
-// A setup diagnostic as the post-Apply error box shows it: one sentence that says what to do.
-// Anything else passes through unchanged.
+// A setup check that the project itself can trip, in plain words with what to do. Empty for any
+// other diagnostic.
+std::string wizard_setup_refusal_reason(const std::string &diagnostic);
+
+// A setup diagnostic as step 4 and the post-Apply error box show it: one sentence that says what to
+// do. An internal check with no plain wording is named in brackets. Anything else passes through
+// unchanged.
 std::string wizard_setup_diagnostic_message(const std::string &diagnostic);
+
+// What a step 3 row says when setup would refuse it: "Setup would refuse this row." and why.
+std::string wizard_setup_row_refusal(const std::string &diagnostic);
 
 // What the two mode cards say for the project's nozzle pair (any order).
 struct WizardModeCardText {
@@ -702,6 +718,12 @@ std::string wizard_speed_times_note(const WizardCadencePage &page);
 // True when every row is slower than one nozzle only, beyond the margin: the page then offers
 // "Print with one nozzle instead".
 bool wizard_switching_saves_no_time(const WizardCadencePage &page);
+// When the selected Feature Split row's slice has no nozzle change, the coarse nozzle prints nothing
+// and the row is a one-nozzle print: says so, and how to use both nozzles. Empty otherwise.
+std::string wizard_idle_coarse_nozzle_note(const WizardCadencePage &page, std::optional<std::size_t> selected_row);
+// True when the page offers "Print with one nozzle instead": every row is slower than one nozzle
+// only, or the selected row prints nothing on the coarse nozzle.
+bool wizard_offer_one_nozzle(const WizardCadencePage &page, std::optional<std::size_t> selected_row);
 // When no coarse layer works with this fine layer, what to do about it, in one sentence.
 std::string wizard_no_coarse_layer_line(double fine_height, const FullPrintConfig &copied_effective_config);
 
@@ -919,12 +941,16 @@ struct WizardReviewSummaryInput {
     std::string map_line;
     std::vector<std::string> notes;
     std::vector<std::string> tower_lines;
+    // wizard_strength_change_line, shown on its own outside "Every setting this changes".
+    std::string strength_line;
 };
 
 struct WizardReviewSummary {
     std::string header;
     std::vector<WizardSummaryRow> rows;
     std::vector<std::string> also_changed;
+    // The process strength values Apply changes, one plain line. Empty when none change.
+    std::string strength_line;
     bool ready {false};
     std::string ready_line;
     WizardFixTarget target {WizardFixTarget::None};
@@ -936,5 +962,14 @@ struct WizardReviewSummary {
     std::vector<std::string> details;
 };
 WizardReviewSummary wizard_review_summary(const WizardReviewSummaryInput &input);
+// The process keys that set how strong a part is, in the order step 4 names them.
+const std::vector<std::string> &wizard_strength_keys();
+// Step 4's one line when Apply changes the process's own strength values (a switch to an MN preset
+// turns 100% sparse infill into 15%, 5 walls into 2): "This changes Sparse infill density from 100%
+// to 15% and Wall loops from 5 to 2." Values set on an object or part are not process values and stay.
+// Shell layers are named only when there are fewer of them.
+// `can_keep` adds how to keep them. Empty when none of wizard_strength_keys() changes.
+std::string wizard_strength_change_line(const std::vector<WizardKeyDelta> &deltas, bool can_keep);
+
 
 } // namespace Slic3r::GUI

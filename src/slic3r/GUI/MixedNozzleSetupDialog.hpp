@@ -54,6 +54,8 @@ struct WizardNativeReview {
     double first_layer_height {0.};
     double first_layer_speed {0.};
     std::vector<std::string> also_changed;
+    // The process strength values Apply changes, in one plain line.
+    std::string strength_line;
     // The engine's refusal, apart from a setup diagnostic. `diagnostic` carries it too.
     std::string engine_refusal;
     // The Process setting that refusal names.
@@ -317,6 +319,7 @@ private:
     wxStaticText *m_review_header {nullptr};
     wxPanel *m_review_rows {nullptr};
     wxStaticText *m_review_also {nullptr};
+    wxStaticText *m_review_strength {nullptr};
     wxStaticText *m_ready_line {nullptr};
     wxButton *m_fix_link {nullptr};
     WizardFixTarget m_fix_target {WizardFixTarget::None};

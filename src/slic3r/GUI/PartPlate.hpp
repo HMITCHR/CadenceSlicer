@@ -586,6 +586,14 @@ public:
     }*/
 };
 
+// Where PartPlateList::set_default_wipe_tower_pos_for_plate stores the tower of `plate`
+// (plate-local corner): `pos` clamped onto the bed, and on a plate with objects moved clear of
+// their bounding box when it overlaps it. `full_config` is the plate's composed config.
+// `tower_filaments` is how many filaments the tower serves; 0 reads it from the plate's parts
+// (which needs the running app).
+Vec2d wipe_tower_pos_on_plate(PartPlate &plate, const DynamicPrintConfig &full_config, int nozzle_nums,
+                              Vec2d pos, bool init_pos = false, int tower_filaments = 0);
+
 class PartPlateList : public ObjectBase
 {
     Plater* m_plater; //Plater reference, not own it

@@ -2622,13 +2622,14 @@ void PrintObject::slice_volumes()
                 m_native_regional_grid_state.interlocking_decisions.begin(),
                 m_native_regional_grid_state.interlocking_decisions.end(),
                 [](const RegionalInterlockingDecision &decision) { return decision.apply; }));
-            if (applied == 0)
+            if (applied == 0) {
+                BOOST_LOG_TRIVIAL(warning) << "Interlocking beams: all " << voxels
+                                           << " beam voxels dropped (SRL-R04) on " << this->model_object()->name;
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                    _u8L("Interlocking beams were requested but none could be applied: every beam "
-                         "voxel at the body interface was dropped (SRL-R04), so the bodies will "
-                         "meet in a plain butt joint.") +
-                    "\n" + _u8L("Object name") + ": " + this->model_object()->name +
-                    "\n" + _u8L("Dropped beam voxels") + ": " + std::to_string(voxels));
+                    _u8L("No interlocking beams fit where these parts meet (SRL-R04), so they will "
+                         "join with a flat joint. The joint may be too short for beams.") +
+                    "\n" + _u8L("Object name") + ": " + this->model_object()->name);
+            }
         }
 
         m_native_regional_grid_state.rendezvous.erase(

@@ -7930,19 +7930,8 @@ msgstr "予測時間"
 msgid "Mixed-Nozzle Slicing"
 msgstr "ノズル選択"
 
-msgid "Choose a project default. Each plate may inherit it or use an explicit override."
-msgstr ""
-
 msgid "Set up..."
 msgstr ""
-
-#, fuzzy
-msgid "Mixed plates"
-msgstr "スライス"
-
-#, fuzzy
-msgid "Project default: "
-msgstr "プロジェクトファイル"
 
 msgid "Set the number of AMS installed on the nozzle."
 msgstr "ノズルに取り付けたAMSの数を設定します。"
@@ -8712,9 +8701,6 @@ msgstr "キャンセル中 — 現在のプラグインを完了しています.
 #, boost-format
 msgid "Installing %1%..."
 msgstr "%1%をインストール中..."
-
-msgid "No matching machine profile supplies the layer-height limits for this nozzle pair."
-msgstr ""
 
 msgid "Plate Settings"
 msgstr "プレート設定"
@@ -9780,20 +9766,12 @@ msgstr "テンプレートから作成"
 msgid "First layer filament sequence"
 msgstr "初期レイヤーフィラメント順序"
 
-#, c-format, boost-format
-msgid "Coarse — N=%d — %.3f mm"
-msgstr ""
-
 msgid "Target plate changed or is unavailable"
 msgstr ""
 
 #, fuzzy
 msgid "Close and reopen Plate Settings for the current plate."
 msgstr "現在のプレート上のすべてのオブジェクトを選択"
-
-#, c-format, boost-format
-msgid "Fine — %.3f mm"
-msgstr ""
 
 #, c-format
 msgid "%zu excluded modifier/negative/support volume(s)"
@@ -9805,59 +9783,13 @@ msgstr ""
 msgid "Unresolved"
 msgstr ""
 
-msgid "Ready — edits affect native model-part settings"
-msgstr ""
-
-#, c-format
-msgid "Exactly two MODEL_PART bodies required; found %zu"
-msgstr ""
-
 msgid "A body has an invalid base or effective layer height"
-msgstr ""
-
-msgid "Select a valid logical filament for each body"
-msgstr ""
-
-msgid "Each body must use a distinct logical filament"
-msgstr ""
-
-msgid "A body logical filament has no valid static physical-tool route"
-msgstr ""
-
-msgid "The two bodies must resolve to different physical tools"
-msgstr ""
-
-msgid "The coarse physical tool must have a larger nozzle than the fine physical tool"
-msgstr ""
-
-msgid "Each cadence must be an integer multiple within its physical-tool limits, and the shared base height must meet both tools' minimum layer height (SRL-A38)"
-msgstr ""
-
-msgid "Body target changed; refresh Plate Settings"
-msgstr ""
-
-msgid "Duplicate body target"
 msgstr ""
 
 msgid "No settings were changed. Reopen Plate Settings for the current plate."
 msgstr ""
 
-msgid "Body topology changed while the editor was open"
-msgstr ""
-
-msgid "No settings were changed. Cancel to reload the live body list."
-msgstr ""
-
-msgid "Live Body settings changed while the editor was open"
-msgstr ""
-
-msgid "No settings were changed. Cancel to reload live IDs, cadence, and routing."
-msgstr ""
-
 msgid "Body Split changes ready for OK"
-msgstr ""
-
-msgid "Outer OK commits one undoable transaction; Cancel discards it."
 msgstr ""
 
 msgid "By Layer"
@@ -12944,9 +12876,6 @@ msgstr "HTTPダイジェスト"
 # AI Translated
 msgid "Configuration for the plugin capabilities this preset uses, overriding the global Capabilities configuration. Stored as a raw JSON array and edited through the dialog behind the button, never typed in directly."
 msgstr "このプリセットが使用するプラグイン機能の設定で、グローバルの機能設定を上書きします。生のJSON配列として保存され、ボタンの先にあるダイアログで編集します。直接入力するものではありません。"
-
-msgid "Mixed-Nozzle Slicing — Feature Split / Body Split"
-msgstr ""
 
 msgid "Open the project Mixed-Nozzle setup chooser. This is a project deep link and does not edit the Process preset."
 msgstr ""
@@ -19089,14 +19018,8 @@ msgstr "メッシュをスライス中"
 msgid "No layers were detected. You might want to repair your STL file(s) or check their size or thickness and retry.\n"
 msgstr "レイヤーが検出されませんでした。STLファイルを修正するか、サイズや厚さを確認して再試行してください。\n"
 
-msgid "Interlocking beams were requested but none could be applied: every beam voxel at the body interface was dropped (SRL-R04), so the bodies will meet in a plain butt joint."
-msgstr ""
-
 msgid "Object name"
 msgstr "オブジェクト名"
-
-msgid "Dropped beam voxels"
-msgstr ""
 
 # AI Translated
 msgid ""

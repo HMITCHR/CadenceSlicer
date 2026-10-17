@@ -161,6 +161,9 @@ struct PreparedWizardApply {
     // Values Apply turns off or zeroes on its own, one line each. Also in review_notes; Review
     // lists them under "Also changed".
     std::vector<std::string> also_changed;
+    // The process's own strength values the preset switch changes, in one plain line
+    // (wizard_strength_change_line). Empty when none change.
+    std::string strength_line;
     bool changed {false};
     std::string diagnostic;
 };
