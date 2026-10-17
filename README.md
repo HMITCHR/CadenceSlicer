@@ -10,23 +10,23 @@ When I bought my H2D at launch, one of the things I was most excited about was e
 
 ## Why it's tricky
 
-Layer height is essentially the vertical resolution of a print. Finer layers make the steps on curved and sloped surfaces smaller, so the outside looks smoother and small details actually come out. The catch is that fine layers take a long time, and if the whole part is printed fine, you spend most of that time on things nobody ever sees, like the infill inside. Bigger nozzles can lay much thicker layers, which is where the large potential time savings are.
+Layer height is the vertical resolution of a print. Finer layers make the steps on curved and sloped surfaces smaller, so the outside looks smoother and small details actually come out. The catch is that fine layers take a long time, and if the whole part is printed fine, you spend most of that time on things nobody ever sees, like the infill inside. Bigger nozzles can lay much thicker layers, which is where the large potential time savings are.
 
 Every nozzle size has its own range of layer heights it prints well, roughly 0.04 to 0.14 mm for a 0.2 and 0.16 to 0.56 mm for a 0.8, for example. Those ranges don't overlap, so a 0.2 and a 0.8 in the same print want completely different layer heights. Slicers today, OrcaSlicer included, use one layer height for the whole print, so you have to choose: thin layers that suit the 0.2, where the 0.8 saves you almost no time, or thick layers that suit the 0.8, where the 0.2 can't print its fine detail.
 
 Cadence gets around that by picking a fine layer height for the small nozzle and a whole number N. The big nozzle then prints one layer for every N fine layers, at N times the fine height. For example, with a 0.2/0.8 pair, a fine layer height of 0.08 mm and N = 7, the 0.8 prints at 0.56 mm. The two sets of layers meet at the same height every seven fine layers, which is what keeps them lined up, and the nozzles only swap at those meeting points, not every layer.
 
-Every swap needs a prime. A nozzle that's been sitting idle oozes a bit and cools down, so before it prints again it purges and re-primes on a small prime tower next to the model. That way the next part it prints starts clean, without gaps or blobs. Priming adds time to every print, so I've spent a lot of time and effort trimming it down: it only primes when a nozzle actually changes, the tower settings are set automatically for your nozzle pair, and the tower is sized for the purge each change actually needs.
+Every swap needs a prime. A nozzle that's been sitting idle oozes a bit and cools down, so before it prints again it purges and re-primes on a small prime tower next to the model. That way the next part it prints starts clean, without gaps or blobs. Priming adds time to every print, so I've spent a lot of time and effort trimming it down: it only primes when a nozzle changes, the tower settings are set automatically for your nozzle pair, and the tower is sized for the purge each change needs.
 
 It also checks that using both nozzle sizes is actually worth it. Even trimmed down, the tower and the nozzle changes cost time, and on small prints that can be more than the big nozzle saves. When that happens Cadence keeps that part of the print, or the whole thing, on the fine nozzle and tells you why. The longer explanation is in [How it works](docs/HOW-IT-WORKS.md).
 
 ## Two ways to split a print
 
-Feature Split lets you pick which nozzle prints each feature of a single model. By default the fine nozzle prints the walls, top and bottom surfaces and solid infill, and the coarse nozzle prints the sparse infill. You can move any feature to either nozzle, supports and support interfaces included.
+Feature Split splits a single model by feature. Setup puts the walls, top and bottom surfaces and solid infill on the fine nozzle, and the sparse infill on the coarse nozzle at its own thicker layer height. Supports can go on either nozzle (see below).
 
 Body Split is for models made of several parts, or models with painted regions where you want to specify which nozzle prints them. Each part or painted selection prints entirely on the nozzle you pick for it, walls and infill both, and the part on the bed can be on either nozzle. Where parts on different nozzles touch, Cadence adds interlocking beams so the joint isn't just two flat faces stuck together.
 
-Supports work in both. The support body and the interface print on whichever nozzles their filaments are on in the Support settings. I usually put the body on the coarse nozzle and the interface on the fine one, and the interface can be a different material, like PETG under a PLA part. Normal supports and Organic tree supports both work with the body on the coarse nozzle. With Organic trees, the trunks print on the big nozzle and the thin tips go to the small one.
+Supports work in both. The support body and the interface print on whichever nozzles their filaments are on in the Support settings. I usually put the body on the coarse nozzle and the interface on the fine one, and the interface can be a different material, like PETG under a PLA part. Normal supports work with the body on either nozzle. Organic tree supports work with the body on the coarse nozzle as long as the interface is on the fine nozzle. Then the trunks print on the big nozzle and the thin tips go to the small one.
 
 Setup is four steps: pick the split, pick the filaments, pick the layer heights, then check and apply. On the layer height step it slices every coarse layer option in the background and shows the real estimated time for each, next to the one-nozzle time, so you can see what you're saving before you apply.
 
@@ -34,15 +34,27 @@ Setup is four steps: pick the split, pick the filaments, pick the layer heights,
 
 You can print small, crisp lettering on a part that's otherwise printed fast with the big nozzle. There are two ways to do it.
 
-**Feature Split (simplest).** Add the text to the model however you like: raised, engraved, on the top or on a side. Run setup, pick Feature Split and keep the default split. The small nozzle prints every wall and top surface, so the lettering comes out the same as an all-small-nozzle print, while the big nozzle does the infill underneath. On a 60 x 40 mm test sign with 5 mm letters on a 0.2 and 0.6, that was 1 h 21 min against 1 h 45 min all on the 0.2.
+**Feature Split (simplest).** Add the text to the model however you like: raised, engraved, on the top or on a side. Run setup and pick Feature Split. The small nozzle prints every wall and top surface, so the lettering comes out the same as an all-small-nozzle print, while the big nozzle does the infill underneath. On a 60 x 40 mm test sign with 5 mm letters on a 0.2 and 0.6, that was 1 h 21 min against 1 h 45 min all on the 0.2.
 
 **Body Split (text in a second colour).** Add the text as its own part (right click the object, Add part, Text, or load it as a second part), then put the text on the small nozzle's filament and the base on the big nozzle's. You can also paint the lettering onto the base with the small nozzle's filament, or use a text-shaped modifier. The base prints fast at the big nozzle's layer height and the text at the small one's. On the same sign, black text on a green base took about 47 min against 1 h 40 min all on the 0.2.
+
+**How small can it go?** The rule of thumb is that a letter's main stroke needs to be at least one line wide: about 0.22 mm on a 0.2, 0.42 mm on a 0.4 and 0.62 mm on a 0.6. That works out to roughly these smallest clean sizes (capital letter height):
+
+| Nozzle | Bold sans | Regular sans | Serif |
+|---|---|---|---|
+| 0.2 | 1.5 mm | 2 to 2.5 mm | about 4 mm |
+| 0.4 | 2.5 to 3 mm | 4 mm | 6 mm or more |
+| 0.6 | 4 mm | 6 mm | 6 mm or more |
+
+So a 0.2 roughly halves the smallest text size a 0.4 can manage.
+
+In Body Split, raise the text about 0.4 mm on top of the coarse surface. Raised bold text printed crisp down to 1.5 mm on my H2D. Flush text gets worse the smaller it is, because the big nozzle can't fill the holes inside letters or the tight gaps between them. In the slicer that left about a quarter of that area open at 3 mm and three quarters at 1.5 mm.
 
 A few things to know for Body Split:
 
 - Text can sit on the surface or be sunk into it. If it's sunk in, Cadence gives that space to the text and tells you after slicing. Two big parts that overlap a lot are still refused.
 - Raised letters join the base with a flat joint, not the interlocking beams used between bigger parts. That's fine for lettering, but don't rely on it to hold a part that takes a load.
-- Letters with strokes thinner than about 0.4 mm only survive on the small nozzle. A print that's all big nozzle loses most of 5 mm text.
+- Letters with strokes thinner than the big nozzle's line width (about 0.62 mm on a 0.6) only survive on the small nozzle. On a print that's all big nozzle, regular 5 mm text mostly breaks up, and bold text needs about 4 mm on a 0.6 (see the table above).
 
 ## Does it actually save time?
 
@@ -123,7 +135,7 @@ On Windows:
 
 1. Fit two different nozzles, for example a 0.2 on one side and a 0.6 or 0.8 on the other.
 2. In the Printer panel, set each side's nozzle or sync your printer info. When the two differ, Cadence asks what you want to do. Pick "Set up mixed-nozzle slicing now".
-3. Go through the four setup steps: What prints fine, Materials, Detail and speed, Check and apply. The defaults are fine for most prints. On Detail and speed, wait for the times to fill in, or just pick the one marked Fastest.
+3. Go through the four setup steps: What prints fine, Materials, Detail and speed, Check and apply. The defaults are fine for most prints. On Detail and speed, wait for the times to fill in, or pick the one marked Fastest.
 4. Click Apply and slice.
 5. After slicing, "Why fine or coarse?" in the sidebar shows which layer ranges went coarse and why.
 
@@ -141,19 +153,22 @@ Or skip all of that: export the G-code and print from a USB stick or SD card.
 
 Still working on a handful of small issues, mainly:
 
-- Slim, Strong and Hybrid tree supports still need the support body on the fine nozzle. Organic and Normal supports work on either nozzle.
-- Rafts work in Feature Split, with the body on either nozzle. Body Split can't print on a raft yet.
+- Feature Split uses the split setup applies for now: walls, top and bottom surfaces and solid infill on the fine nozzle, sparse infill on the coarse one. More is planned for v1.2.
+- Slim, Strong and Hybrid tree supports need the support body on the fine nozzle. Organic trees can have the body on the coarse nozzle only when the interface is on the fine nozzle. Normal supports work with the body on either nozzle.
+- Under round overhangs, like the bottom of a sphere, the coarse nozzle can lay some support and interface layers at about 0.1 mm, thinner than its usual minimum.
+- On small parts, a support body on the coarse nozzle can be slower than printing everything on one nozzle, because of the extra nozzle changes. Setup's times show it.
+- Rafts work in Feature Split, with the body on either nozzle, except a raft with its body on the coarse nozzle on the MN Feature 0.2-0.6 0.08-0.24 preset, which fails to slice for now. Body Split can't print on a raft yet.
 - PLA as the main material on one nozzle and PETG on the other is refused, because the prime tower can't join them. A PETG support interface is fine.
 - Some settings don't fit the layer grid (adaptive layer height, spiral vase, Arachne walls and a few others). Cadence refuses them with a message that names the setting.
 
-The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.md) and [Supported](docs/SUPPORTED.md#known-issues).
+The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.1.md) and [Supported](docs/SUPPORTED.md#known-issues).
 
 ## Other docs
 
 - [How it works](docs/HOW-IT-WORKS.md): the layer grid, nozzle changes, the prime tower, the time check, Feature Split, Body Split and beams
 - [Supported](docs/SUPPORTED.md): printers, nozzle pairs, flow types, materials, presets and known issues
 - [Privacy](docs/PRIVACY.md): every network call the app can make, and what's off by default
-- Release notes: [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
+- Release notes: [v1.1.1](docs/RELEASE-NOTES-v1.1.1.md), [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
 
 ## Bugs
 
@@ -185,4 +200,4 @@ It's built on OrcaSlicer and the slicers it came from, and nearly everything in 
 
 Thanks and enjoy,
 
-- HMITCHR
+HMITCHR

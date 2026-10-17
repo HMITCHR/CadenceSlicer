@@ -2,11 +2,11 @@
 
 This page is for people who already know how slicing works and want to know what Cadence does differently. If you just want to print something, the [README](../README.md#first-print) has the short version.
 
-In short, a multi-nozzle printer with two different nozzle sizes gets one shared Z grid, each region of the model is sliced only at its own nozzle's planes, and the slicer checks that every coarse band actually saves time before it keeps it.
+In short, a multi-nozzle printer with two different nozzle sizes gets one shared Z grid, each region of the model is sliced only at its own nozzle's planes, and the slicer checks that every coarse band saves time before it keeps it.
 
 ## Why bother with two different nozzles
 
-A single global layer height is a compromise when the nozzles differ. Fine enough for a 0.2 means the 0.8 is wasted, and thick enough for the 0.8 means the 0.2 can't do its job. OrcaSlicer and PrusaSlicer already let you mix nozzle sizes on multi-nozzle printers, and PrusaSlicer's "combine infill every n layers" and Cura's infill layer thickness let infill print thicker than the walls. I wanted each nozzle to really have its own layer height, with its own limits, for any feature or any part, not only infill.
+A single global layer height is a compromise when the nozzles differ. Fine enough for a 0.2 means the 0.8 is wasted, and thick enough for the 0.8 means the 0.2 can't do its job. OrcaSlicer and PrusaSlicer already let you mix nozzle sizes on multi-nozzle printers, and PrusaSlicer's "combine infill every n layers" and Cura's infill layer thickness let infill print thicker than the walls. I wanted each nozzle to really have its own layer height, with its own limits. Body Split does that for whole parts. Feature Split does it for sparse infill and supports.
 
 Reasons you might want that:
 
@@ -14,7 +14,7 @@ Reasons you might want that:
 - Bigger nozzles lay wider, thicker lines that bond better layer to layer. Body Split lets a structural part print coarse and strong where needed while letting regions that might need more fidelity, like hinges or text, print with the smaller nozzle.
 - Small threads, hinges, snap fits, clips or embossed text on an otherwise large, simple part.
 - Abrasive or filled filaments (CF, GF) do better through a bigger nozzle, and the other nozzle can stay small for detail in a different material. With Body Split, each part can be its own material as well as its own layer height.
-- Fast, coarse support bodies with a fine interface where they touch the part, including a different interface material.
+- Coarse support bodies with a fine interface where they touch the part, including a different interface material. On small parts this can be slower than one nozzle, so check setup's times.
 - A High Flow hotend on the coarse side for the bulk, a standard one on the fine side.
 
 ## The layer grid
@@ -43,11 +43,11 @@ The setup refuses combinations a nozzle can't print and says which setting is th
 
 Switching happens at band boundaries, not every layer, so a band costs one change pair at most. Within a band the coarse nozzle prints its one layer, and the fine nozzle prints its N.
 
-The prime tower only needs to reach the last change, so it stops growing once the switching stops. It sizes its own footprint for stability, and builds its levels at the coarse height where it can. The flush and ramming use each nozzle's own diameter and limits, so the 0.2 isn't asked to push a 0.8's flow and the 0.8 isn't starved by a 0.2's.
+The prime tower only needs to reach the last change, so it stops growing once the switching stops. If the time check leaves the coarse nozzle with nothing to print but the plate still changes filament (a PETG interface, say), the tower is OrcaSlicer's own tower, built from the first layer up to the last change. It sizes its own footprint for stability, and builds its levels at the coarse height where it can. The flush and ramming use each nozzle's own diameter and limits, so the 0.2 isn't asked to push a 0.8's flow and the 0.8 isn't starved by a 0.2's.
 
 On Bambu printers this uses Bambu's own prime tower, with per-nozzle flush lines so the printer's change routine knows which physical nozzle it's dealing with. On other multi-tool printers, setup switches the tower to the same generator and the printer's own tool change G-code does the change. Alignment between the two nozzles comes from the printer's own nozzle offset calibration, the same as any two-nozzle print. The slicer works in one coordinate frame and doesn't add an offset of its own.
 
-## It checks that switching actually saves time
+## It checks that switching saves time
 
 Using the coarse nozzle isn't free. Every coarse band needs a nozzle change pair and tower levels, and on small or sparse layers that can cost more than the coarse nozzle saves.
 
@@ -67,11 +67,11 @@ These are estimates from the slicer's own timing, not measurements. The slice to
 
 ### Feature Split
 
-One model, split by feature. By default the fine nozzle prints walls, top and bottom surfaces and solid infill, and the coarse nozzle prints sparse infill. Any feature can go on either nozzle, supports included (see [Supports](#supports)).
+One model, split by feature. The fine nozzle prints walls, top and bottom surfaces and solid infill, and the coarse nozzle prints sparse infill at its own thicker layer height. That's the split setup applies. Supports can go on either nozzle (see [Supports](#supports)).
 
 In practice you get parts that look like they were printed with the fine nozzle at fine layer heights, with substantial time savings compared with single-nozzle prints.
 
-A few settings have to fit the band grid. In Feature Split, sparse infill can be any pattern except lightning or locked zag (gyroid is my preferred infill for everything, and all test prints have used it), and some Orca options that reshape infill or walls per layer don't work here. The full list is under known issues in [Supported](SUPPORTED.md#known-issues). Each one is refused with a plain reason that names the setting.
+A few settings have to fit the band grid. In Feature Split, sparse infill can be any pattern except lightning or locked zag (gyroid is my preferred infill for everything, and all my Feature Split test prints have used it), and some Orca options that reshape infill or walls per layer don't work here. The full list is under known issues in [Supported](SUPPORTED.md#known-issues). Each one is refused with a plain reason that names the setting.
 
 ### Body Split
 
@@ -103,24 +103,28 @@ A few details:
 
 - No interface material goes on the bed or on the tower's first layer. The first layer is the part's own material.
 - Small bits of support body the coarse nozzle can't lay, like the support's first layer and the solid layer right under the interface, go to the fine nozzle. They print in the body's material, which has to be loaded on the fine nozzle too. If the fine nozzle only has the interface material, the slice is refused with a message that says what to load.
-- An interface left at Default follows the body's filament.
+- An interface left at Default follows the body's filament. With Organic trees and the body on the coarse nozzle that would put the interface on the coarse nozzle too, which is refused, so put the interface on a filament on the fine nozzle.
 - In Body Split, the coarse support's thick layers end where the coarse part beside it ends its layers, so the support and the part stay level.
-- Organic tree supports work with the support body on either nozzle. On the coarse nozzle each thick layer takes the tree's shape at its middle, keeps only what stands on the layer below and holds up the layer above within the branch's lean, and stays clear of the part and of the interface. Branches thinner than about one and a half coarse lines, and the tips, go to the fine nozzle. Slim, Strong and Hybrid trees lean and split in ways that don't stack in thick layers, so they're refused with the body on the coarse nozzle.
-- Rafts work in Feature Split with the support body on either nozzle. With the body on the coarse nozzle, the raft starts on the bed at that nozzle's thinnest layer (0.12 mm on a 0.6), so the first layer is higher than set and you get a warning. Rafts are refused in Body Split for now.
+- Organic tree supports work with the support body on either nozzle. With the body on the coarse nozzle, the interface has to be on the fine nozzle. On the coarse nozzle each thick layer takes the tree's shape at its middle, keeps only what stands on the layer below and holds up the layer above within the branch's lean, and stays clear of the part and of the interface. Branches thinner than about one and a half coarse lines, and the tips, go to the fine nozzle. Slim, Strong and Hybrid trees lean and split in ways that don't stack in thick layers, so they're refused with the body on the coarse nozzle.
+- Rafts work in Feature Split with the support body on either nozzle. With the body on the coarse nozzle, the raft starts on the bed at that nozzle's thinnest layer (0.12 mm on a 0.6), so the first layer is higher than set and you get a warning. On the MN Feature 0.2-0.6 0.08-0.24 preset a raft with its body on the coarse nozzle fails to slice for now. Rafts are refused in Body Split for now.
+- Under round overhangs, like the bottom of a sphere, the coarse nozzle can lay some support and interface layers at about 0.1 mm, thinner than its usual minimum.
 
 Some combinations are refused on purpose, with a message that names the setting:
 
 - The support body at Default. At Default the support prints with whichever filament happens to be active, which could be on either nozzle from one layer to the next. Pick a specific filament.
-- An interface on a bigger nozzle than the body. The interface is the part that touches the model, so putting it on the coarser nozzle defeats the point. Set it to Default, or to a filament on the body's nozzle or the finer one.
+- An interface on a bigger nozzle than the body. The interface is the part that touches the model, so putting it on the coarser nozzle defeats the point. Set it to Default, or to a filament on the body's nozzle or the finer one. With tree supports, put it on a filament on the fine nozzle.
+- Organic trees with the body on the coarse nozzle and the interface at Default or on the coarse nozzle. Put the interface on a filament on the fine nozzle, or use Normal support.
 - Slim, Strong or Hybrid trees with the body on the coarse nozzle. Use Organic or Normal supports, or put the support body on the fine nozzle's filament.
 - Any raft in Body Split. Turn the raft off, or turn Body Split off for that plate.
 - A separate prime tower filament. It would add a third filament to every layer of the tower.
 
 You can also put the whole support on the fine nozzle. On some models the print then ends up on the fine nozzle only, the same as one nozzle.
 
+On small parts a support body on the coarse nozzle is often slower than one nozzle, because of the extra nozzle changes. Setup's times show it, so compare before you apply.
+
 ## The first layer
 
-Both nozzles share the first layer. If one nozzle can't lay the base layer or the first layer height, its part starts on the bed with a thicker first cell, and the prime tower lags behind the part to give each nozzle a layer it can print. That's what happens in Body Split when the part on the bed is on the coarse nozzle. Smooth timelapse and wrapping detection need the tower level with the part, so in that case they're refused.
+Both nozzles share the first layer. If one nozzle can't lay the base layer or the first layer height, its part starts on the bed with a thicker first layer, and the prime tower lags behind the part to give each nozzle a layer it can print. That's what happens in Body Split when the part on the bed is on the coarse nozzle. Smooth timelapse and clumping detection need the tower level with the part, so in that case they're refused.
 
 After the start purge line, the nozzle retracts and lifts before its first travel, so it doesn't drag across the purge line on its way to the tower.
 
@@ -134,7 +138,7 @@ The setup wizard asks what prints fine, which material goes on each nozzle, and 
 
 Each option is a full slice, tower and nozzle changes included, so the numbers include everything the per-band check does. On a big model the times fill in over a few minutes. You can move on at any point, and a row without a time says why.
 
-The fastest row is tagged Fastest. When several rows land within about 2 percent of each other they're all tagged "About as fast", and the default pick is the one with the fewest nozzle changes, since that means less tower and priming. If every row is slower than one nozzle only, the page says "On this model, switching nozzles does not save time" and offers "Print with one nozzle instead".
+The fastest row is tagged Fastest. When several rows land within about 2 percent of each other they're all tagged "About as fast", and the default pick is the one with the fewest nozzle changes, since that means less tower and priming. If every row is slower than one nozzle only, the page says "Two nozzles are slower than one on this plate." and offers "Print with one nozzle instead".
 
 The times are for the process preset as it stands when you run setup. If you change speeds or infill afterwards, run setup again or just slice and check.
 

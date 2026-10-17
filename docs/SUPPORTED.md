@@ -158,21 +158,27 @@ Supports and support interfaces work in Feature Split and Body Split. The nozzle
 
 - the support body (Support/raft base) at Default
 - the interface on a bigger nozzle than the support body
-- Slim, Strong and Hybrid tree supports with the support body on the coarse nozzle. Organic trees and Normal supports work there.
-- any raft in Body Split (for now). In Feature Split a raft can have its body on either nozzle.
+- Slim, Strong and Hybrid tree supports with the support body on the coarse nozzle. Normal supports work there, and Organic trees do when the interface is on the fine nozzle.
+- Organic trees with the support body on the coarse nozzle and the interface at Default or on the coarse nozzle
+- any raft in Body Split (for now). In Feature Split a raft can have its body on either nozzle, except as below.
 - support the two nozzles can't print with the filaments loaded, for example a PLA support body next to a PETG interface when the fine nozzle has no PLA. The message says what to load where.
 - a separate prime tower filament
 
 Rough edges I know about:
 
-- With the support body on the coarse nozzle, the supports use more filament than OrcaSlicer's would. On models with lots of small contact areas, the support body on the fine nozzle can be just as fast.
+- With the support body on the coarse nozzle, the supports use more filament than OrcaSlicer's would. On small parts a coarse support body is often slower than printing everything on one nozzle, because of the extra nozzle changes. Setup's times show it.
 - The prime tower can get small blobs in its purge area where coarse and fine layers overlap. The part isn't affected.
-- The coarse support body can get a few thin layers (around 0.1 mm) just under the interface. They print fine, but they're thinner than that nozzle's usual minimum.
+- Under round overhangs, like the bottom of a sphere, the coarse nozzle can lay some support and interface layers at about 0.1 mm, thinner than its usual minimum. Sliced and checked, not print-tested.
 - With the support body on the coarse nozzle, the part can get a wider brim than OrcaSlicer would give it.
 - With Organic trees on the coarse nozzle, the trunks are coarse and the thin tips and twigs print on the fine nozzle, so both nozzles print part of the tree.
 - A raft with its body on the coarse nozzle starts at that nozzle's thinnest layer (0.12 mm on a 0.6), higher than the first layer you set, and you get a warning. Sliced and checked, not print-tested yet.
+- A raft with its body on the coarse nozzle fails to slice on the MN Feature 0.2-0.6 0.08-0.24 preset, with an internal prime tower message. Use another preset for a raft for now.
 - OrcaSlicer itself prints one top interface layer when two are set. Cadence inherits that.
-- Setup suggests 3 interface layers for a different-material interface, whatever the layer height. At 0.08 mm fine layers that makes a very thin PETG layer, and the tree tips can show through on the underside Use 4 interface layers when the fine layers are under 0.1 mm.
+- Setup suggests 3 interface layers for a different-material interface, whatever the layer height. At 0.08 mm fine layers that makes a very thin PETG layer, and the tree tips can show through on the underside. Use 4 interface layers when the fine layers are under 0.1 mm.
+
+### Feature Split uses setup's split
+
+For now Feature Split prints the walls, top and bottom surfaces and solid infill on the fine nozzle, and the sparse infill on the coarse nozzle at its own layer height. That's the split setup applies. More is planned for v1.2.
 
 ### Small prints and the prime tower
 
@@ -181,7 +187,7 @@ On small parts the prime tower can use more filament and time than the part. On 
 Two things make the tower bigger than you might expect:
 
 - A support interface in a different material (PETG under PLA) gets its own part of the tower for the full height, even if it's only used for a few layers near the top.
-- A first layer thinner than the coarse nozzle's minimum (0.10 on a 0.6) means the fine nozzle lays the tower's first layer and brim, which is slow. On my 0.2/0.6 test plate, a 0.12 first layer was about 8 minutes faster.
+- A first layer thinner than the coarse nozzle's minimum (0.12 on a 0.6) means the fine nozzle lays the tower's first layer and brim, which is slow. On my 0.2/0.6 test plate, a 0.12 first layer was about 8 minutes faster.
 
 Feature Split can also be slower than one nozzle when the support body is on a different nozzle from the part, because most layers then change nozzle. Setup's times show it, so check before you apply.
 
