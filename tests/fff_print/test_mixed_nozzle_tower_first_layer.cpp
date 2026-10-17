@@ -236,11 +236,15 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
 // on layer 1) and filament 2 on the coarse nozzle, whose first layer ends at the second fine layer.
 CadenceTest::Facts slice_fine_switch_on_layer_one(double coarse_d, double coarse_min, double coarse_max, double fine, double coarse,
                                                   bool swapped = false, std::vector<int> filaments = {1, 3, 2},
-                                                  double fine_lift = 0., WipeTowerWallType wall_type = wtwRib)
+                                                  double fine_lift = 0., WipeTowerWallType wall_type = wtwRib,
+                                                  double first_layer = 0.)
 {
     CadenceTest::Scene scene;
     scene.config = four_filament_body_config(coarse_d, coarse_min, coarse_max, fine, coarse);
     scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wall_type));
+    // Zero keeps the first layer at the fine height.
+    if (first_layer > 0.)
+        scene.config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(first_layer));
     if (swapped) {
         scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{coarse_d, 0.2});
         scene.config.set_key_value("min_layer_height", new ConfigOptionFloats{coarse_min, 0.04});
@@ -548,6 +552,99 @@ TEST_CASE("A coarse body that starts above an empty first layer still gets the p
     CAPTURE(changes, primed);
     CHECK(changes > 0);
     CHECK(primed == changes);
+}
+
+// The first layer of the exported G-code: its height tag and whether anything is extruded on it, and
+// whether the tower's first road is on it.
+struct FirstGcodeLayer {
+    double z            = 0.;
+    bool   extrudes     = false;
+    bool   tower        = false;
+    bool   tower_before = false; // a tower road before the first layer change
+};
+
+static FirstGcodeLayer first_gcode_layer(const std::string &gcode)
+{
+    FirstGcodeLayer out;
+    std::istringstream lines(gcode);
+    std::string line;
+    int layer = 0;
+    while (std::getline(lines, line)) {
+        if (line.rfind("; CHANGE_LAYER", 0) == 0) {
+            if (++layer > 1)
+                break;
+            continue;
+        }
+        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; FEATURE: Prime tower", 0) == 0)
+            (layer == 0 ? out.tower_before : out.tower) = true;
+        if (layer != 1)
+            continue;
+        if (line.rfind("; Z_HEIGHT: ", 0) == 0)
+            out.z = std::atof(line.c_str() + 12);
+        else if (line.rfind(";Z:", 0) == 0)
+            out.z = std::atof(line.c_str() + 3);
+        else if (line.rfind("G1 ", 0) == 0 || line.rfind("G2 ", 0) == 0 || line.rfind("G3 ", 0) == 0) {
+            // A road: a move in X or Y that extrudes (an unretract alone is not one).
+            const size_t e = line.find(" E");
+            const bool moves = line.find(" X") < e || line.find(" Y") < e;
+            if (e != std::string::npos && moves && line.find(';') > e && std::atof(line.c_str() + e + 2) > 0.)
+                out.extrudes = true;
+        }
+    }
+    return out;
+}
+
+// Body Split 0.2/0.8 on the tiny-text plate: text up on the boxes, only the 0.8's boxes on the bed.
+// The 0.8 cannot lay the 0.10 mm first layer, so its boxes start with a 0.18 mm first cell. The
+// G-code's first layer was then empty (a layer change and a timelapse photo at Z 0.10) and the
+// part and the tower started on the second. The print must start with the layer that lays the
+// first cell, the tower and its brim, at a height the coarse nozzle can lay. Pairs whose coarse
+// nozzle lays the first layer itself are unchanged.
+TEST_CASE("Body Split: the first G-code layer prints the coarse body's first cell, the tower and its brim",
+          "[TestRebuild][TowerFirstLayer][FirstGcodeLayer]")
+{
+    struct Pair { const char *name; double coarse_d, coarse_min, coarse_max, first, fine, coarse; bool swapped; };
+    const Pair pair = GENERATE(
+        // MN Body 0.2-0.8 Standard 0.08-0.32: first cell 0.18 over an empty 0.10 first layer.
+        Pair{"0.2/0.8 Standard", 0.8, 0.16, 0.56, 0.10, 0.08, 0.32, false},
+        Pair{"0.8/0.2, fine on the right", 0.8, 0.16, 0.56, 0.10, 0.08, 0.32, true},
+        // MN Body 0.2-0.6 Fine 0.10-0.30: the 0.6 cannot lay 0.10 either, first cell 0.20.
+        Pair{"0.2/0.6 Fine", 0.6, 0.12, 0.42, 0.10, 0.10, 0.30, false},
+        // MN Body 0.2-0.6 Standard 0.12-0.36 and 0.2-0.4 Standard 0.10-0.20: the coarse nozzle lays
+        // the first layer itself.
+        Pair{"0.2/0.6 Standard", 0.6, 0.12, 0.42, 0.12, 0.12, 0.36, false},
+        Pair{"0.2/0.4 Standard", 0.4, 0.08, 0.28, 0.10, 0.10, 0.20, false});
+    CAPTURE(pair.name);
+    // The coarse body stands on the bed; the fine body starts 1.2 mm up.
+    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(pair.coarse_d, pair.coarse_min, pair.coarse_max, pair.fine,
+                                                                    pair.coarse, pair.swapped, {2, 1}, 1.2, wtwRib, pair.first);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    dump_gcode(std::string("first-gcode-layer-") + (pair.swapped ? "swapped-" : "") + std::to_string(int(pair.coarse_d * 10)) +
+               "-" + std::to_string(int(std::lround(pair.first * 100))), facts.gcode);
+
+    double first_model_z = 1e9;
+    for (const Move &move : facts.moves)
+        if (CadenceTest::model_road(move))
+            first_model_z = std::min(first_model_z, double(move.position.z()));
+    const FirstGcodeLayer first = first_gcode_layer(facts.gcode);
+    const TowerBedAudit audit = audit_tower_bed(facts, first_model_z);
+    INFO(audit.levels);
+    CAPTURE(first.z, first.extrudes, first.tower, first.tower_before, first_model_z, audit.first_z,
+            audit.first_extent, audit.top_extent);
+    // Something prints on the first layer: the part and the tower both start there.
+    CHECK(first.extrudes);
+    CHECK(std::abs(first.z - first_model_z) < 1e-3);
+    CHECK_FALSE(first.tower_before);
+    CHECK(first.tower);
+    CHECK(std::abs(audit.first_z - first.z) < 1e-3);
+    // Its bed level is wider than the tower above: the brim.
+    CHECK(audit.first_extent > audit.top_extent + 1.);
+    // The coarse nozzle lays it at a height within its own limits, and no thinner than the first layer.
+    CHECK(first.z >= pair.first - 1e-3);
+    CHECK(first.z >= pair.coarse_min - 1e-3);
+    CHECK(first.z <= pair.coarse_max + 1e-3);
 }
 
 // Fine skins on a coarse body on the bed: the body's bottom layers print on the fine nozzle at the

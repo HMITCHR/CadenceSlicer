@@ -6178,6 +6178,14 @@ LayerResult GCode::process_layer(
     if (layer_tools.extruders.empty())
         // Nothing to extrude.
         return result;
+    // Body Split: a body whose nozzle cannot lay the shared first layer starts on the bed with a taller
+    // first cell, printed on a later event layer. When every body on the bed starts that way, the event
+    // layers under those cells print nothing, yet ToolOrdering still gives the first one a tool, so it
+    // came out as an empty first layer (a layer change and a timelapse photo). Skip such layers until
+    // something prints: the print's first layer is then the one that lays the first cells and the tower.
+    if (m_layer_index < 0 && !native_payload && !layer_tools.has_wipe_tower && layer.in_first_layer_band() &&
+        is_mixed_nozzle_body_split(print.config()))
+        return result;
 
     // Extract 1st object_layer and support_layer of this set of layers with an equal print_z.
     coordf_t             print_z       = layer.print_z;
