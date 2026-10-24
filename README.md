@@ -36,7 +36,7 @@ You can print small, crisp lettering on a part that's otherwise printed fast wit
 
 **Feature Split (simplest).** Add the text to the model however you like: raised, engraved, on the top or on a side. Run setup and pick Feature Split. The small nozzle prints every wall and top surface, so the lettering comes out the same as an all-small-nozzle print, while the big nozzle does the infill underneath. On a 60 x 40 mm test sign with 5 mm letters on a 0.2 and 0.6, that was 1 h 21 min against 1 h 45 min all on the 0.2.
 
-**Body Split (text in a second colour).** Add the text as its own part (right click the object, Add part, Text, or load it as a second part), then put the text on the small nozzle's filament and the base on the big nozzle's. You can also paint the lettering onto the base with the small nozzle's filament, or use a text-shaped modifier. The base prints fast at the big nozzle's layer height and the text at the small one's. On the same sign, black text on a green base took about 47 min against 1 h 40 min all on the 0.2.
+**Body Split (text in a second color).** Add the text as its own part (right click the object, Add part, Text, or load it as a second part), then put the text on the small nozzle's filament and the base on the big nozzle's. You can also paint the lettering onto the base with the small nozzle's filament, or use a text-shaped modifier. The base prints fast at the big nozzle's layer height and the text at the small one's. On the same sign, black text on a green base took about 47 min against 1 h 40 min all on the 0.2.
 
 **How small can it go?** The rule of thumb is that a letter's main stroke needs to be at least one line wide: about 0.22 mm on a 0.2, 0.42 mm on a 0.4 and 0.62 mm on a 0.6. That works out to roughly these smallest clean sizes (capital letter height):
 
@@ -161,14 +161,14 @@ Still working on a handful of small issues, mainly:
 - PLA as the main material on one nozzle and PETG on the other is refused, because the prime tower can't join them. A PETG support interface is fine.
 - Some settings don't fit the layer grid (adaptive layer height, spiral vase, Arachne walls and a few others). Cadence refuses them with a message that names the setting.
 
-The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.1.md) and [Supported](docs/SUPPORTED.md#known-issues).
+The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.2.md) and [Supported](docs/SUPPORTED.md#known-issues).
 
 ## Other docs
 
 - [How it works](docs/HOW-IT-WORKS.md): the layer grid, nozzle changes, the prime tower, the time check, Feature Split, Body Split and beams
 - [Supported](docs/SUPPORTED.md): printers, nozzle pairs, flow types, materials, presets and known issues
 - [Privacy](docs/PRIVACY.md): every network call the app can make, and what's off by default
-- Release notes: [v1.1.1](docs/RELEASE-NOTES-v1.1.1.md), [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
+- Release notes: [v1.1.2](docs/RELEASE-NOTES-v1.1.2.md), [v1.1.1](docs/RELEASE-NOTES-v1.1.1.md), [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
 
 ## Bugs
 

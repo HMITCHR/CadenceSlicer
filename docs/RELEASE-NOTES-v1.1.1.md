@@ -22,7 +22,7 @@ A small update with a prime tower fix and a few smaller ones.
 
 ## Known issues
 
-- Feature Split uses the split setup applies for now. More is planned for v1.2.
+- Feature Split uses setup's default settings for now. More is planned for v1.2.
 - Organic trees with the support body on the big nozzle need the interface on the small nozzle. Slim, Strong and Hybrid trees need the support body on the small nozzle.
 - A raft with its body on the big nozzle fails to slice on the MN Feature 0.2-0.6 0.08-0.24 preset. Body Split can't print on a raft yet.
 - Under round overhangs the big nozzle can lay some support layers at about 0.1 mm, thinner than its usual minimum.
