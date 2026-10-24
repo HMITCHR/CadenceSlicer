@@ -7370,8 +7370,12 @@ void Print::select_feature_infill_by_time()
         const PlanCost plan = price_plan(0);
         const PlanCost fine = price_plan(kept.size());
         // The plan has to win by more than the estimate can be trusted to. Its error grows with the
-        // print, so the margin is a share of the plan, and never under a minute.
-        const double margin_seconds = std::max(60., 0.02 * plan.total());
+        // work the two plans price differently, so the margin is a share of that, and never under a
+        // minute. Tower and switch time the all fine plan pays as well, such as the filament changes
+        // a painted part makes on the fine nozzle every layer, is in both totals and cannot tip the
+        // comparison. Counted in the margin it outweighed the coarse saving and sent every band fine.
+        const double shared_seconds = std::min(plan.tower, fine.tower) + std::min(plan.switches, fine.switches);
+        const double margin_seconds = std::max(60., 0.02 * (plan.total() - shared_seconds));
         // The tower only has to reach the last switch, so a band above the one below it carries the
         // tower levels between the two. The best plan is looked for among the ones that send the
         // top bands fine, one more at a time: an isolated high band, or a cluster of them, whose

@@ -175,6 +175,14 @@ bool reset_mixed_nozzle_setup_for_new_project(DynamicPrintConfig &project);
 // limits from the previous config, then reset the setup keys.
 bool apply_mixed_nozzle_new_project(DynamicPrintConfig &project, const DynamicPrintConfig &previous);
 
+// Writes a painted (1-based) filament into the six feature filament ids of a painted region copied
+// from its parent. Outside Feature Split all six take it, as in stock. Under Feature Split (MC-6)
+// only the features the fine nozzle prints take it: outer and inner walls, top and bottom surfaces
+// and internal solid infill, each only when the parent's filament for it is not on the coarse
+// (widest) nozzle. Sparse infill always keeps the parent's filament; the coarse core is the point
+// of the mode.
+void apply_painted_filament(PrintRegionConfig &region, unsigned int painted_filament, const PrintConfig &config);
+
 // Whether the two physical tools print the same material (type, vendor and colour), for flush
 // volume. False when fewer than two tools are populated or one tool carries several filaments.
 bool mixed_nozzle_same_material_pair(const PrintConfig &config);

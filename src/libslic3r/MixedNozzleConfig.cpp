@@ -1473,6 +1473,33 @@ std::optional<double> body_split_object_reference_nozzle(
     return resolve_body_split_reference_nozzle(config, base_cadence, assignments);
 }
 
+void apply_painted_filament(PrintRegionConfig &region, unsigned int painted_filament, const PrintConfig &config)
+{
+    ConfigOptionInt *fine_features[] = {
+        &region.outer_wall_filament_id,     &region.inner_wall_filament_id,
+        &region.internal_solid_filament_id, &region.top_surface_filament_id,
+        &region.bottom_surface_filament_id,
+    };
+    if (! is_mixed_nozzle_feature_split(config)) {
+        for (ConfigOptionInt *feature : fine_features)
+            feature->value = int(painted_filament);
+        region.sparse_infill_filament_id.value = int(painted_filament);
+        return;
+    }
+    // Feature Split: sparse infill is never painted.
+    // The widest installed nozzle, by the real filament map; -1 when the nozzles are all one size.
+    const int coarse_extruder = mixed_nozzle_tower_coarse_extruder(config);
+    const auto on_coarse_nozzle = [&config, coarse_extruder](int filament) {
+        if (coarse_extruder < 0 || filament <= 0)
+            return false;
+        const std::optional<size_t> extruder = physical_extruder_for_filament(config, unsigned(filament - 1));
+        return extruder && int(*extruder) == coarse_extruder;
+    };
+    for (ConfigOptionInt *feature : fine_features)
+        if (! on_coarse_nozzle(feature->value))
+            feature->value = int(painted_filament);
+}
+
 bool mixed_nozzle_same_material_pair(const PrintConfig &config)
 {
     std::array<std::optional<size_t>, 2> per_tool_filament;

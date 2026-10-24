@@ -767,7 +767,8 @@ bool verify_update_print_object_regions(
     bool                                regional_layering_active,
     PrintObjectRegions                 &print_object_regions,
     const std::function<void(const PrintRegionConfig&, const PrintRegionConfig&, const t_config_option_keys&)> &callback_invalidate,
-    std::vector<int>& variant_index)
+    std::vector<int>& variant_index,
+    const PrintConfig                  &print_config)
 {
     // Sort by ModelVolume ID.
     model_volumes_sort_by_id(model_volumes);
@@ -844,12 +845,7 @@ bool verify_update_print_object_regions(
         for (const PrintObjectRegions::PaintedRegion &region : layer_range.painted_regions) {
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
-            cfg.outer_wall_filament_id.value = region.extruder_id;
-            cfg.inner_wall_filament_id.value = region.extruder_id;
-            cfg.internal_solid_filament_id.value = region.extruder_id;
-            cfg.top_surface_filament_id.value = region.extruder_id;
-            cfg.bottom_surface_filament_id.value = region.extruder_id;
-            cfg.sparse_infill_filament_id.value       = region.extruder_id;
+            apply_painted_filament(cfg, region.extruder_id, print_config);
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -995,7 +991,8 @@ static PrintObjectRegions* generate_print_object_regions(
     const float                                  xy_contour_compensation,
     const std::vector<unsigned int>             &painting_extruders,
     std::vector<int>                            &variant_index,
-    const bool                                   has_painted_fuzzy_skin)
+    const bool                                   has_painted_fuzzy_skin,
+    const PrintConfig                           &print_config)
 {
     // Reuse the old object or generate a new one.
     auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
@@ -1094,12 +1091,7 @@ static PrintObjectRegions* generate_print_object_regions(
                 if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
                     parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) {
                     PrintRegionConfig cfg = parent_region.region->config();
-                    cfg.outer_wall_filament_id.value = painted_extruder_id;
-                    cfg.inner_wall_filament_id.value = painted_extruder_id;
-                    cfg.internal_solid_filament_id.value = painted_extruder_id;
-                    cfg.top_surface_filament_id.value = painted_extruder_id;
-                    cfg.bottom_surface_filament_id.value = painted_extruder_id;
-                    cfg.sparse_infill_filament_id.value       = painted_extruder_id;
+                    apply_painted_filament(cfg, painted_extruder_id, print_config);
                     layer_range.painted_regions.push_back({ painted_extruder_id, parent_region_id, get_create_region(std::move(cfg))});
                 }
         // Sort the regions by parent region::print_object_region_id() and extruder_id to help the slicing algorithm when applying MM segmentation.
@@ -1925,7 +1917,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                             if ((*it)->m_shared_regions != nullptr)
                                 update_apply_status((*it)->invalidate_state_by_config_options(old_config, new_config, diff_keys));
                     },
-                    print_variant_index)) {
+                    print_variant_index,
+                    m_config)) {
                 // Regions are valid, just keep them.
             } else {
                 // Regions were reshuffled.
@@ -1949,7 +1942,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_contour_compensation.value),
                 painting_extruders,
                 print_variant_index,
-                print_object.is_fuzzy_skin_painted());
+                print_object.is_fuzzy_skin_painted(),
+                m_config);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
             if ((*it)->m_shared_regions) {

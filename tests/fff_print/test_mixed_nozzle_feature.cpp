@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <set>
 #include <sstream>
 
@@ -387,4 +388,117 @@ TEST_CASE("A tapered feature print preserves its fine exterior and finishes abov
     CAPTURE(gap_roads, wrong_gap_tool);
     CHECK(gap_roads > 0);
     CHECK(wrong_gap_tool == 0);
+}
+
+// MC-6. Under Feature Split a painted colour replaces the filament only on the features the fine
+// nozzle prints. The coarse nozzle's sparse infill keeps the part's own coarse filament.
+TEST_CASE("A painted colour in Feature Split keeps the coarse sparse infill", "[TestRebuild][FeatureScene]")
+{
+    const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
+    Scene scene = feature_cube();
+    scene.config.set_key_value("top_shell_layers", new ConfigOptionInt(3));
+    scene.config.set_key_value("top_shell_thickness", new ConfigOptionFloat(0.));
+    const auto populate = scene.populate;
+    scene.populate = [populate](Model &model, Print &print, const DynamicPrintConfig &config) {
+        populate(model, print, config);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+        std::vector<int> every_facet(volume.mesh().its.indices.size());
+        std::iota(every_facet.begin(), every_facet.end(), 0);
+        paint_cadence_facets(volume, every_facet, EnforcerBlockerType(paint_slot));
+        print.apply(model, config);
+    };
+    const Facts painted = slice(scene);
+    require_export(painted);
+
+    size_t fine_walls = 0, coarse_core = 0, fine_skins = 0;
+    std::array<size_t, 4> bad{};
+    std::string first_bad;
+    for (const auto &move : painted.moves) {
+        if (!model_road(move))
+            continue;
+        if (move.extrusion_role == erExternalPerimeter || move.extrusion_role == erPerimeter) {
+            count_bad(move.physical_tool_id == 0 && move.extruder_id == paint_slot - 1, bad[0], first_bad, "painted wall", move);
+            ++fine_walls;
+        }
+        if (move.extrusion_role == erTopSolidInfill || move.extrusion_role == erSolidInfill ||
+            move.extrusion_role == erBottomSurface) {
+            count_bad(move.physical_tool_id == 0 && move.extruder_id == paint_slot - 1, bad[1], first_bad, "painted skin", move);
+            ++fine_skins;
+        }
+        if (move.physical_tool_id == 1) {
+            count_bad(move.extrusion_role == erInternalInfill && move.extruder_id == 6, bad[2], first_bad, "coarse core", move);
+            ++coarse_core;
+        }
+        // A sparse layer the hand-off leaves fine-owned falls back to the fine wall filament.
+        if (move.extrusion_role == erInternalInfill && move.physical_tool_id == 0)
+            count_bad(move.extruder_id == paint_slot - 1, bad[3], first_bad, "fine-owned sparse", move);
+    }
+    CAPTURE(bad, first_bad, fine_walls, fine_skins, coarse_core);
+    for (size_t count : bad)
+        CHECK(count == 0);
+    CHECK(fine_walls > 0);
+    CHECK(fine_skins > 0);
+    CHECK(coarse_core > 0);
+}
+
+// MC-6. Paint on one side of a part puts two filaments on the fine nozzle, so it changes filament on
+// every layer whether the sparse infill goes coarse or not. Those changes are in both plans the
+// whole-print check compares, so they must not decide it: the coarse core still saves time and stays.
+TEST_CASE("Paint on one side keeps the coarse sparse infill when every layer changes colour", "[TestRebuild][FeatureScene]")
+{
+    const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
+    Scene scene = feature_cube();
+    // A filament change on one nozzle loads and unloads; a nozzle change keeps both loaded. The
+    // colour changes on the fine nozzle are slow, the hand-off to the coarse nozzle stays free.
+    scene.config.set_key_value("machine_load_filament_time", new ConfigOptionFloat(500.));
+    scene.config.set_key_value("machine_unload_filament_time", new ConfigOptionFloat(500.));
+    const auto populate = scene.populate;
+    scene.populate = [populate](Model &model, Print &print, const DynamicPrintConfig &config) {
+        populate(model, print, config);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+        const indexed_triangle_set &its = volume.mesh().its;
+        std::vector<int> side;
+        for (size_t facet = 0; facet < its.indices.size(); ++facet) {
+            const Vec3f &a = its.vertices[its.indices[facet](0)];
+            const Vec3f &b = its.vertices[its.indices[facet](1)];
+            const Vec3f &c = its.vertices[its.indices[facet](2)];
+            if ((b - a).cross(c - a).normalized().x() > .9f)
+                side.push_back(int(facet));
+        }
+        REQUIRE_FALSE(side.empty());
+        paint_cadence_facets(volume, side, EnforcerBlockerType(paint_slot));
+        print.apply(model, config);
+    };
+    const Facts painted = slice(scene);
+    require_export(painted);
+
+    size_t painted_walls = 0, plain_walls = 0, coarse_core = 0;
+    std::set<unsigned int> layers_with_both;
+    std::map<unsigned int, std::set<unsigned int>> wall_slots_by_layer;
+    std::array<size_t, 2> bad{};
+    std::string first_bad;
+    for (const auto &move : painted.moves) {
+        if (!model_road(move))
+            continue;
+        if (move.extrusion_role == erExternalPerimeter) {
+            count_bad(move.physical_tool_id == 0, bad[0], first_bad, "wall tool", move);
+            ++(move.extruder_id == paint_slot - 1 ? painted_walls : plain_walls);
+            wall_slots_by_layer[move.layer_id].insert(move.extruder_id);
+        }
+        if (move.physical_tool_id == 1) {
+            count_bad(move.extrusion_role == erInternalInfill && move.extruder_id == 6, bad[1], first_bad, "coarse core", move);
+            ++coarse_core;
+        }
+    }
+    for (const auto &[layer, slots] : wall_slots_by_layer)
+        if (slots.size() > 1)
+            layers_with_both.insert(layer);
+    CAPTURE(bad, first_bad, painted_walls, plain_walls, coarse_core, layers_with_both.size());
+    for (size_t count : bad)
+        CHECK(count == 0);
+    // The paint really changes colour on the fine nozzle layer after layer.
+    REQUIRE(painted_walls > 0);
+    REQUIRE(plain_walls > 0);
+    REQUIRE(layers_with_both.size() > 3);
+    CHECK(coarse_core > 0);
 }
