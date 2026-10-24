@@ -1228,7 +1228,7 @@ std::vector<BodySplitRegionAssignment> collect_body_split_volume_assignments(
             if (filament_1based > 0)
                 assignments.push_back({cadence, size_t(filament_1based - 1)});
     }
-    // A modifier that names a filament prints its area of a body with it, like a painted colour.
+    // A modifier that names a filament prints its area of a body with it, like a painted color.
     for (const ModelVolume *volume : model_object.volumes)
         if (volume != nullptr && volume->is_modifier() && volume->config.has("extruder") && volume->config.extruder() > 0)
             assignments.push_back({base_cadence, size_t(volume->config.extruder() - 1)});
@@ -1264,7 +1264,7 @@ std::optional<double> resolve_body_split_child_cadence(const PrintConfig &config
     if (!own_tool || !target_tool)
         return std::nullopt;
 
-    // A colour that stays on the body's physical tool keeps the body's own cadence.
+    // A color that stays on the body's physical tool keeps the body's own cadence.
     if (own_tool.tool->physical_extruder == target_tool.tool->physical_extruder)
         return own_cadence;
 
@@ -1275,8 +1275,8 @@ std::optional<double> resolve_body_split_child_cadence(const PrintConfig &config
                 return std::nullopt;
             target_cadence = assignment.cadence;
         }
-    // A colour no body is bound to prints at the cadence of the bodies on its physical tool, as a
-    // second colour on a nozzle does in Feature Split. Bodies sharing a tool share a cadence; if they
+    // A color no body is bound to prints at the cadence of the bodies on its physical tool, as a
+    // second color on a nozzle does in Feature Split. Bodies sharing a tool share a cadence; if they
     // ever disagree, fail closed.
     if (!target_cadence)
         for (const BodySplitRegionAssignment &assignment : bodies) {
@@ -1318,7 +1318,7 @@ bool is_body_split_object(const PrintConfig &config, const ModelObject &model_ob
 {
     size_t model_parts = 0;
     const ModelVolume *only_part = nullptr;
-    // The physical tools the parts and their painted colours print on. On a toolchanger these
+    // The physical tools the parts and their painted colors print on. On a toolchanger these
     // can be any two of its tools; an object on one tool has nothing to split.
     std::set<size_t> tools_used;
     bool unresolved = false;
@@ -1456,7 +1456,7 @@ std::optional<double> body_split_object_reference_nozzle(
         collect_body_split_body_assignments(model_object, base_cadence);
     // A fine painted region on a lone coarse body has no separate fine body binding.
     // Qualify its base cadence through the native resolver, as the ownership projector
-    // does, rather than attributing the coarse parent's height to the painted colour.
+    // does, rather than attributing the coarse parent's height to the painted color.
     const bool has_base = std::any_of(assignments.begin(), assignments.end(),
         [base_cadence](const BodySplitRegionAssignment &entry) {
             return is_approx(entry.cadence, base_cadence);

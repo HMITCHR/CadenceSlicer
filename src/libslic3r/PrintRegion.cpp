@@ -71,7 +71,7 @@ Flow PrintRegion::flow(const PrintObject &object, FlowRole role, double layer_he
         // either step is invalidated. Every input (print map and nozzles, layer height, each volume's
         // binding, cadence and paint) invalidates one of those steps, and every step that calls flow()
         // runs after them, so inside a step, including on TBB workers, flow() only reads the taken value.
-        // That keeps ModelVolume::get_extruders() and its mutable painted-colour cache off worker threads.
+        // That keeps ModelVolume::get_extruders() and its mutable painted-color cache off worker threads.
         // A caller outside a step (validation-time tests) has no value taken yet and derives it here.
         const PrintObject::BodySplitFlowReference &taken = object.body_split_flow_reference();
         const bool body_split_object = is_mixed_nozzle_body_split(print_config) &&

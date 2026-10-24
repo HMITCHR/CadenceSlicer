@@ -349,16 +349,16 @@ std::string wizard_mode_switch_line(MixedNozzleSlicingMode before, MixedNozzleSl
 // Materials 1, Detail and speed 2, Review 3, More options 4.
 bool wizard_off_skips_page(int page);
 
-// One row per material slot with the colour the sidebar's filament combos paint. The index is the
-// slot; a slot with no colour gets the fallback.
-inline constexpr const char *WIZARD_MATERIAL_FALLBACK_COLOUR = "#9E9E9EFF";
+// One row per material slot with the color the sidebar's filament combos paint. The index is the
+// slot; a slot with no color gets the fallback.
+inline constexpr const char *WIZARD_MATERIAL_FALLBACK_COLOR = "#9E9E9EFF";
 struct WizardMaterialRow {
     std::size_t slot {0};
     std::string label;
-    std::string colour;
+    std::string color;
 };
 std::vector<WizardMaterialRow> wizard_material_rows(const std::vector<std::string> &labels,
-                                                    const std::vector<std::string> &filament_colours);
+                                                    const std::vector<std::string> &filament_colors);
 
 // Only the chosen finish's eligible ratios, each on a short label; excluded ratios are explained in
 // one sentence, and the single-nozzle baseline is its own line.

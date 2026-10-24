@@ -1157,7 +1157,7 @@ static void cut_segmented_layers(const std::vector<ExPolygons>        &input_exp
         for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
             throw_on_cancel_callback();
             // Index 0 is the unpainted part of the layer. When paint covers the whole outline, the cut
-            // would hand the interior back to the part's own filament, a colour that layer does not
+            // would hand the interior back to the part's own filament, a color that layer does not
             // print otherwise: one more filament change and purge on that layer. Such a layer keeps
             // its paint all the way in.
             if (keep_layers_without_unpainted && !segmented_regions[layer_idx].empty() &&

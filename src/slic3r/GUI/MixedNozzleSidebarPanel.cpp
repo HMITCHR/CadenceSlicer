@@ -1543,7 +1543,7 @@ void MixedNozzleSidebarPanel::msw_rescale()
 void MixedNozzleSidebarPanel::sys_color_changed()
 {
     // A theme change is not a model change, so the signature would not move on its own. Force one
-    // rebuild so every re-created child picks the new colours up.
+    // rebuild so every re-created child picks the new colors up.
     m_signature = mixed_nozzle_sidebar_stale_signature();
     Refresh();
 }

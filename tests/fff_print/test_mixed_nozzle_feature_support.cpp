@@ -155,7 +155,7 @@ TEST_CASE("Feature Split support and raft retain their recommended object-grid Z
         config.set_key_value("filament_diameter", new ConfigOptionFloats{1.75, 1.75, 1.75});
         config.set_key_value("filament_map", new ConfigOptionInts{1, 2, 1});
         config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(18, 0.));
-        // Not resized with the other per-filament values; export needs a colour per filament.
+        // Not resized with the other per-filament values; export needs a color per filament.
         config.set_key_value("filament_colour", new ConfigOptionStrings{"#FF0000", "#0000FF", "#00FF00"});
         config.set_key_value("filament_self_index", new ConfigOptionInts{1, 2, 3});
         config.set_key_value("filament_volume_map", new ConfigOptionInts{0, 0, 0});

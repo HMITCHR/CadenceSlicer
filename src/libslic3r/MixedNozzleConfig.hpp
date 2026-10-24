@@ -183,7 +183,7 @@ bool apply_mixed_nozzle_new_project(DynamicPrintConfig &project, const DynamicPr
 // of the mode.
 void apply_painted_filament(PrintRegionConfig &region, unsigned int painted_filament, const PrintConfig &config);
 
-// Whether the two physical tools print the same material (type, vendor and colour), for flush
+// Whether the two physical tools print the same material (type, vendor and color), for flush
 // volume. False when fewer than two tools are populated or one tool carries several filaments.
 bool mixed_nozzle_same_material_pair(const PrintConfig &config);
 
@@ -347,16 +347,16 @@ struct BodySplitRegionAssignment {
 };
 
 // Per-body filament/cadence facts for Body Split, one per logical filament actually on each model
-// part (its extruder plus painted colours), from ModelVolume::get_extruders(), and one per modifier
-// that names a filament. Printing regions would also count painted-colour ghost regions.
+// part (its extruder plus painted colors), from ModelVolume::get_extruders(), and one per modifier
+// that names a filament. Printing regions would also count painted-color ghost regions.
 std::vector<BodySplitRegionAssignment> collect_body_split_volume_assignments(
     const ModelObject &model_object, double base_cadence);
 
-// Explicit body bindings only; painted colours do not inherit their parent body cadence.
+// Explicit body bindings only; painted colors do not inherit their parent body cadence.
 std::vector<BodySplitRegionAssignment> collect_body_split_body_assignments(
     const ModelObject &model_object, double base_cadence);
 
-// The layer height a painted colour or a modifier's filament prints at inside a Body Split body whose
+// The layer height a painted color or a modifier's filament prints at inside a Body Split body whose
 // own filament and cadence are given: the body's cadence while it stays on the body's nozzle, otherwise
 // the cadence of the bodies on its nozzle, or, with no such body, the base height when that pairs with
 // the body's cadence. Empty when no qualified height exists. Slicing and admission both ask this.
@@ -487,7 +487,7 @@ std::optional<double> resolve_body_split_reference_nozzle(
     const PrintConfig &config, double base_cadence,
     const std::vector<BodySplitRegionAssignment> &regions);
 
-// Body Split reference nozzle of one object, from its body bindings plus painted colours
+// Body Split reference nozzle of one object, from its body bindings plus painted colors
 // qualifying at the base cadence. Not thread-safe: get_extruders() may refresh a mutable cache.
 std::optional<double> body_split_object_reference_nozzle(
     const PrintConfig &config, const ModelObject &model_object, double base_cadence);

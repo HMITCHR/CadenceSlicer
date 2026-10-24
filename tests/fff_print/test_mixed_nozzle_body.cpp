@@ -198,7 +198,7 @@ TEST_CASE("Body Split keeps physical ownership when the nozzle slots are reverse
     CHECK(coarse_tools == std::set<unsigned>{0});
 }
 
-TEST_CASE("Body Split painting preserves a shared-nozzle colour without extra physical changes", "[TestRebuild][BodySplit]")
+TEST_CASE("Body Split painting preserves a shared-nozzle color without extra physical changes", "[TestRebuild][BodySplit]")
 {
     DynamicPrintConfig config = coupon_config_with_filaments(3);
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
@@ -885,7 +885,7 @@ TEST_CASE("Body Split tower deposits at the planned footprint and stays on its p
     CHECK(exit.crossings == 0);
 }
 
-TEST_CASE("Two coarse colours build Body Split tower levels at the coarse height after fine roads", "[TestRebuild][BodySplit]")
+TEST_CASE("Two coarse colors build Body Split tower levels at the coarse height after fine roads", "[TestRebuild][BodySplit]")
 {
     DynamicPrintConfig config = paint_cadence_tower_config();
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});

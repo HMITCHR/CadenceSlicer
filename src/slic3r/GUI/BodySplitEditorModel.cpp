@@ -164,7 +164,7 @@ BodySplitEditorDiagnostic qualify_rows(std::vector<BodySplitEditorRow> &rows,
         return BodySplitEditorDiagnostic::ExactlyTwoModelPartsRequired;
 
     // Qualify actual painted usage without adding fictional model bodies to the editor.
-    // A cross-tool colour takes its explicitly assigned body's cadence, or the native
+    // A cross-tool color takes its explicitly assigned body's cadence, or the native
     // base cadence when it paints the sole coarse body. Ghost PrintRegions never enter
     // this list: painted_logical_filaments comes directly from the model facets.
     std::vector<BodySplitEditorRow> painted_rows;
@@ -191,7 +191,7 @@ BodySplitEditorDiagnostic qualify_rows(std::vector<BodySplitEditorRow> &rows,
                         ambiguous = ambiguous || (cadence && !is_approx(*cadence, body.effective_layer_height));
                         cadence = body.effective_layer_height;
                     }
-                // Mirror the slicer: a colour no body is bound to takes the cadence of the bodies
+                // Mirror the slicer: a color no body is bound to takes the cadence of the bodies
                 // on its own physical tool.
                 if (!cadence)
                     for (const BodySplitEditorRow &body : rows)
@@ -353,7 +353,7 @@ BodySplitEditorModel build_body_split_editor_model(const std::vector<ModelObject
             if (row.logical_filament > 0)
                 row.resolution = resolve_mixed_nozzle_tool(resolver_config, size_t(row.logical_filament - 1),
                                                           MixedNozzleResolveScope::PhysicalToolOnly);
-            // Keep explicitly painted facets even when their colour currently equals
+            // Keep explicitly painted facets even when their color currently equals
             // the body's default; editing that default must not erase their intent.
             for (const size_t painted : volume->get_extruders_from_multi_material_painting())
                 row.painted_logical_filaments.push_back(int(painted + 1));

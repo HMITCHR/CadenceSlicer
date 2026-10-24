@@ -972,8 +972,8 @@ std::vector<unsigned int> Print::extruders(bool conside_custom_gcode) const
 
     if (conside_custom_gcode) {
         //BBS
-        // Size by the filament domain, not the colour vector: a ToolChange past the end of an unset
-        // colour list would otherwise be dropped from the print's extruder set.
+        // Size by the filament domain, not the color vector: a ToolChange past the end of an unset
+        // color list would otherwise be dropped from the print's extruder set.
         int num_extruders = m_config.filament_diameter.size();
         if (m_model.plates_custom_gcodes.find(m_model.curr_plate_index) != m_model.plates_custom_gcodes.end()) {
             for (auto item : m_model.plates_custom_gcodes.at(m_model.curr_plate_index).gcodes) {
@@ -2411,8 +2411,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return is_body_split_object(m_config, *object->model_object());
             }))
             return reject(m_objects.front(), "SRL-A06", "mixed_nozzle_slicing_mode",
-                          "Body Split needs at least one object whose parts, painted colours or modifiers print on both nozzles. "
-                          "Assign a part, a painted colour or a modifier to the other nozzle, or turn Body Split off for this plate.");
+                          "Body Split needs at least one object whose parts, painted colors or modifiers print on both nozzles. "
+                          "Assign a part, a painted color or a modifier to the other nozzle, or turn Body Split off for this plate.");
 
         // A plain object on a Body Split plate is sliced as with the mode off, so the native-grid checks
         // below do not apply. It still gets Feature Split's checks: support and raft must name tools that
@@ -2523,7 +2523,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             [](const ModelVolume *volume) { return volume->is_model_part(); }) == 1;
         // A support blocker or enforcer is not sliced into any region, so it only shapes support.
         // Modifiers and negative parts are admitted: ownership rows come from ordinary region slicing,
-        // so a negative part is cut out of every body and colour, and a modifier's region follows the
+        // so a negative part is cut out of every body and color, and a modifier's region follows the
         // body it sits in.
         if (object->num_printing_regions() < 2)
             return reject(object, "SRL-A07", "mixed_nozzle_slicing_mode", "Body Split needs at least two parts or painted regions that have something to print.");
@@ -2553,7 +2553,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 if (own_resolution && painted_resolution.tool->physical_extruder != own_resolution.tool->physical_extruder &&
                     !is_mixed_nozzle_body_split(m_config))
                     return reject(object, "SRL-A08", "mixed_nozzle_slicing_mode",
-                                  "Every painted colour on a body must print on the same nozzle as that body's own filament.");
+                                  "Every painted color on a body must print on the same nozzle as that body's own filament.");
             }
         }
 
@@ -2649,7 +2649,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject(object, "SRL-A44", region.separated_infills.value ? "separated_infills" : "center_of_surface_pattern",
                               "Separated infill, or infill centred on each model, is not supported by Body Split.");
         }
-        // A colour painted onto a body, or a modifier's area, prints at the cadence slicing gives it, not at
+        // A color painted onto a body, or a modifier's area, prints at the cadence slicing gives it, not at
         // the layer height its region copies from the body: fine paint on a coarse body is laid at the fine
         // height.
         {
@@ -2713,7 +2713,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return reject_unresolved(object, *resolution.diagnostic);
         }
         sort_remove_duplicates(body_physical_extruders);
-        // Every synchronized body's filaments, its own and any painted colours, must resolve onto one
+        // Every synchronized body's filaments, its own and any painted colors, must resolve onto one
         // of the two configured tools, and both tools must be used. On a toolchanger these are the two
         // tools this plate prints on.
         const std::vector<size_t> body_tools = m_config.nozzle_diameter.values.size() > 2 ?
@@ -2723,14 +2723,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                           "Every body's filament must be assigned to one of the two installed nozzles, and both nozzles must be used.");
 
         const double base_cadence = object->config().layer_height.value;
-        // Painted colours contribute tool/material usage above, but do not inherit the
+        // Painted colors contribute tool/material usage above, but do not inherit the
         // parent body's cadence. Cross-tool paint receives its target cadence during native
         // ownership projection; classify the bodies here from their explicit assignments.
         std::vector<BodySplitRegionAssignment> body_cadence_assignments =
             collect_body_split_body_assignments(*model_object, base_cadence);
         // The native painting projector can create a base-height fine region inside one
         // coarse body, and so can a modifier on the fine filament. Qualify only actually painted
-        // colours and modifier filaments with the same resolver used by the projector and
+        // colors and modifier filaments with the same resolver used by the projector and
         // PrintRegion::flow; a ghost region is not evidence of fine usage.
         if (single_painted_body && body_cadence_assignments.size() == 1) {
             const BodySplitRegionAssignment coarse = body_cadence_assignments.front();
@@ -2781,7 +2781,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 coarse_cadence_filament = assignment.logical_filament;
                 coarse_cadence_value = assignment.cadence;
             } else if (integer_ratio >= 2 && tool == coarse_cadence_tool) {
-                // A further coarse-cadence entry on the same physical tool (a painted colour or a second
+                // A further coarse-cadence entry on the same physical tool (a painted color or a second
                 // coarse body) must resolve the same layer height, so the plan's single per-tool band
                 // schedule holds.
                 if (! is_approx(assignment.cadence, coarse_cadence_value))
@@ -2829,7 +2829,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                           "Body Split needs fine bodies at the base layer height and coarse bodies at one shared whole "
                           "multiple of it.");
         }
-        // A second colour on the coarse tool is admitted: it prints at the shared coarse cadence, so the
+        // A second color on the coarse tool is admitted: it prints at the shared coarse cadence, so the
         // band schedule stays one per tool. The ratio, tool distinctness and nozzle ordering come from
         // the shared cadence resolver, whose diagnostic code is reported in this sentence.
         const MixedNozzleCadenceResolution resolved_body_cadence = resolve_mixed_nozzle_cadence(
@@ -3003,7 +3003,7 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // engine also builds a nozzle-level grouping from filament_volume_map and filament_nozzle_map and
         // silently skips it when either is mis-sized, which stale projects can produce. Report it.
         if (m_config.filament_map_mode.value == fmmNozzleManual) {
-            // Size against filament_diameter, never filament_colour: colour is optional UI metadata whose
+            // Size against filament_diameter, never filament_colour: color is optional UI metadata whose
             // stock default is one entry.
             const size_t filament_count = m_config.filament_diameter.size();
             if (m_config.filament_nozzle_map.size() != filament_count || m_config.filament_volume_map.size() != filament_count)
@@ -3025,19 +3025,19 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                                          flush_filaments * flush_filaments * flush_nozzles));
 
         // Run the export's own check early so it cannot fail after the whole slice. append_full_config()
-        // rebuilds the matrix per head from filament_colour and throws unless one colour is declared or
-        // colours^2 entries exist per flush_multiplier head, and it divides by flush_multiplier.size(),
+        // rebuilds the matrix per head from filament_colour and throws unless one color is declared or
+        // colors^2 entries exist per flush_multiplier head, and it divides by flush_multiplier.size(),
         // so an empty vector is refused too. This changes no purge volume, only which configs are refused.
-        const size_t export_colours = m_config.filament_colour.size();
+        const size_t export_colors = m_config.filament_colour.size();
         const size_t export_heads   = m_config.flush_multiplier.size();
         if (export_heads == 0)
             return reject(any_object, "SRL-A40", "flush_multiplier",
                           "The flushing volumes have no multiplier. Open Flushing volumes, set a multiplier, and slice again.");
-        if (export_colours > 1 && m_config.flush_volumes_matrix.size() != export_colours * export_colours * export_heads)
+        if (export_colors > 1 && m_config.flush_volumes_matrix.size() != export_colors * export_colors * export_heads)
             return reject(any_object, "SRL-A40", "flush_volumes_matrix",
                           Slic3r::format("The flushing volumes table has %1% entries, but %2% filaments on %3% nozzles need %4%. Open Flushing volumes and check it.",
-                                         m_config.flush_volumes_matrix.size(), export_colours, export_heads,
-                                         export_colours * export_colours * export_heads));
+                                         m_config.flush_volumes_matrix.size(), export_colors, export_heads,
+                                         export_colors * export_colors * export_heads));
     }
 
     if (nozzles < 2 && extruders.size() > 1) {
@@ -5516,8 +5516,8 @@ std::optional<RegionalBandToolMismatch> Print::find_regional_band_tool_mismatch(
             return RegionalBandToolMismatch{object, 0, unsigned(-1), -1};
         for (size_t region_id = 0; region_id < region_count; ++region_id) {
             // Skip regions with no committed band. PrintApply.cpp creates a painted-sibling region, real or
-            // ghost, for every parent volume and paint colour. A ghost never plans a band and its binding
-            // mirrors the parent's tool, so comparing its own outer_wall_filament_id (the paint colour's
+            // ghost, for every parent volume and paint color. A ghost never plans a band and its binding
+            // mirrors the parent's tool, so comparing its own outer_wall_filament_id (the paint color's
             // filament) against that fails spuriously when both filaments resolve to the same tool. Every
             // real body region is non-empty once slicing succeeds.
             if (grids[region_id].empty())
@@ -5587,7 +5587,7 @@ RegionalLayerPlanExport Print::regional_layer_plan_export() const
                     base_cadence : region.regional_layer_height.value;
                 // A painted region copies its parent body's config, so its regional_layer_height is
                 // the parent's. Its cells follow the cadence the native projection resolved for the
-                // painted colour's own tool (coarse paint on a fine body prints coarse cells), so
+                // painted color's own tool (coarse paint on a fine body prints coarse cells), so
                 // state that one. Body regions keep the configured value unchanged.
                 bool body_region = false;
                 for (const PrintObjectRegions::LayerRangeRegions &layer_range : object.shared_regions()->layer_ranges)
@@ -7544,8 +7544,8 @@ void Print::_make_wipe_tower()
     m_wipe_tower_data.clear();
 
     // BBS
-    // The logical filament domain (filament_diameter), never the optional colour vector: the flush
-    // slices below index by filament id, and an unset colour list would narrow the tower to the first
+    // The logical filament domain (filament_diameter), never the optional color vector: the flush
+    // slices below index by filament id, and an unset color list would narrow the tower to the first
     // filament.
     const unsigned int number_of_extruders = (unsigned int)(m_config.filament_diameter.values.size());
     // Both slices below are blind. A matrix that cannot supply one full

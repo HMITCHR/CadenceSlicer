@@ -214,7 +214,7 @@ void mixed_nozzle_single_nozzle_baseline(Model &model, DynamicPrintConfig &confi
             if (volume == nullptr)
                 continue;
             put_on_fine(volume->config, fine_filament, fine_height);
-            // Colour painting names other materials; one nozzle prints one of them.
+            // Color painting names other materials; one nozzle prints one of them.
             volume->mmu_segmentation_facets.reset();
         }
     }

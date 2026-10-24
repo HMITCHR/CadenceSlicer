@@ -1342,12 +1342,12 @@ void PrintObject::slice_volumes()
 
         // A region owns real per-body geometry only when it is the default (own-filament) region of one of
         // the object's model-part volumes, that is, it appears in some layer_range's volume_regions.
-        // PrintApply.cpp creates a painted region for every parent volume and paint colour, including
-        // ghosts with none of that colour's facets. Those would reach the geometry loop below with empty
+        // PrintApply.cpp creates a painted region for every parent volume and paint color, including
+        // ghosts with none of that color's facets. Those would reach the geometry loop below with empty
         // per-region arrays, and indexing them there crashes.
         std::vector<bool>   is_body_region(region_count, false);
-        // Which non-body regions are colour children and which are modifier regions. A modifier region is
-        // a child of its body and, on a painted object, also a parent that colours are split off.
+        // Which non-body regions are color children and which are modifier regions. A modifier region is
+        // a child of its body and, on a painted object, also a parent that colors are split off.
         std::vector<bool>   is_painted_region(region_count, false);
         std::vector<bool>   is_modifier_region(region_count, false);
         std::vector<size_t> painted_parent_region(region_count, size_t(-1));
@@ -1363,7 +1363,7 @@ void PrintObject::slice_volumes()
                     const PrintObjectRegions::VolumeRegion &parent = layer_range.volume_regions[size_t(painted_region.parent)];
                     if (parent.region != nullptr) {
                         const size_t painted_region_id = size_t(painted_region.region->print_object_region_id());
-                        // A colour equal to the parent's own filament resolves to the parent's own
+                        // A color equal to the parent's own filament resolves to the parent's own
                         // region; it is not a child of itself.
                         if (painted_region_id == size_t(parent.region->print_object_region_id()))
                             continue;
@@ -1502,9 +1502,9 @@ void PrintObject::slice_volumes()
         }
 
         // Real (non-ghost) per-body facts, taken from each body's own ModelVolume rather than the
-        // ghost-inflated region loop, as PrintRegion::flow() and Print::validate() do. A painted colour is
+        // ghost-inflated region loop, as PrintRegion::flow() and Print::validate() do. A painted color is
         // evidence for admission but not a body cadence owner: on a single coarse body its fine painted
-        // child resolves to the base cadence even though get_extruders() reports that colour on the coarse
+        // child resolves to the base cadence even though get_extruders() reports that color on the coarse
         // volume. Cadence follows the volume's explicit body binding, and a cross-tool paint is qualified
         // through the same physical resolver admission uses.
         const std::vector<BodySplitRegionAssignment> body_owner_assignments =
@@ -1525,8 +1525,8 @@ void PrintObject::slice_volumes()
                 return result;
 
             const ModelVolume &parent_volume = *painted_parent_volume[painted_region_id];
-            // A colour painted over a modifier's area is a child of the modifier region, whose filament and
-            // cadence are already planned (modifier regions have lower ids than any colour child, so they are
+            // A color painted over a modifier's area is a child of the modifier region, whose filament and
+            // cadence are already planned (modifier regions have lower ids than any color child, so they are
             // planned first below).
             const size_t parent_region_id = painted_parent_region[painted_region_id];
             const bool parent_is_modifier = parent_region_id < region_count && is_modifier_region[parent_region_id];
@@ -1594,10 +1594,10 @@ void PrintObject::slice_volumes()
                     this->model_object()->id().id);
             const size_t parent_region_id = painted_parent_region[region_id];
             if (!region_has_sliced_geometry(region_id)) {
-                // PrintApply creates one painted PrintRegion for every (parent, colour) pair,
-                // including ghosts whose colour has no facet on that parent.  Such a region has
+                // PrintApply creates one painted PrintRegion for every (parent, color) pair,
+                // including ghosts whose color has no facet on that parent.  Such a region has
                 // no native ownership to project: mirror the parent's plan and tool metadata,
-                // then leave it out of precedence below rather than resolving its colour as a
+                // then leave it out of precedence below rather than resolving its color as a
                 // second body cadence.
                 if (parent_region_id >= region_count ||
                     m_region_grid_physical_extruders[parent_region_id] == size_t(-1))
@@ -1974,7 +1974,7 @@ void PrintObject::slice_volumes()
         planning.fine_skin_coarse_line_width.assign(region_count, 0.);
         for (size_t region = 0; region < region_count; ++region) {
             const PrintRegionConfig &rc = printing_region(region).config();
-            // A painted region inherits its parent body's opt-in, but its colour is what the user painted,
+            // A painted region inherits its parent body's opt-in, but its color is what the user painted,
             // so only bodies convert. In a two-region object the painted child is always at the base cadence
             // and never converts anyway.
             if (rc.mixed_nozzle_body_fine_skins.value && (region_count == 2 || is_body_region[region])) {
@@ -2022,8 +2022,8 @@ void PrintObject::slice_volumes()
 
         if (has_painted_region && parent_region_count > 0) {
         // The projector counts shell depth over one Layer view, so each painted cadence gets its own view
-        // and every painted colour is projected on the view of the cadence its target region prints at.
-        // There is no limit on painted colours per object. One painted cadence, including a fine painted
+        // and every painted color is projected on the view of the cadence its target region prints at.
+        // There is no limit on painted colors per object. One painted cadence, including a fine painted
         // patch on one coarse body, builds exactly one view.
         std::vector<std::optional<coordf_t>> painted_view_cadences;
         for (size_t region_id = 0; region_id < region_count; ++region_id) {
@@ -2038,7 +2038,7 @@ void PrintObject::slice_volumes()
         if (painted_view_cadences.empty())
             painted_view_cadences.emplace_back(std::nullopt);
 
-        // Which view each segmentation slot (one painted colour) is read from. A slot that only
+        // Which view each segmentation slot (one painted color) is read from. A slot that only
         // paints its own parent, or only reaches empty ghosts, moves no geometry and keeps view 0.
         std::vector<size_t> painted_slot_view;
         if (painted_view_cadences.size() > 1)
@@ -2052,7 +2052,7 @@ void PrintObject::slice_volumes()
                         continue;
                     const size_t parent_region_id = size_t(parent.region->print_object_region_id());
                     const size_t target_region_id = size_t(painted_region.region->print_object_region_id());
-                    // A colour painted over a modifier region has that region as its parent, as the lattice
+                    // A color painted over a modifier region has that region as its parent, as the lattice
                     // and midpoint partitions already allow.
                     if (parent_region_id >= parent_region_count || target_region_id >= region_count ||
                         !(is_body_region[parent_region_id] || is_modifier_region[parent_region_id]) ||
@@ -2072,7 +2072,7 @@ void PrintObject::slice_volumes()
                         painted_slot_view[slot] = view;
                     else if (painted_slot_view[slot] != view)
                         throw Slic3r::SlicingError(
-                            "One painted colour resolves to two different layer heights in this object, so its paint cannot be placed.",
+                            "One painted color resolves to two different layer heights in this object, so its paint cannot be placed.",
                             this->model_object()->id().id);
                 }
 

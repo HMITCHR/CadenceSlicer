@@ -583,7 +583,7 @@ public:
     ToolChangeResult   finish_block_solid(const WipeTowerBlock &block, int filament_id, bool extrude_fill = true, WipeTowerLayerType layer_type = WipeTowerLayerType::Normal,
                                           int wall_tool = -1);
     // wipe_volume_budget: requested prime volume (mm^3), 0 for none; emission stops once it is
-    // deposited. is_nozzle_change skips the colour-flush ironing scrub (the tools share no filament).
+    // deposited. is_nozzle_change skips the color-flush ironing scrub (the tools share no filament).
     void toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length,bool solid_toolchange=false, float wipe_volume_budget=0.f, bool is_nozzle_change=false);
     Vec2f              get_rib_offset() const { return m_rib_offset; }
     // Whether this tool may lay the 0.2 mm bridge road; unknown tools may.

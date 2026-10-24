@@ -2138,11 +2138,11 @@ static FilamentGroupContext build_filament_group_context(
     context.model_info.unprintable_volumes   = unprintable_volumes;
 
     // One entry per logical filament. filament_colour may be shorter; a filament without its own
-    // colour takes the first one (presentation only).
-    const std::string fallback_colour = filament_colours.empty() ? std::string() : filament_colours.front();
+    // color takes the first one (presentation only).
+    const std::string fallback_color = filament_colours.empty() ? std::string() : filament_colours.front();
     for (size_t idx = 0; idx < filament_nums; ++idx) {
         FilamentGroupUtils::FilamentInfo info;
-        info.color      = idx < filament_colours.size() ? filament_colours[idx] : fallback_colour;
+        info.color      = idx < filament_colours.size() ? filament_colours[idx] : fallback_color;
         info.type       = idx < filament_types.size() ? filament_types[idx] : std::string();
         info.is_support = idx < filament_is_support.size() ? filament_is_support[idx] : (unsigned char) 0;
         context.model_info.filament_info.emplace_back(std::move(info));

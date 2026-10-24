@@ -355,9 +355,9 @@ json visible_tooltips(wxWindow *root, bool unwrap = false)
     return out;
 }
 
-std::string colour_text(const wxColour &c) { return into_u8(c.GetAsString(wxC2S_HTML_SYNTAX)); }
+std::string color_text(const wxColour &c) { return into_u8(c.GetAsString(wxC2S_HTML_SYNTAX)); }
 
-// Visible text drawn in nearly its own background colour, such as white on white.
+// Visible text drawn in nearly its own background color, such as white on white.
 json low_contrast_texts(wxWindow *root)
 {
     json out = json::array();
@@ -370,7 +370,7 @@ json low_contrast_texts(wxWindow *root)
         const wxColour bg = painted->GetBackgroundColour();
         const wxColour fg = w->GetForegroundColour();
         if (StateColor::GetColorDifference(bg, fg) < 20.)
-            out.push_back({{"text", into_u8(w->GetLabel())}, {"fg", colour_text(fg)}, {"bg", colour_text(bg)}});
+            out.push_back({{"text", into_u8(w->GetLabel())}, {"fg", color_text(fg)}, {"bg", color_text(bg)}});
     });
     return out;
 }
@@ -1225,8 +1225,8 @@ private:
         if (const auto *stats = bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_nozzle_stats"))
             p["printer_nozzle_stats"] = stats->values;
         p["filament_presets"] = bundle.filament_presets;
-        if (const auto *colours = project.option<ConfigOptionStrings>("filament_colour"))
-            p["filament_colour"] = colours->values;
+        if (const auto *colors = project.option<ConfigOptionStrings>("filament_colour"))
+            p["filament_colour"] = colors->values;
         for (const std::string &key : project.keys())
             if (key.rfind("mixed_nozzle", 0) == 0 || key == "filament_map" || key == "filament_nozzle_map" ||
                 key.find("prime_tower") != std::string::npos)

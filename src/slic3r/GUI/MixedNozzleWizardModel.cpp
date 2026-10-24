@@ -1134,7 +1134,7 @@ bool wizard_off_skips_page(int page)
 }
 
 std::vector<WizardMaterialRow> wizard_material_rows(const std::vector<std::string> &labels,
-                                                    const std::vector<std::string> &filament_colours)
+                                                    const std::vector<std::string> &filament_colors)
 {
     std::vector<WizardMaterialRow> rows;
     rows.reserve(labels.size());
@@ -1142,21 +1142,21 @@ std::vector<WizardMaterialRow> wizard_material_rows(const std::vector<std::strin
         WizardMaterialRow row;
         row.slot = slot;
         row.label = labels[slot];
-        // A project mid-edit can hold fewer colours than materials. The row index is the slot the
+        // A project mid-edit can hold fewer colors than materials. The row index is the slot the
         // picker reports, so no row is dropped.
-        row.colour = WIZARD_MATERIAL_FALLBACK_COLOUR;
-        if (slot < filament_colours.size()) {
-            std::string colour = filament_colours[slot];
-            // A multi-colour pack separates colours with semicolons; show the first, as the sidebar
+        row.color = WIZARD_MATERIAL_FALLBACK_COLOR;
+        if (slot < filament_colors.size()) {
+            std::string color = filament_colors[slot];
+            // A multi-color pack separates colors with semicolons; show the first, as the sidebar
             // does.
-            const std::size_t separator = colour.find(';');
+            const std::size_t separator = color.find(';');
             if (separator != std::string::npos)
-                colour.erase(separator);
-            const std::size_t first = colour.find_first_not_of(" \t");
-            const std::size_t last = colour.find_last_not_of(" \t");
-            colour = first == std::string::npos ? std::string{} : colour.substr(first, last - first + 1);
-            if (!colour.empty() && colour.front() == '#')
-                row.colour = colour;
+                color.erase(separator);
+            const std::size_t first = color.find_first_not_of(" \t");
+            const std::size_t last = color.find_last_not_of(" \t");
+            color = first == std::string::npos ? std::string{} : color.substr(first, last - first + 1);
+            if (!color.empty() && color.front() == '#')
+                row.color = color;
         }
         rows.push_back(std::move(row));
     }

@@ -4081,7 +4081,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                     if (Plater *plater = wxGetApp().plater())
                         plater->CallAfter([]() { show_mixed_nozzle_decision_dialog(wxGetApp().plater()); });
                 }
-                // Keep the next legend row's colour swatch clear of the link and its underline.
+                // Keep the next legend row's color swatch clear of the link and its underline.
                 ImGui::Spacing();
             }
             const double legend_ms = std::chrono::duration<double, std::milli>(

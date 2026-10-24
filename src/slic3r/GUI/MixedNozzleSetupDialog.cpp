@@ -327,16 +327,16 @@ MixedNozzleWizardDialog::MixedNozzleWizardDialog(wxWindow *parent, MixedNozzleWi
     });
 
     auto *assign_page = page(_L("Materials"), 2);
-    // One row per slot: a square in the slot's filament colour, as in the sidebar combo, then the
+    // One row per slot: a square in the slot's filament color, as in the sidebar combo, then the
     // material name. The index is the slot.
     const std::vector<WizardMaterialRow> material_rows =
-        wizard_material_rows(m_input.filament_labels, m_input.filament_colours);
+        wizard_material_rows(m_input.filament_labels, m_input.filament_colors);
     const int swatch = int(std::lround(2. * wxGetApp().em_unit()));
     auto material_picker = [this, &material_rows, swatch](wxWindow *parent, wxSizer *sizer, int selected) {
         auto *control = new ::ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                        wxDefaultSize, 0, nullptr, wxCB_READONLY);
         for (const WizardMaterialRow &row : material_rows) {
-            wxBitmap *square = get_extruder_color_icon(row.colour, std::to_string(row.slot + 1),
+            wxBitmap *square = get_extruder_color_icon(row.color, std::to_string(row.slot + 1),
                                                        swatch, swatch);
             control->Append(from_u8(row.label), square == nullptr ? wxNullBitmap : *square);
         }

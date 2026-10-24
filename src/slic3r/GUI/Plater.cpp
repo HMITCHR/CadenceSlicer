@@ -13990,7 +13990,7 @@ int Plater::new_project(bool skip_confirm, bool silent, const wxString& project_
     //get_partplate_list().reinit();
     //get_partplate_list().update_slice_context_to_current_plate(p->background_process);
     //p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
-    // The project config survives a new project (upstream keeps filament colours, maps and the
+    // The project config survives a new project (upstream keeps filament colors, maps and the
     // installed nozzles). Mixed-nozzle setup does not: see apply_mixed_nozzle_new_project().
     const DynamicPrintConfig previous_project_config = wxGetApp().preset_bundle->project_config;
     reset(transfer_preset_changes);
@@ -20291,9 +20291,9 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
         presentation.filaments.push_back({int(i + 1),
             wizard_material_label(bundle.filament_presets[i]), {}});
     }
-    // The material pickers paint the same colour square as the sidebar's filament combos.
-    if (const auto *colours = full.option<ConfigOptionStrings>("filament_colour"))
-        input.filament_colours = colours->values;
+    // The material pickers paint the same color square as the sidebar's filament combos.
+    if (const auto *colors = full.option<ConfigOptionStrings>("filament_colour"))
+        input.filament_colors = colors->values;
     const auto body = build_body_split_editor_model(target->get_objects_on_this_plate(),
         feature_split_resolver_config_from_full(full), presentation, draft.chosen_fine_height);
     input.body_rows = body.rows;
@@ -20555,7 +20555,7 @@ bool Plater::open_mixed_nozzle_wizard(bool current_plate, int target_plate_index
     hooks.notify_batch_changed = [this] {
         refresh_after_mixed_nozzle_commit(*this);
         // Apply may write each part's filament. Refresh the object list's filament cells and
-        // colours; update() then reloads the scene with each part's filament colour.
+        // colors; update() then reloads the scene with each part's filament color.
         sidebar().obj_list()->update_objects_list_filament_column(
             std::max<size_t>(1, wxGetApp().preset_bundle->filament_presets.size()));
         update();

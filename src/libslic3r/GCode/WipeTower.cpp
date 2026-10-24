@@ -4963,8 +4963,8 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     // first move and must stay, or the full-width row would carry all its E as the first move.
     // Only the scrub after it is skipped on a nozzle change.
     bool         do_ironing_lead_in = should_line_ironing;
-    // The colour-flush ironing scrub has nothing to flush on a nozzle change (the nozzles never
-    // share filament); keep it for a same-nozzle colour change.
+    // The color-flush ironing scrub has nothing to flush on a nozzle change (the nozzles never
+    // share filament); keep it for a same-nozzle color change.
     if (is_nozzle_change) {
         should_flat_ironging = false;
         should_line_ironing  = false;

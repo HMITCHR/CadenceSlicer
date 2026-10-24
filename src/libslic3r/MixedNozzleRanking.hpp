@@ -89,7 +89,7 @@ void mixed_nozzle_set_brim_inputs(const DynamicPrintConfig &config);
 
 // The all-fine single-nozzle baseline, made from a composed mixed-nozzle slice in place: mode
 // Off, `fine_height` everywhere, every material slot on the fine material's nozzle, every feature
-// and body on the fine material, Body layer heights and colour painting cleared.
+// and body on the fine material, Body layer heights and color painting cleared.
 // `fine_logical_filament` is zero based.
 void mixed_nozzle_single_nozzle_baseline(Model &model, DynamicPrintConfig &config,
                                          std::size_t fine_logical_filament, double fine_height);

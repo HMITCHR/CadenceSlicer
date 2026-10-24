@@ -531,7 +531,7 @@ std::vector<RegionalForcedPlane> detect_forced_planes(const NativeRegionalPlanni
                     continue;
                 // Two regions on the same grid meet on every plane anyway. Forcing one would only split
                 // the cells of regions that take no part in the contact, such as a coarse body beside
-                // a fine body whose painted colour steps against it on its own shell rows.
+                // a fine body whose painted color steps against it on its own shell rows.
                 if (regions_share_grid(input, source, other))
                     continue;
                 const ExPolygons changed = xor_ex(input.lattice_ownership[source][plane],

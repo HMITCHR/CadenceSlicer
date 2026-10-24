@@ -1163,8 +1163,8 @@ std::string body_editor_sentence(BodySplitEditorDiagnostic diagnostic)
     case BodySplitEditorDiagnostic::DuplicateTarget:
         return "The bodies changed while setup was open. Close setup and open it again.";
     case BodySplitEditorDiagnostic::PaintedFilamentPhysicalToolMismatch:
-        return "A painted region cannot be printed as painted: its colour has no nozzle and layer height Body "
-               "Split can use there. Repaint it with the Color Painting tool, or change which nozzle that colour "
+        return "A painted region cannot be printed as painted: its color has no nozzle and layer height Body "
+               "Split can use there. Repaint it with the Color Painting tool, or change which nozzle that color "
                "prints on in Filament grouping.";
     }
     return "Body Split cannot use these bodies as they are assigned.";

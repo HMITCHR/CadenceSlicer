@@ -392,9 +392,9 @@ TEST_CASE("A tapered feature print preserves its fine exterior and finishes abov
     CHECK(wrong_gap_tool == 0);
 }
 
-// MC-6. Under Feature Split a painted colour replaces the filament only on the features the fine
+// MC-6. Under Feature Split a painted color replaces the filament only on the features the fine
 // nozzle prints. The coarse nozzle's sparse infill keeps the part's own coarse filament.
-TEST_CASE("A painted colour in Feature Split keeps the coarse sparse infill", "[TestRebuild][FeatureScene]")
+TEST_CASE("A painted color in Feature Split keeps the coarse sparse infill", "[TestRebuild][FeatureScene]")
 {
     const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
     Scene scene = feature_cube();
@@ -446,12 +446,12 @@ TEST_CASE("A painted colour in Feature Split keeps the coarse sparse infill", "[
 // MC-6. Paint on one side of a part puts two filaments on the fine nozzle, so it changes filament on
 // every layer whether the sparse infill goes coarse or not. Those changes are in both plans the
 // whole-print check compares, so they must not decide it: the coarse core still saves time and stays.
-TEST_CASE("Paint on one side keeps the coarse sparse infill when every layer changes colour", "[TestRebuild][FeatureScene]")
+TEST_CASE("Paint on one side keeps the coarse sparse infill when every layer changes color", "[TestRebuild][FeatureScene]")
 {
     const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
     Scene scene = feature_cube();
     // A filament change on one nozzle loads and unloads; a nozzle change keeps both loaded. The
-    // colour changes on the fine nozzle are slow, the hand-off to the coarse nozzle stays free.
+    // color changes on the fine nozzle are slow, the hand-off to the coarse nozzle stays free.
     scene.config.set_key_value("machine_load_filament_time", new ConfigOptionFloat(500.));
     scene.config.set_key_value("machine_unload_filament_time", new ConfigOptionFloat(500.));
     const auto populate = scene.populate;
@@ -498,16 +498,16 @@ TEST_CASE("Paint on one side keeps the coarse sparse infill when every layer cha
     CAPTURE(bad, first_bad, painted_walls, plain_walls, coarse_core, layers_with_both.size());
     for (size_t count : bad)
         CHECK(count == 0);
-    // The paint really changes colour on the fine nozzle layer after layer.
+    // The paint really changes color on the fine nozzle layer after layer.
     REQUIRE(painted_walls > 0);
     REQUIRE(plain_walls > 0);
     REQUIRE(layers_with_both.size() > 3);
     CHECK(coarse_core > 0);
 }
 
-// Paint on one side of a Feature Split part colours the walls that show. Stock paint with no maximum
+// Paint on one side of a Feature Split part colors the walls that show. Stock paint with no maximum
 // width (mmu_segmented_region_max_width 0) reaches across the interior and splits the sparse infill and
-// the inner walls into one region per colour. Feature Split stops the paint at the depth of the walls,
+// the inner walls into one region per color. Feature Split stops the paint at the depth of the walls,
 // so everything deeper stays with the part's own filament and its sparse infill stays coarse.
 TEST_CASE("Paint on one side of a Feature Split part reaches only as deep as the walls", "[TestRebuild][FeatureScene]")
 {
@@ -561,7 +561,7 @@ TEST_CASE("Paint on one side of a Feature Split part reaches only as deep as the
     CAPTURE(face_x, min_x, painted_face_walls, deep_paint, first_deep, painted_half_coarse, painted_half_fine_sparse);
     // The paint still shows on the painted face.
     CHECK(painted_face_walls > 0);
-    // Nothing deeper than the walls prints in the paint colour.
+    // Nothing deeper than the walls prints in the paint color.
     CHECK(deep_paint == 0);
     // The sparse infill behind the paint prints on the coarse nozzle.
     CHECK(painted_half_coarse > 0);
@@ -569,9 +569,9 @@ TEST_CASE("Paint on one side of a Feature Split part reaches only as deep as the
 }
 
 // Paint on every side leaves no unpainted outline on a layer. Stopping the paint at the walls there
-// would bring the part's own filament back for the inner walls: one more colour on the fine nozzle
+// would bring the part's own filament back for the inner walls: one more color on the fine nozzle
 // and a purge on every layer. Such layers keep the paint all the way in.
-TEST_CASE("Paint on every side of a Feature Split part adds no colour change for the part's own filament", "[TestRebuild][FeatureScene]")
+TEST_CASE("Paint on every side of a Feature Split part adds no color change for the part's own filament", "[TestRebuild][FeatureScene]")
 {
     const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
     Scene scene = feature_cube(4.);

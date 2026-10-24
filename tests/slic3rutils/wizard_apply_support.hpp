@@ -134,10 +134,10 @@ struct WizardProject {
         project.set_key_value("filament_map", new ConfigOptionInts(map));
         project.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
         project.set_key_value("filament_volume_map", new ConfigOptionInts(std::vector<int>(slots, 0)));
-        std::vector<std::string> colours;
+        std::vector<std::string> colors;
         for (std::size_t slot = 0; slot < slots; ++slot)
-            colours.push_back(slot % 2 == 0 ? "#FF0000" : "#0000FF");
-        project.set_key_value("filament_colour", new ConfigOptionStrings(colours));
+            colors.push_back(slot % 2 == 0 ? "#FF0000" : "#0000FF");
+        project.set_key_value("filament_colour", new ConfigOptionStrings(colors));
         // The app sizes the purge matrix when the slot count changes: one slots x slots block per
         // nozzle, Orca's usual 140 mm3 between two different materials.
         const std::size_t nozzles = spec.nozzles.size();

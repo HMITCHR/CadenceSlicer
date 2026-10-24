@@ -117,7 +117,7 @@ struct MixedNozzleWizardDialogInput {
     bool show_intro_line {false};
     // filament_colour per slot for the material picker squares. A short or empty list falls back to
     // grey.
-    std::vector<std::string> filament_colours;
+    std::vector<std::string> filament_colors;
     // The first layer the selected process preset itself states.
     double preset_first_layer_height {0.};
     double preset_first_layer_speed {0.};
@@ -228,7 +228,7 @@ private:
     wxChoice *m_tower {nullptr};
     wxStaticText *m_tower_explanation {nullptr};
     wxCheckBox *m_rebind {nullptr};
-    // Bitmap combos rather than wxChoice, so each row can carry its slot colour.
+    // Bitmap combos rather than wxChoice, so each row can carry its slot color.
     ::ComboBox *m_fine_filament {nullptr};
     ::ComboBox *m_coarse_filament {nullptr};
     wxStaticText *m_fine_resolved {nullptr};
