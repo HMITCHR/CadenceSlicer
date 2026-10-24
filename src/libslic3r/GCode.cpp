@@ -1529,14 +1529,10 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             }
             need_travel_after_change_filament_gcode = true;
 
-            // The change_filament_gcode macro makes its own Z excursion. If it left the head away
-            // from this block's tower Z, descend again so the purge lands at the right height.
-            if (tower_z_diverges_from_part && !is_approx(z, gcodegen.writer().get_position().z())) {
-                toolchange_gcode_str += gcodegen.writer().retract();
-                // force, as for the descent above.
-                toolchange_gcode_str += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.", true);
-                toolchange_gcode_str += gcodegen.writer().unretract();
-            }
+            // The change_filament_gcode macro makes its own Z excursion and leaves the head at the
+            // wiper exit, which can be over the part. Do not descend there: the travel to the block's
+            // start below is pinned to the tower Z (wipe_move_z), so it moves in XY first and lowers
+            // over the tower, and the block's own start unretracts once.
         }
 
         std::string toolchange_command;
