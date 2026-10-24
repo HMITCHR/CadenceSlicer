@@ -1146,14 +1146,23 @@ static void cut_segmented_layers(const std::vector<ExPolygons>        &input_exp
                                  const float                           cut_width,
                                  const float                           interlocking_depth,
                                  const std::function<void()>          &throw_on_cancel_callback,
-                                 const std::vector<size_t>            *interlocking_phases = nullptr)
+                                 const std::vector<size_t>            *interlocking_phases = nullptr,
+                                 const bool                            keep_layers_without_unpainted = false)
 {
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - cutting segmented layers in parallel - begin";
     const float interlocking_cut_width = interlocking_depth > 0.f ? std::max(cut_width - interlocking_depth, 0.f) : 0.f;
     tbb::parallel_for(tbb::blocked_range<size_t>(0, segmented_regions.size()),
-    [&segmented_regions, &input_expolygons, &cut_width, &interlocking_depth, &throw_on_cancel_callback, interlocking_phases](const tbb::blocked_range<size_t> &range) {
+    [&segmented_regions, &input_expolygons, &cut_width, &interlocking_depth, &throw_on_cancel_callback, interlocking_phases,
+     keep_layers_without_unpainted](const tbb::blocked_range<size_t> &range) {
         for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
             throw_on_cancel_callback();
+            // Index 0 is the unpainted part of the layer. When paint covers the whole outline, the cut
+            // would hand the interior back to the part's own filament, a colour that layer does not
+            // print otherwise: one more filament change and purge on that layer. Such a layer keeps
+            // its paint all the way in.
+            if (keep_layers_without_unpainted && !segmented_regions[layer_idx].empty() &&
+                segmented_regions[layer_idx].front().empty())
+                continue;
             // A caller slicing on more than one layer height can supply its own alternation
             // phase per layer; without one the phase is the layer index, as in native Orca.
             const size_t phase                  = interlocking_phases ? (*interlocking_phases)[layer_idx] : layer_idx;
@@ -1977,7 +1986,8 @@ static std::vector<std::vector<ExPolygons>> segmentation_by_painting_on_layers(
                                                               const bool                                                       segmentation_interlocking_beam,
                                                               const IncludeTopAndBottomLayers                                  include_top_and_bottom_layers,
                                                               const std::function<void()>                                     &throw_on_cancel_callback,
-                                                              const std::vector<size_t>                                       *interlocking_phases = nullptr)
+                                                              const std::vector<size_t>                                       *interlocking_phases = nullptr,
+                                                              const bool                                                       keep_layers_without_unpainted = false)
 {
     const size_t                          num_layers    = layers.size();
     assert(interlocking_phases == nullptr || interlocking_phases->size() == num_layers);
@@ -2185,7 +2195,8 @@ static std::vector<std::vector<ExPolygons>> segmentation_by_painting_on_layers(
     throw_on_cancel_callback();
 
     if ((segmentation_max_width > 0.f || segmentation_interlocking_depth > 0.f) && !segmentation_interlocking_beam) {
-        cut_segmented_layers(input_expolygons, segmented_regions, float(scale_(segmentation_max_width)), float(scale_(segmentation_interlocking_depth)), throw_on_cancel_callback, interlocking_phases);
+        cut_segmented_layers(input_expolygons, segmented_regions, float(scale_(segmentation_max_width)), float(scale_(segmentation_interlocking_depth)), throw_on_cancel_callback, interlocking_phases,
+                             keep_layers_without_unpainted);
         throw_on_cancel_callback();
     }
 
@@ -2227,18 +2238,49 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                               include_top_and_bottom_layers, throw_on_cancel_callback);
 }
 
+float feature_split_wall_depth(const PrintObject &print_object)
+{
+    const float layer_height = float(print_object.config().layer_height.value);
+    float       depth        = 0.f;
+    for (size_t region_idx = 0; region_idx < print_object.num_printing_regions(); ++region_idx) {
+        const PrintRegion &region = print_object.printing_region(region_idx);
+        const int          loops  = region.config().wall_loops.value;
+        if (loops <= 0)
+            continue;
+        const float outer = region.flow(print_object, frExternalPerimeter, layer_height).width();
+        const float inner = region.flow(print_object, frPerimeter, layer_height).spacing();
+        depth = std::max(depth, outer + float(loops - 1) * inner);
+    }
+    return depth;
+}
+
+PaintSegmentationWidth mm_paint_segmentation_width(const PrintObject &print_object)
+{
+    const float user_width = float(print_object.config().mmu_segmented_region_max_width.value);
+    if (!is_mixed_nozzle_feature_split(print_object.print()->config()))
+        return {user_width, false};
+    const float wall_depth = feature_split_wall_depth(print_object);
+    // A width the user set that already stays inside the walls is kept as it is, stock behaviour.
+    if (wall_depth <= 0.f || (user_width > 0.f && user_width <= wall_depth))
+        return {user_width, false};
+    return {wall_depth, true};
+}
+
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback) {
-    const size_t num_facets_states  = print_object.print()->config().filament_colour.size() + 1;
-    const float  max_width          = float(print_object.config().mmu_segmented_region_max_width.value);
-    const float  interlocking_depth = float(print_object.config().mmu_segmented_region_interlocking_depth.value);
-    const bool   interlocking_beam  = print_object.config().interlocking_beam.value;
+    const size_t                 num_facets_states  = print_object.print()->config().filament_colour.size() + 1;
+    const PaintSegmentationWidth width              = mm_paint_segmentation_width(print_object);
+    const float                  interlocking_depth = float(print_object.config().mmu_segmented_region_interlocking_depth.value);
+    const bool                   interlocking_beam  = print_object.config().interlocking_beam.value;
 
     const auto extract_facets_info = [](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
         return {mv.mmu_segmentation_facets, mv.is_mm_painted(), false};
     };
 
-    return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);
+    const ConstLayerPtrs layers = print_object.layers().vector();
+    return segmentation_by_painting_on_layers(print_object, layers, extract_facets_info, num_facets_states, width.max_width,
+                                              interlocking_depth, interlocking_beam, IncludeTopAndBottomLayers::Yes,
+                                              throw_on_cancel_callback, nullptr, width.wall_depth);
 }
 
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(
@@ -2246,18 +2288,18 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(
     const std::function<void()> &throw_on_cancel_callback,
     const std::vector<size_t> *interlocking_phases)
 {
-    const size_t num_facets_states  = print_object.print()->config().filament_colour.size() + 1;
-    const float  max_width          = float(print_object.config().mmu_segmented_region_max_width.value);
-    const float  interlocking_depth = float(print_object.config().mmu_segmented_region_interlocking_depth.value);
-    const bool   interlocking_beam  = print_object.config().interlocking_beam.value;
+    const size_t                 num_facets_states  = print_object.print()->config().filament_colour.size() + 1;
+    const PaintSegmentationWidth width              = mm_paint_segmentation_width(print_object);
+    const float                  interlocking_depth = float(print_object.config().mmu_segmented_region_interlocking_depth.value);
+    const bool                   interlocking_beam  = print_object.config().interlocking_beam.value;
     const auto extract_facets_info = [](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
         return {mv.mmu_segmentation_facets, mv.is_mm_painted(), false};
     };
     const ConstLayerPtrs layer_view(layers.begin(), layers.end());
     return segmentation_by_painting_on_layers(print_object, layer_view, extract_facets_info,
-                                              num_facets_states, max_width, interlocking_depth,
+                                              num_facets_states, width.max_width, interlocking_depth,
                                               interlocking_beam, IncludeTopAndBottomLayers::Yes,
-                                              throw_on_cancel_callback, interlocking_phases);
+                                              throw_on_cancel_callback, interlocking_phases, width.wall_depth);
 }
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo

@@ -1833,10 +1833,19 @@ bool PrintObject::invalidate_state_by_config_options(
         "outer_wall_filament_id", "inner_wall_filament_id", "sparse_infill_filament_id",
         "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id"
     };
+    static constexpr std::array<const char *, 6> feature_paint_depth_keys{
+        "wall_loops", "line_width", "outer_wall_line_width", "inner_wall_line_width",
+        "outer_wall_filament_id", "inner_wall_filament_id"
+    };
     for (const t_config_option_key &opt_key : opt_keys) {
         if (is_mixed_nozzle_body_split(m_print->config()) && one_of(opt_key, regional_layering_keys))
             steps.emplace_back(posPerimeters);
         if (is_mixed_nozzle_body_split(m_print->config()) && one_of(opt_key, body_binding_keys))
+            steps.emplace_back(posSlice);
+        // Feature Split stops paint at the depth of the walls (mm_paint_segmentation_width), which the
+        // slice step reads, so on a painted object the wall settings redo that step.
+        if (is_mixed_nozzle_feature_split(m_print->config()) && this->is_mm_painted() &&
+            one_of(opt_key, feature_paint_depth_keys))
             steps.emplace_back(posSlice);
 
         if (   opt_key == "brim_width"

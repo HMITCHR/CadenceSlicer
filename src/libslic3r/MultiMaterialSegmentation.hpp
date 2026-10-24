@@ -50,6 +50,22 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                                               IncludeTopAndBottomLayers                                        include_top_and_bottom_layers,
                                                               const std::function<void()>                                     &throw_on_cancel_callback);
 
+// How deep the walls of an object reach in from its outline: the outer wall width plus the spacing
+// of each further wall loop, the deepest of the object's regions, at the object layer height.
+float feature_split_wall_depth(const PrintObject &print_object);
+
+// The width painted colour reaches in from the outline (mmu_segmented_region_max_width; 0 is unlimited).
+// Feature Split prints paint on the fine walls and keeps the sparse infill on the coarse nozzle, so paint
+// deeper than the walls shows nowhere. It only splits the interior into one region per colour, and the
+// narrow ones then print their sparse infill fine. Under Feature Split the width is therefore the wall
+// depth, or the user's own width when that is smaller. wall_depth says the wall depth was used.
+// Other modes keep the configured width.
+struct PaintSegmentationWidth {
+    float max_width  = 0.f;
+    bool  wall_depth = false;
+};
+PaintSegmentationWidth mm_paint_segmentation_width(const PrintObject &print_object);
+
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
 

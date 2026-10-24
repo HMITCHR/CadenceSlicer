@@ -4848,7 +4848,8 @@ void PrintConfigDef::init_fff_params()
 
     def           = this->add("mmu_segmented_region_max_width", coFloat);
     def->label    = L("Maximum width of a segmented region");
-    def->tooltip  = L("Maximum width of a segmented region. A value of 0 disables this feature.");
+    def->tooltip  = L("Maximum width of a segmented region. A value of 0 disables this feature. "
+                      "In Feature Split, painted colour reaches no deeper than the walls, or this width when it is smaller.");
     def->sidetext = L("mm");	// millimeters, CIS languages need translation
     def->min      = 0;
     def->category = L("Advanced");

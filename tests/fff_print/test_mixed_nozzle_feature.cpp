@@ -1,8 +1,10 @@
 #include <catch2/catch_all.hpp>
 #include "mixed_nozzle_harness.hpp"
 #include "libslic3r/MixedNozzleRanking.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <set>
@@ -500,5 +502,117 @@ TEST_CASE("Paint on one side keeps the coarse sparse infill when every layer cha
     REQUIRE(painted_walls > 0);
     REQUIRE(plain_walls > 0);
     REQUIRE(layers_with_both.size() > 3);
+    CHECK(coarse_core > 0);
+}
+
+// Paint on one side of a Feature Split part colours the walls that show. Stock paint with no maximum
+// width (mmu_segmented_region_max_width 0) reaches across the interior and splits the sparse infill and
+// the inner walls into one region per colour. Feature Split stops the paint at the depth of the walls,
+// so everything deeper stays with the part's own filament and its sparse infill stays coarse.
+TEST_CASE("Paint on one side of a Feature Split part reaches only as deep as the walls", "[TestRebuild][FeatureScene]")
+{
+    const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
+    Scene scene = feature_cube(4.);
+    REQUIRE(scene.config.opt_float("mmu_segmented_region_max_width") == 0.);
+    const auto populate = scene.populate;
+    scene.populate = [populate](Model &model, Print &print, const DynamicPrintConfig &config) {
+        populate(model, print, config);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+        const indexed_triangle_set &its = volume.mesh().its;
+        std::vector<int> side;
+        for (size_t facet = 0; facet < its.indices.size(); ++facet) {
+            const Vec3f &a = its.vertices[its.indices[facet](0)];
+            const Vec3f &b = its.vertices[its.indices[facet](1)];
+            const Vec3f &c = its.vertices[its.indices[facet](2)];
+            if ((b - a).cross(c - a).normalized().x() > .9f)
+                side.push_back(int(facet));
+        }
+        REQUIRE_FALSE(side.empty());
+        paint_cadence_facets(volume, side, EnforcerBlockerType(paint_slot));
+        print.apply(model, config);
+    };
+    const Facts painted = slice(scene);
+    require_export(painted);
+
+    float face_x = std::numeric_limits<float>::lowest(), min_x = std::numeric_limits<float>::max();
+    for (const auto &move : painted.moves)
+        if (model_road(move) && move.extrusion_role == erExternalPerimeter) {
+            face_x = std::max(face_x, move.position.x());
+            min_x  = std::min(min_x, move.position.x());
+        }
+    REQUIRE(face_x > min_x + 40.f);
+    const float mid_x = .5f * (face_x + min_x);
+    // The walls of a 0.2 mm nozzle are about 1 mm deep; 2 mm leaves room for the paint's inner loop.
+    const float paint_depth_limit = 2.f;
+
+    size_t painted_face_walls = 0, deep_paint = 0, painted_half_coarse = 0, painted_half_fine_sparse = 0;
+    std::string first_deep;
+    for (const auto &move : painted.moves) {
+        if (!model_road(move))
+            continue;
+        const bool paint = move.physical_tool_id == 0 && move.extruder_id == paint_slot - 1;
+        if (paint && move.extrusion_role == erExternalPerimeter && move.position.x() > face_x - .5f)
+            ++painted_face_walls;
+        if (paint)
+            count_bad(move.position.x() > face_x - paint_depth_limit, deep_paint, first_deep, "paint deeper than the walls", move);
+        if (move.extrusion_role == erInternalInfill && move.position.x() > mid_x)
+            ++(move.physical_tool_id == 1 ? painted_half_coarse : painted_half_fine_sparse);
+    }
+    CAPTURE(face_x, min_x, painted_face_walls, deep_paint, first_deep, painted_half_coarse, painted_half_fine_sparse);
+    // The paint still shows on the painted face.
+    CHECK(painted_face_walls > 0);
+    // Nothing deeper than the walls prints in the paint colour.
+    CHECK(deep_paint == 0);
+    // The sparse infill behind the paint prints on the coarse nozzle.
+    CHECK(painted_half_coarse > 0);
+    CHECK(painted_half_fine_sparse == 0);
+}
+
+// Paint on every side leaves no unpainted outline on a layer. Stopping the paint at the walls there
+// would bring the part's own filament back for the inner walls: one more colour on the fine nozzle
+// and a purge on every layer. Such layers keep the paint all the way in.
+TEST_CASE("Paint on every side of a Feature Split part adds no colour change for the part's own filament", "[TestRebuild][FeatureScene]")
+{
+    const int paint_slot = 2; // filament_map {1,1,1,1,1,1,2,1}: slot 2 is on the fine 0.2 nozzle.
+    Scene scene = feature_cube(4.);
+    const auto populate = scene.populate;
+    scene.populate = [populate](Model &model, Print &print, const DynamicPrintConfig &config) {
+        populate(model, print, config);
+        ModelVolume &volume = *model.objects.front()->volumes.front();
+        const indexed_triangle_set &its = volume.mesh().its;
+        std::vector<int> sides;
+        for (size_t facet = 0; facet < its.indices.size(); ++facet) {
+            const Vec3f &a = its.vertices[its.indices[facet](0)];
+            const Vec3f &b = its.vertices[its.indices[facet](1)];
+            const Vec3f &c = its.vertices[its.indices[facet](2)];
+            if (std::abs((b - a).cross(c - a).normalized().z()) < .1f)
+                sides.push_back(int(facet));
+        }
+        REQUIRE_FALSE(sides.empty());
+        paint_cadence_facets(volume, sides, EnforcerBlockerType(paint_slot));
+        print.apply(model, config);
+    };
+    const Facts painted = slice(scene);
+    require_export(painted);
+
+    size_t painted_walls = 0, own_walls = 0, coarse_core = 0;
+    // The unpainted bottom shells keep the part's own filament, as in stock painting.
+    const float bottom_shells_top = .5f;
+    std::string first_own;
+    for (const auto &move : painted.moves) {
+        if (!model_road(move))
+            continue;
+        if (move.extrusion_role == erExternalPerimeter || move.extrusion_role == erPerimeter) {
+            if (move.extruder_id == paint_slot - 1)
+                ++painted_walls;
+            else if (move.position.z() > bottom_shells_top)
+                count_bad(false, own_walls, first_own, "wall in the part's own filament", move);
+        }
+        if (move.physical_tool_id == 1 && move.extrusion_role == erInternalInfill)
+            ++coarse_core;
+    }
+    CAPTURE(painted_walls, own_walls, first_own, coarse_core);
+    CHECK(painted_walls > 0);
+    CHECK(own_walls == 0);
     CHECK(coarse_core > 0);
 }
