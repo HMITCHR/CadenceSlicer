@@ -1,7 +1,7 @@
 name: Windows build
 
 # Builds the Cadence Slicer Windows x64 app and its NSIS installer on a GitHub
-# hosted runner, with the fork's own build_release_vs.bat.
+# hosted runner, with build_win.bat.
 #
 # This workflow publishes nothing. It uploads no release, creates no tags,
 # pushes nowhere and needs no secrets. Its outputs are run artifacts:
@@ -147,13 +147,12 @@ jobs:
         shell: pwsh
         run: |
           if ("${{ inputs.build-tests }}" -eq "true") {
-            .\build_release_vs.bat slicer tests
+            .\build_win.bat -s -i --tests
           } else {
-            .\build_release_vs.bat slicer
+            .\build_win.bat -s -i
           }
 
-      # build_release_vs.bat carries on after a failed compile and exits 0, so
-      # the install tree is checked before anything is packaged from it.
+      # The install tree is checked before anything is packaged from it.
       - name: Check the build output
         id: build_output
         shell: pwsh

@@ -1,7 +1,7 @@
 name: Windows dependencies
 
-# Builds the Windows x64 dependency tree (deps/) with the fork's own
-# build_release_vs.bat and stores the install prefix in the Actions cache.
+# Builds the Windows x64 dependency tree (deps/) with OrcaSlicer's
+# build_win.bat and stores the install prefix in the Actions cache.
 # Called by windows-build.yml only when the cache has no entry for the current
 # deps/ contents, or when a rebuild is asked for. It publishes nothing and uses
 # no secrets; the cache is its only output.
@@ -55,12 +55,11 @@ jobs:
         shell: pwsh
         run: choco install strawberryperl --yes --no-progress
 
-      # build_release_vs.bat does not stop on a failed cmake call, so the
-      # result is checked below instead of trusting the exit code.
+      # The prefix is also checked below, so a half-built tree is never cached.
       - name: Build dependencies
         working-directory: ${{ github.workspace }}
         shell: pwsh
-        run: .\build_release_vs.bat deps
+        run: .\build_win.bat -d
 
       - name: Check the dependency prefix
         shell: pwsh
