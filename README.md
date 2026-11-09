@@ -88,21 +88,21 @@ https://github.com/user-attachments/assets/5e48149b-000a-455a-a899-a258c9eb1889
 |---|---|
 | Bambu Lab H2D | Print-tested. Everything was built and tested on my H2D. |
 | Bambu Lab H2D Pro | Enabled, not print-tested |
-| Bambu Lab H2C | Enabled, not print-tested |
+| Bambu Lab H2C | Enabled, not print-tested. Use one nozzle size on the left and one size in the rack. |
 | Bambu Lab X2D | Enabled, not print-tested |
-| Prusa XL, Snapmaker J1 and U1, and other IDEX and toolchanger printers in OrcaSlicer's profiles | Enabled, not print-tested. See [SUPPORTED.md](docs/SUPPORTED.md) for the list. |
+| Prusa XL, Snapmaker J1 and U1, and other IDEX and toolchanger printers in OrcaSlicer's profiles | Enabled, not print-tested. On a tool changer it can use several fine tools plus one coarse tool, and the Snapmaker U1 has Cadence profiles with three fine nozzles and one coarse. See [SUPPORTED.md](docs/SUPPORTED.md) for the list. |
 
 The engine isn't tied to one printer. It should work on any printer with two or more nozzles, as long as it uses the same kind of prime tower as the Bambu printers. If you have one of the untested printers, I'd really like to hear how it goes.
 
 Nozzles can be any pair of 0.2, 0.4, 0.6 and 0.8 mm, with the smaller one as the fine nozzle, on either side. Each can be Standard or High Flow, and you can use any material your printer prints on a single nozzle. The full list, with the presets for each pair, is in [Supported](docs/SUPPORTED.md).
 
-It won't make a single-nozzle printer any faster, and it uses two nozzles per print, not more. With mixed-nozzle slicing off, it's OrcaSlicer at the base commit named in [NOTICE.md](NOTICE.md), with branding and network changes.
+It won't make a single-nozzle printer any faster. On a two-nozzle printer it uses both nozzles, and on a tool changer it can use several fine tools plus one coarse tool. With mixed-nozzle slicing off, it's OrcaSlicer 2.5.0, with branding and network changes, apart from a few small differences on plates with two different nozzle sizes.
 
 Not affiliated with Bambu Lab, Prusa Research, Snapmaker or the OrcaSlicer project.
 
 ## Platforms
 
-- macOS: Apple silicon only, macOS 11.3 or later.
+- macOS: Apple silicon only, macOS 12 or later.
 - Windows: x64, Windows 10 or 11. Tested on a Surface Book.
 - Linux: there's no build. It should build from source with `build_linux.sh`, the same as OrcaSlicer, but I haven't tried it.
 
@@ -135,7 +135,7 @@ On Windows:
 
 1. Fit two different nozzles, for example a 0.2 on one side and a 0.6 or 0.8 on the other.
 2. In the Printer panel, set each side's nozzle or sync your printer info. When the two differ, Cadence asks what you want to do. Pick "Set up mixed-nozzle slicing now".
-3. Go through the four setup steps: What prints fine, Materials, Detail and speed, Check and apply. The defaults are fine for most prints. On Detail and speed, wait for the times to fill in, or pick the one marked Fastest.
+3. Go through the four setup steps: What prints fine, Materials, Detail and speed, Check and apply. The defaults are fine for most prints. New projects start with one filament, so setup adds a second one for you: pick it for the coarse nozzle on Materials. On Detail and speed, wait for the times to fill in, or pick the one marked Fastest.
 4. Click Apply and slice.
 5. After slicing, "Why fine or coarse?" in the sidebar shows which layer ranges went coarse and why.
 
@@ -153,7 +153,7 @@ Or skip all of that: export the G-code and print from a USB stick or SD card.
 
 Still working on a handful of small issues, mainly:
 
-- Feature Split uses the split setup applies for now: walls, top and bottom surfaces and solid infill on the fine nozzle, sparse infill on the coarse one. More is planned for v1.2.
+- Feature Split uses the split setup applies: walls, top and bottom surfaces and solid infill on the fine nozzle, sparse infill on the coarse one. Two new options can move solid infill and inner walls to the coarse nozzle too, but they're off by default and not print-tested yet.
 - Slim, Strong and Hybrid tree supports need the support body on the fine nozzle. Organic trees can have the body on the coarse nozzle only when the interface is on the fine nozzle. Normal supports work with the body on either nozzle.
 - Under round overhangs, like the bottom of a sphere, the coarse nozzle can lay some support and interface layers at about 0.1 mm, thinner than its usual minimum.
 - On small parts, a support body on the coarse nozzle can be slower than printing everything on one nozzle, because of the extra nozzle changes. Setup's times show it.
@@ -161,14 +161,14 @@ Still working on a handful of small issues, mainly:
 - PLA as the main material on one nozzle and PETG on the other is refused, because the prime tower can't join them. A PETG support interface is fine.
 - Some settings don't fit the layer grid (adaptive layer height, spiral vase, Arachne walls and a few others). Cadence refuses them with a message that names the setting.
 
-The full list is in the [release notes](docs/RELEASE-NOTES-v1.1.2.md) and [Supported](docs/SUPPORTED.md#known-issues).
+The full list is in the [release notes](docs/RELEASE-NOTES-v1.2.md) and [Supported](docs/SUPPORTED.md#known-issues).
 
 ## Other docs
 
 - [How it works](docs/HOW-IT-WORKS.md): the layer grid, nozzle changes, the prime tower, the time check, Feature Split, Body Split and beams
 - [Supported](docs/SUPPORTED.md): printers, nozzle pairs, flow types, materials, presets and known issues
 - [Privacy](docs/PRIVACY.md): every network call the app can make, and what's off by default
-- Release notes: [v1.1.2](docs/RELEASE-NOTES-v1.1.2.md), [v1.1.1](docs/RELEASE-NOTES-v1.1.1.md), [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
+- Release notes: [v1.2](docs/RELEASE-NOTES-v1.2.md), [v1.1.2](docs/RELEASE-NOTES-v1.1.2.md), [v1.1.1](docs/RELEASE-NOTES-v1.1.1.md), [v1.1](docs/RELEASE-NOTES-v1.1.md), [v1.0](docs/RELEASE-NOTES-v1.0.md)
 
 ## Bugs
 

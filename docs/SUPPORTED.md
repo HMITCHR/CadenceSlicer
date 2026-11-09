@@ -4,22 +4,40 @@ This page covers what I've printed, what's enabled but untested, and what doesn'
 
 ## Printers
 
-It should work on any printer with two or more nozzles, as long as it uses the same kind of prime tower as the Bambu printers, and it uses two of those nozzles per print. It isn't tied to one printer model, but I've only been able to print on my own.
+It should work on any printer with two or more nozzles, as long as it uses the same kind of prime tower as the Bambu printers. On a two-nozzle printer it uses both, and on a tool changer it can use several fine tools plus one coarse tool. It isn't tied to one printer model, but I've only been able to print on my own.
 
 | Printer | Status | Notes |
 |---|---|---|
 | Bambu Lab H2D | Print-tested | Everything was built and tested on this printer. |
 | Bambu Lab H2D Pro | Enabled, not print-tested | Same flush handling as the H2D. |
-| Bambu Lab H2C | Enabled, not print-tested | See the H2C note under known issues. |
+| Bambu Lab H2C | Enabled, not print-tested | Use one nozzle size on the left and one size in the rack. See the H2C note under known issues. |
 | Bambu Lab X2D | Enabled, not print-tested | The second extruder is Bowden. The MN presets carry Bowden speed columns held to Bambu's own limits. |
 | Snapmaker J1 (IDEX) | Enabled, not print-tested | Feature Split and Body Split checked without a printer. |
-| Prusa XL (2 to 5 toolheads) | Enabled, not print-tested | Uses two of its toolheads, picked on step 2. Feature Split and Body Split checked. |
-| Snapmaker U1 | Enabled, not print-tested | Uses two of its four toolheads. Feature Split and Body Split checked. |
+| Prusa XL (2 to 5 toolheads) | Enabled, not print-tested | Several fine toolheads plus one coarse toolhead (see Tool changers below). |
+| Snapmaker U1 | Enabled, not print-tested | Several fine toolheads plus one coarse toolhead, with Cadence profiles for three fine nozzles plus one coarse: 0.2 + 0.4, 0.2 + 0.6, 0.2 + 0.8, 0.4 + 0.6 and 0.4 + 0.8 (see Tool changers below). |
 | RatRig V-Core 4 IDEX, Volumic IDRE, Snapmaker A350 Dual and Artisan, Z-Bolt Dual, Lulzbot Taz Pro Dual | Enabled, not print-tested | Feature Split checked. Body Split runs on the same engine path but I haven't checked it on these. |
 | Flashforge Creator 5, WonderMaker ZR Ultra, custom toolchanger profiles | Enabled, not print-tested | Two toolheads, Feature Split checked. Tool changes take 7 to 10 s, so coarse infill only pays on bigger prints. |
 | iQ TiQ2 | Enabled, not print-tested | Feature Split checked, with the fix its tool-change G-code needed. |
 | IDEX copy and mirror modes | Refused | Both heads print at the same time, so there's nothing to hand off. |
 | Printers that share one nozzle between extruders (Sovol SV02, Raise3D Pro3 shared mode, Adventurer 3) | Not offered | There's only one nozzle. |
+
+### Tool changers
+
+On a tool changer like the Prusa XL or Snapmaker U1, a print can use more than two tools. Text and detail colors can each go on their own fine tool, and one coarse tool does the infill. Every tool needs to be one of the two sizes, and only one tool can have the coarse size. Anything else is refused with a message that names the toolhead.
+
+A tool change only needs a short re-prime on the prime tower, the same as a nozzle change on the H2D, instead of a full purge. On each layer the fine tools print before the coarse one. That's what makes multicolor with mixed nozzles a lot more worth it here than on a two-nozzle printer.
+
+Body Split still pairs one fine side with one coarse side, but the fine side can be several fine tools.
+
+There are a few tower options under "Tool changer prime tower" in the process settings: ramming per material, a faster or sparser tower fill, and cooling idle tools to standby. They're all off by default, only show on printers with more than two tools, and haven't been print-tested yet.
+
+If the plate has more colors than the printer has tools, setup tells you and asks before it goes on.
+
+### Snapmaker U1
+
+Cadence uses one coarse tool per print, so its U1 profiles have three fine nozzles and one coarse one: 0.2 + 0.4, 0.2 + 0.6, 0.2 + 0.8, 0.4 + 0.6 and 0.4 + 0.8, with the fine nozzles on tools 1 to 3 and the coarse one on tool 4. That gives you three colors for detail plus the infill. Pick the one that matches the hotends you have in. OrcaSlicer's own 0.4 + 0.6 profile (two of each) works too: run setup on it, which turns off Detect overhang walls for Feature Split. That profile counts tool changes as free, so its time estimates come out a bit low.
+
+None of these have been print-tested. Snapmaker says mixing nozzle sizes in one print isn't supported on the U1 yet, and I don't have one to check whether the printer will take it. If you try it, start with something small and let me know how it goes.
 
 On the non-Bambu printers, setup switches the prime tower to the same tower generator the Bambu printers use and turns off the purge and ramming settings it replaces. Step 4 lists every change. Their filament profiles often give both nozzles the same flow limit, so a bigger coarse flow limit makes a real difference to the saving.
 
@@ -143,10 +161,12 @@ The band grid only works if every layer in a band can be printed the way the fin
 - wiping into the object or its infill
 - hole-to-polyhole, separated infill, per-model centred infill, and counterbore hole bridging
 - dynamic filament mapping and custom or cyclic tool ordering
+- OrcaSlicer's mixed filaments (color mixing), belt printers, and IDEX/IQEX parallel printing
 - resonance avoidance and adaptive volumetric speed
 - in Feature Split, a skirt from the draft shield option
 - in Body Split, model parts that overlap a lot. A small part sunk into a much bigger one, like text sunk into a base, is allowed: the small part keeps the shared space and you get a note after slicing.
 - different N on different objects on the same plate
+- on a tool changer, a third nozzle size or a second tool with the coarse size
 - smooth timelapse, when one nozzle can't lay the shared first layer and the tower has to lag behind the part
 - slice-data caching
 
@@ -178,11 +198,16 @@ Rough edges I know about:
 
 ### Feature Split uses setup's split
 
-For now Feature Split prints the walls, top and bottom surfaces and solid infill on the fine nozzle, and the sparse infill on the coarse nozzle at its own layer height. That's the split setup applies. More is planned for v1.2.
+Feature Split prints the walls, top and bottom surfaces and solid infill on the fine nozzle, and the sparse infill on the coarse nozzle at its own layer height. That's the split setup applies.
+
+Two options under Layer height (Advanced) can move more to the coarse nozzle. Both are off by default and haven't been print-tested yet:
+
+- "Solid infill at the coarse height" moves the solid infill deep inside a part to the coarse nozzle. Outer walls, top and bottom surfaces, bridges and the two fine layers under each top surface stay on the fine nozzle.
+- "Inner walls at the coarse height" prints a band's inner walls with the coarse nozzle, behind the fine outer wall. The outer wall stays fine on every layer, and so do inner walls where the wall slopes or a top or bottom surface is close.
 
 ### Small prints and the prime tower
 
-On small parts the prime tower can use more filament and time than the part. On one small test part with supports, the tower took about 9 m of filament against about 1.2 m for the part and its supports. Feature Split can be slower than one nozzle on small or short prints. The Detail and speed step shows the time for one nozzle only, so compare before you apply. If one nozzle wins, setup offers to print with one nozzle instead.
+On small parts the prime tower can use more filament and time than the part. On one small test part with supports, the tower took about 9 m of filament against about 1.2 m for the part and its supports. Feature Split can be slower than one nozzle on small or short prints. The Detail and speed step shows the time for the same plate without the coarse nozzle, colors kept, so compare before you apply. If that wins, setup offers to print with one nozzle instead.
 
 Two things make the tower bigger than you might expect:
 
@@ -199,7 +224,11 @@ Beams also don't know whether a joint is meant to move. For hinges or anything e
 
 ### Ranking takes time on large models
 
-Every coarse layer on the Detail and speed step is timed by a full slice of the plate, including the tower and nozzle changes, plus one more slice for one nozzle only. On a big model, that can take several minutes. You can pick a row or move on before they're done. The times are also only for the process preset as it was when setup ran.
+Every coarse layer on the Detail and speed step is timed by a full slice of the plate, including the tower and nozzle changes, plus one more slice of the same plate without the coarse nozzle. On a big model, that can take several minutes. You can pick a row or move on before they're done. The times are also only for the process preset as it was when setup ran.
+
+### High precision G-code
+
+OrcaSlicer 2.5.0 added "High precision G-code (experimental)". It hasn't been tried with Feature Split or Body Split. The prime tower keeps the standard number of decimals either way.
 
 ### Estimates, not measurements
 
@@ -207,7 +236,7 @@ All the times in setup and in the "Why fine or coarse?" report are the slicer's 
 
 ### H2C hotend rack
 
-The H2C has one hotend on the left and a six-hotend rack on the right. Cadence treats the rack side as one fixed diameter for the whole print, the same as the H2D's right nozzle. A change that keeps the mounted hotend gets the same ram and prime as on the H2D. A change that swaps the rack to another hotend goes through Bambu's own nozzle change routine. This has only been checked in the slicer, but I'd really love for someone to test this on their H2C and let me know how it works out.  
+The H2C has one hotend on the left and a six-hotend rack on the right. Cadence treats the rack side as one fixed diameter for the whole print, the same as the H2D's right nozzle. A change that keeps the mounted hotend gets the same ram and prime as on the H2D. A change that swaps the rack to another hotend goes through Bambu's own nozzle change routine. This has only been checked in the slicer, but I'd really love for someone to test this on their H2C and let me know how it works out. All the hotends in the rack need to be the same size for now.  
 
 ### Text and small parts in Body Split
 

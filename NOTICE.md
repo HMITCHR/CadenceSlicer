@@ -31,9 +31,10 @@ the tag it was built from, using the build instructions in the repository.
 
 ## Upstream base
 
-This fork branched from OrcaSlicer upstream `main` at commit:
+This fork first branched from OrcaSlicer upstream `main` at commit `c806a09c7c`.
+Since v1.2 it is based on the OrcaSlicer 2.5.0 release (tag `v2.5.0`), at commit:
 
-    c806a09c7cfaaf4c0d19aca7f6cb505487c8ecc8
+    40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19
 
 The application shows the short form of that commit in its About dialog, so any
 build can be traced back to the source it was derived from.
@@ -45,12 +46,13 @@ they were changed and when. This fork changes several hundred files, so a header
 notice in each one would be unreadable and would go stale. This notice stands in
 its place:
 
-Files in this repository have been modified by HMR3D from the OrcaSlicer source
-at commit `c806a09c7c`, in 2026 and after. The modifications are identifiable in
-full from the repository history, by comparing any tag against that base commit.
+Files in this repository have been modified by HMR3D from the OrcaSlicer source,
+first at commit `c806a09c7c` and since v1.2 at OrcaSlicer 2.5.0 (`40ecc66f78`),
+in 2026 and after. The modifications are identifiable in full from the repository
+history, by comparing any tag against the base it was built on.
 The main areas changed are mixed-nozzle slicing (Feature Split and Body Split),
 synchronized regional layers, prime-pad deposition, the wizard and sidebar that
-drive them, the presets they need, and their tests. Branding, network endpoints
+drive them, tool changer support, the presets they need, and their tests. Branding, network endpoints
 and packaging metadata have also been changed.
 
 ## Lineage

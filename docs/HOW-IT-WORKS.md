@@ -45,7 +45,7 @@ Switching happens at band boundaries, not every layer, so a band costs one chang
 
 The prime tower only needs to reach the last change, so it stops growing once the switching stops. If the time check leaves the coarse nozzle with nothing to print but the plate still changes filament (a PETG interface, say), the tower is OrcaSlicer's own tower, built from the first layer up to the last change. It sizes its own footprint for stability, and builds its levels at the coarse height where it can. The flush and ramming use each nozzle's own diameter and limits, so the 0.2 isn't asked to push a 0.8's flow and the 0.8 isn't starved by a 0.2's.
 
-On Bambu printers this uses Bambu's own prime tower, with per-nozzle flush lines so the printer's change routine knows which physical nozzle it's dealing with. On other multi-tool printers, setup switches the tower to the same generator and the printer's own tool change G-code does the change. Alignment between the two nozzles comes from the printer's own nozzle offset calibration, the same as any two-nozzle print. The slicer works in one coordinate frame and doesn't add an offset of its own.
+On Bambu printers this uses Bambu's own prime tower, with per-nozzle flush lines so the printer's change routine knows which physical nozzle it's dealing with. On other multi-tool printers, setup switches the tower to the same generator and the printer's own tool change G-code does the change. On a tool changer each tool keeps its own filament, so a tool change gets the same ram and re-prime as a nozzle change on the H2D, and the fine tools print before the coarse one on each layer. Alignment between the two nozzles comes from the printer's own nozzle offset calibration, the same as any two-nozzle print. The slicer works in one coordinate frame and doesn't add an offset of its own.
 
 ## It checks that switching saves time
 
@@ -134,14 +134,14 @@ If the first printed layer only has support on it, the tower still starts on tha
 
 ## Setup and the ranking by full slices
 
-The setup wizard asks what prints fine, which material goes on each nozzle, and then the fine and coarse layers. The fine layer list comes from the fine nozzle's own presets. Then it slices every legal N in the background and shows you the estimated time and nozzle-change count for each, against the same print all fine.
+The setup wizard asks what prints fine, which material goes on each nozzle, and then the fine and coarse layers. The fine layer list comes from the fine nozzle's own presets. Then it slices every legal N in the background and shows you the estimated time and nozzle-change count for each, next to the same plate on the fine nozzle alone, colors and paint included ("Same colors, no coarse nozzle").
 
 Each option is a full slice, tower and nozzle changes included, so the numbers include everything the per-band check does. On a big model the times fill in over a few minutes. You can move on at any point, and a row without a time says why.
 
-The fastest row is tagged Fastest. When several rows land within about 2 percent of each other they're all tagged "About as fast", and the default pick is the one with the fewest nozzle changes, since that means less tower and priming. If every row is slower than one nozzle only, the page says "Two nozzles are slower than one on this plate." and offers "Print with one nozzle instead".
+The fastest row is tagged Fastest. When several rows land within about 2 percent of each other they're all tagged "About as fast", and the default pick is the one with the fewest nozzle changes, since that means less tower and priming. If every row is slower than that, the page says "Two nozzles are slower than one on this plate." and offers "Print with one nozzle instead".
 
 The times are for the process preset as it stands when you run setup. If you change speeds or infill afterwards, run setup again or just slice and check.
 
 ## When it's off
 
-With mixed-nozzle slicing off, which is the default for every project, Cadence slices like OrcaSlicer at the base commit named in NOTICE.md. The mixed-nozzle code only runs when a plate is set to Feature Split or Body Split.
+With mixed-nozzle slicing off, which is the default for every project, Cadence slices like OrcaSlicer 2.5.0, apart from a few small differences on plates with two different nozzle sizes. The mixed-nozzle code only runs when a plate is set to Feature Split or Body Split.
