@@ -142,9 +142,14 @@ jobs:
           & $makensis /VERSION
           $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
 
+      # build_win.bat turns on OrcaSlicer's developer tools (ORCA_TOOLS), which
+      # the release doesn't ship, and one of them doesn't link here. It adds
+      # ORCA_SLICER_CMAKE_ARGS after its own options, so this leaves them out.
       - name: Build the app
         working-directory: ${{ github.workspace }}
         shell: pwsh
+        env:
+          ORCA_SLICER_CMAKE_ARGS: -DORCA_TOOLS=OFF
         run: |
           if ("${{ inputs.build-tests }}" -eq "true") {
             .\build_win.bat -s -i --tests
