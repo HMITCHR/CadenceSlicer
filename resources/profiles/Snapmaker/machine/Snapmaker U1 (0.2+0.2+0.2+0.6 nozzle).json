@@ -1,0 +1,40 @@
+{
+	"type": "machine",
+	"name": "Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle)",
+	"inherits": "fdm_U1",
+	"from": "system",
+	"setting_id": "snEDaghRehjBakGB",
+	"instantiation": "true",
+	"printer_model": "Snapmaker U1",
+	"printer_variant": "0.2+0.2+0.2+0.6",
+	"default_print_profile": "0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle)",
+	"max_layer_height": [
+		"0.14",
+		"0.14",
+		"0.14",
+		"0.42"
+	],
+	"min_layer_height": [
+		"0.04",
+		"0.04",
+		"0.04",
+		"0.12"
+	],
+	"nozzle_diameter": [
+		"0.2",
+		"0.2",
+		"0.2",
+		"0.6"
+	],
+	"nozzle_type": [
+		"hardened_steel",
+		"hardened_steel",
+		"hardened_steel",
+		"hardened_steel",
+		"hardened_steel",
+		"hardened_steel",
+		"stainless_steel",
+		"stainless_steel"
+	],
+	"machine_tool_change_time": "5"
+}

@@ -1,6 +1,6 @@
 {
 	"name": "Snapmaker",
-	"version": "02.04.00.20",
+	"version": "02.04.50.01",
 	"force_update": "0",
 	"description": "Snapmaker configurations",
 	"machine_model_list": [
@@ -503,6 +503,18 @@
 			"sub_path": "process/0.10 Standard @Snapmaker U1 (0.2 nozzle).json"
 		},
 		{
+			"name": "0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.4 nozzle)",
+			"sub_path": "process/0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.4 nozzle).json"
+		},
+		{
+			"name": "0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle)",
+			"sub_path": "process/0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle).json"
+		},
+		{
+			"name": "0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.8 nozzle)",
+			"sub_path": "process/0.10 Standard @Snapmaker U1 (0.2+0.2+0.2+0.8 nozzle).json"
+		},
+		{
 			"name": "0.12 Fine @Snapmaker U1 (0.4 nozzle)",
 			"sub_path": "process/0.12 Fine @Snapmaker U1 (0.4 nozzle).json"
 		},
@@ -537,6 +549,14 @@
 		{
 			"name": "0.20 Standard @Snapmaker U1 (0.4 nozzle)",
 			"sub_path": "process/0.20 Standard @Snapmaker U1 (0.4 nozzle).json"
+		},
+		{
+			"name": "0.20 Standard @Snapmaker U1 (0.4+0.4+0.4+0.6 nozzle)",
+			"sub_path": "process/0.20 Standard @Snapmaker U1 (0.4+0.4+0.4+0.6 nozzle).json"
+		},
+		{
+			"name": "0.20 Standard @Snapmaker U1 (0.4+0.4+0.4+0.8 nozzle)",
+			"sub_path": "process/0.20 Standard @Snapmaker U1 (0.4+0.4+0.4+0.8 nozzle).json"
 		},
 		{
 			"name": "0.20 Standard @Snapmaker U1 (0.4+0.6 nozzle)",
@@ -2175,8 +2195,28 @@
 			"sub_path": "machine/Snapmaker U1 (0.2 nozzle).json"
 		},
 		{
+			"name": "Snapmaker U1 (0.2+0.2+0.2+0.4 nozzle)",
+			"sub_path": "machine/Snapmaker U1 (0.2+0.2+0.2+0.4 nozzle).json"
+		},
+		{
+			"name": "Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle)",
+			"sub_path": "machine/Snapmaker U1 (0.2+0.2+0.2+0.6 nozzle).json"
+		},
+		{
+			"name": "Snapmaker U1 (0.2+0.2+0.2+0.8 nozzle)",
+			"sub_path": "machine/Snapmaker U1 (0.2+0.2+0.2+0.8 nozzle).json"
+		},
+		{
 			"name": "Snapmaker U1 (0.4 nozzle)",
 			"sub_path": "machine/Snapmaker U1 (0.4 nozzle).json"
+		},
+		{
+			"name": "Snapmaker U1 (0.4+0.4+0.4+0.6 nozzle)",
+			"sub_path": "machine/Snapmaker U1 (0.4+0.4+0.4+0.6 nozzle).json"
+		},
+		{
+			"name": "Snapmaker U1 (0.4+0.4+0.4+0.8 nozzle)",
+			"sub_path": "machine/Snapmaker U1 (0.4+0.4+0.4+0.8 nozzle).json"
 		},
 		{
 			"name": "Snapmaker U1 (0.4+0.6 nozzle)",
