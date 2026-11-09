@@ -25,13 +25,13 @@ set(CADENCE_PRODUCT_VERSION "1.1.2")
 # Moving it to the Cadence product version made the application refuse every
 # existing project: a 3MF saved as 2.5.0.0-dev read as newer than 0.1.0-beta, so
 # the CLI exited 232 and the GUI offered geometry only. See W58. If this is ever
-# changed again it must stay at or above 2.5.0-dev, the version upstream saves at
+# changed again it must stay at or above 2.5.0, the version upstream saves at
 # the base commit recorded below.
-set(SoftFever_VERSION "2.5.0-dev")
+set(SoftFever_VERSION "2.5.0")
 
 # Upstream OrcaSlicer commit this fork branched from. Shown in the About dialog
 # so a build can be traced back to the source it was derived from.
-set(CADENCE_UPSTREAM_BASE_COMMIT "c806a09c7c")
+set(CADENCE_UPSTREAM_BASE_COMMIT "40ecc66f78")
 
 # The package version, so the installer and the DMG carry the product version.
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
