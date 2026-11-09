@@ -863,11 +863,19 @@ TEST_CASE("Snapmaker J1 and RatRig V-Core 4 IDEX slice after Feature Split and B
     CAPTURE(j1);
     WizardProject project(j1 ? j1_spec() : ratrig_idex_spec());
     SECTION("Feature Split") {
-        if (j1)
+        if (j1) {
             add_cube(project, Vec2d(30., 30.), Vec3d(80., 80., 30.));
-        else
+            // A ledge on a post overhangs. The J1's process detects overhang walls and has Arachne
+            // walls, which Feature Split refuses together, so setup turns the detection off.
+            REQUIRE(project.bundle.full_config().opt_bool("detect_overhang_wall"));
+            project.add_object("ledge", {{"post", Vec3d(10., 10., 10.), Vec3d::Zero(), 1},
+                                         {"ledge", Vec3d(30., 30., 4.), Vec3d(-10., -10., 10.), 1}},
+                               Vec2d(150., 40.));
+        } else
             add_cube(project);
         run_wizard_setup(project, feature_choice(j1 ? 0.10 : 0.08, j1 ? 3 : 5));
+        if (j1)
+            CHECK_FALSE(project.bundle.full_config().opt_bool("detect_overhang_wall"));
         check_feature_split_print(require_slice(project), 0, 1, j1 ? 0.10 : 0.08, j1 ? 0.30 : 0.40);
     }
     SECTION("Body Split") {

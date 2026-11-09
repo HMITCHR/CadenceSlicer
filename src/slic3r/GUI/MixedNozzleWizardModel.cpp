@@ -2107,6 +2107,13 @@ std::vector<WizardProcessFix> wizard_process_fixes(const ConfigBase &copied_effe
     // Feature Split sizes its own infill combination from the cadence, and Body Split refuses
     // native combination, so both switches go off.
     switch_off("infill_combination", "Infill combination");
+    // Arachne walls with overhang detection leave overhang pieces on open wall lines, which Feature
+    // Split cannot give to a wall filament. Classic walls keep them in loops.
+    if (mode == MixedNozzleSlicingMode::FeatureSplit) {
+        const auto *walls = copied_effective_config.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator");
+        if (walls != nullptr && walls->value != PerimeterGeneratorType::Classic)
+            switch_off("detect_overhang_wall", "Detect overhang walls");
+    }
     // 0 and 100 percent both mean automatic; 100 percent is Orca's default, so only a real cap is
     // listed.
     if (const auto *cap = copied_effective_config.option<ConfigOptionFloatOrPercent>("infill_combination_max_layer_height");
