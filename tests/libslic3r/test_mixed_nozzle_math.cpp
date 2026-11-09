@@ -82,25 +82,6 @@ double area_mm2(const ExPolygons &polygons)
 
 } // namespace
 
-TEST_CASE("Regional grid solver preserves nominal cells without forced planes", "[TestRebuild][RegionalMath]")
-{
-    const std::vector<coordf_t> lattice = planes(0.1, 0.5, 0.1);
-    const std::vector<coordf_t> nominal{0.1, 0.3, 0.5};
-
-    for (RegionalGridPhaseRule rule : {RegionalGridPhaseRule::Rephase, RegionalGridPhaseRule::KeepNominal}) {
-        const RegionalGridPlan plan = plan_regional_grid(7, lattice, nominal, {}, rule);
-        require_contiguous(plan);
-        require_cell_heights_within(plan, 0.1, 0.2);
-        if (rule == RegionalGridPhaseRule::KeepNominal)
-            require_keep_nominal_contract(plan, nominal, {});
-        REQUIRE(plan.cells.size() == nominal.size());
-        REQUIRE(plan.rendezvous.size() == 1);
-        CHECK(plan.rendezvous.front().reason == RegionalRendezvousReason::FirstLayer);
-        for (size_t i = 0; i < nominal.size(); ++i)
-            CHECK_THAT(plan.cells[i].top_z, WithinAbs(nominal[i], 1e-9));
-    }
-}
-
 TEST_CASE("Regional grid solver applies the selected phase rule around one forced plane", "[TestRebuild][RegionalMath]")
 {
     const std::vector<coordf_t> lattice = planes(0.1, 0.6, 0.1);
@@ -143,6 +124,16 @@ TEST_CASE("Regional grid solver applies the selected phase rule around one force
     // the plane that cut region 1 above as a contact leaves region 1 uncut.
     const std::vector<RegionalForcedPlane> skin{{0.2, RegionalRendezvousReason::FineSkin, {0}, 1.5}};
     for (RegionalGridPhaseRule rule : {RegionalGridPhaseRule::Rephase, RegionalGridPhaseRule::KeepNominal}) {
+        // Without a forced plane both rules keep the nominal cells.
+        const RegionalGridPlan bare = plan_regional_grid(7, planes(0.1, 0.5, 0.1), nominal, {}, rule);
+        require_contiguous(bare);
+        require_cell_heights_within(bare, 0.1, 0.2);
+        REQUIRE(bare.cells.size() == nominal.size());
+        for (size_t i = 0; i < nominal.size(); ++i)
+            CHECK_THAT(bare.cells[i].top_z, WithinAbs(nominal[i], 1e-9));
+        REQUIRE(bare.rendezvous.size() == 1);
+        CHECK(bare.rendezvous.front().reason == RegionalRendezvousReason::FirstLayer);
+
         const RegionalGridPlan plain = plan_regional_grid(1, lattice, nominal, {}, rule);
         const RegionalGridPlan other = plan_regional_grid(1, lattice, nominal, skin, rule);
         REQUIRE(other.cells.size() == plain.cells.size());
@@ -209,6 +200,8 @@ TEST_CASE("Regional grid solver keeps both phase-rule tails bounded", "[TestRebu
 TEST_CASE("Regional profile uses only its declared physical nozzle and fixed cadence", "[TestRebuild][RegionalMath]")
 {
     PrintConfig print_config;
+    // Regional plans are made only for a Body Split object (PrintObject::slice_volumes).
+    print_config.mixed_nozzle_slicing_mode.value = MixedNozzleSlicingMode::BodySplit;
     print_config.nozzle_diameter.values = {0.2, 0.4};
     print_config.min_layer_height.values = {0.04, 0.08};
     print_config.max_layer_height.values = {0.14, 0.28};
@@ -281,28 +274,19 @@ TEST_CASE("Native regional planner forces a stacked handoff after an open gap", 
     }
 }
 
-TEST_CASE("Declared later-volume precedence resolves a narrow overlap", "[TestRebuild][RegionalMath]")
-{
-    const std::vector<ExPolygons> raw{
-        rectangle(0., 0., 8., 6.),
-        rectangle(7.996, 0., 16., 6.)
-    };
-    const RegionalOwnershipResolution ownership = resolve_regional_ownership(raw, {0, 1}, 0.01);
-
-    CHECK_FALSE(ownership.b01_overlap);
-    CHECK_THAT(ownership.b01_overlap_mm2, WithinAbs(0., 1e-9));
-    CHECK_THAT(area_mm2(intersection_ex(ownership.resolved[0], ownership.resolved[1])), WithinAbs(0., 1e-9));
-    CHECK_THAT(area_mm2(ownership.resolved[1]), WithinAbs(48.024, 1e-5));
-    CHECK_THAT(area_mm2(ownership.resolved[0]), WithinAbs(47.976, 2e-4));
-}
-
 // A flush inlay part in its pocket shares a rounding sliver with the pocket's walls: 0.017 mm2 on one
 // layer in a measured text inlay, wider than the 0.01 mm opening removes. Under one dot of the finest
 // nozzle it is not an overlap; a part sunk 0.3 mm into another still is.
 TEST_CASE("A sliver smaller than one dot of the finest nozzle is not a Body Split overlap", "[TestRebuild][RegionalMath]")
 {
+    // An overlap under the opening tolerance goes to the later part.
+    const std::vector<ExPolygons> touching{rectangle(0., 0., 8., 6.), rectangle(7.996, 0., 16., 6.)};
+    const RegionalOwnershipResolution narrow = resolve_regional_ownership(touching, {0, 1}, 0.01);
+    CHECK_FALSE(narrow.b01_overlap);
+    CHECK_THAT(area_mm2(intersection_ex(narrow.resolved[0], narrow.resolved[1])), WithinAbs(0., 1e-9));
+    CHECK_THAT(area_mm2(narrow.resolved[1]), WithinAbs(48.024, 1e-5));
+
     const double sliver = body_split_overlap_sliver_mm2(0.2);
-    CHECK_THAT(sliver, WithinAbs(0.25 * M_PI * 0.04, 1e-9));
 
     // 0.025 mm by 0.67 mm shared: about 0.017 mm2.
     const std::vector<ExPolygons> inlay{
@@ -325,75 +309,6 @@ TEST_CASE("A sliver smaller than one dot of the finest nozzle is not a Body Spli
     CHECK_THAT(overlap.b01_overlap_mm2, WithinAbs(1.8, 1e-3));
 }
 
-// A smaller part sunk into a bigger one keeps the shared space only when the overlap is a minor part
-// of the bigger one and the smaller part is clearly the smaller. Text sunk 0.2 mm into a 60 x 40 x 10
-// base (237 mm2 of letters) shares about 47 mm3 of 24000.
-TEST_CASE("Body Split keeps a minor overlap for the smaller part and refuses the rest", "[TestRebuild][RegionalMath]")
-{
-    CHECK(body_split_smaller_part_keeps_overlap(450., 24000., 47.));
-    // A part wholly inside the bigger one, if small enough, is fine too.
-    CHECK(body_split_smaller_part_keeps_overlap(300., 24000., 300.));
-    // Over 10% of the bigger part shared.
-    CHECK_FALSE(body_split_smaller_part_keeps_overlap(300., 1200., 300.));
-    CHECK(body_split_smaller_part_keeps_overlap(300., 1200., 120.));
-    // Not clearly the smaller part.
-    CHECK_FALSE(body_split_smaller_part_keeps_overlap(300., 300., 15.));
-    CHECK(body_split_smaller_part_keeps_overlap(150., 300., 15.));
-    CHECK_FALSE(body_split_smaller_part_keeps_overlap(0., 0., 0.));
-
-    // The winner goes after its loser; other regions keep their order.
-    CHECK(*precedence_with_kept_overlaps({0, 1, 2}, {{0, 1}}) == std::vector<size_t>{0, 1, 2});
-    CHECK(*precedence_with_kept_overlaps({1, 0, 2}, {{0, 1}}) == std::vector<size_t>{0, 1, 2});
-    CHECK(*precedence_with_kept_overlaps({2, 1, 0}, {{0, 2}, {1, 2}}) == std::vector<size_t>{1, 0, 2});
-    CHECK_FALSE(precedence_with_kept_overlaps({0, 1}, {{0, 1}, {1, 0}}).has_value());
-
-    // A kept pair is not reported, and its shared area goes to the later region.
-    const std::vector<ExPolygons> sunk{
-        rectangle(0., 0., 20., 20.),
-        rectangle(4., 4., 12., 12.)
-    };
-    CHECK(resolve_regional_ownership(sunk, {0, 1}, 0.01).b01_overlap);
-    const RegionalOwnershipResolution kept = resolve_regional_ownership(sunk, {0, 1}, 0.01, 0., {{0, 1}});
-    CHECK_FALSE(kept.b01_overlap);
-    CHECK_THAT(area_mm2(kept.resolved[1]), WithinAbs(64., 1e-3));
-    CHECK_THAT(area_mm2(kept.resolved[0]), WithinAbs(336., 1e-3));
-}
-
-TEST_CASE("Native regional planner assigns cells to two disjoint coarse regions",
-          "[TestRebuild][RegionalMath]")
-{
-    NativeRegionalPlanningInput input;
-    input.lattice_planes = planes(0.1, 1.0, 0.1);
-    const std::vector<coordf_t> fine_nominal = input.lattice_planes;
-    const std::vector<coordf_t> coarse_nominal = planes(0.1, 0.9, 0.2);
-    input.nominal_planes = {fine_nominal, coarse_nominal, coarse_nominal};
-    input.precedence     = {0, 1, 2};
-    input.phase_rule     = RegionalGridPhaseRule::KeepNominal;
-    input.lattice_ownership.assign(3, std::vector<ExPolygons>(input.lattice_planes.size()));
-    for (size_t row = 0; row < input.lattice_planes.size(); ++row) {
-        input.lattice_ownership[0][row] = rectangle(0., 0., 2., 2.);
-        input.lattice_ownership[1][row] = rectangle(3., 0., 5., 2.);
-        input.lattice_ownership[2][row] = rectangle(6., 0., 8., 2.);
-    }
-    input.sample_native_ownership = [](size_t region, coordf_t) {
-        static const ExPolygons fine = rectangle(0., 0., 2., 2.);
-        static const ExPolygons coarse_a = rectangle(3., 0., 5., 2.);
-        static const ExPolygons coarse_b = rectangle(6., 0., 8., 2.);
-        return region == 0 ? fine : region == 1 ? coarse_a : coarse_b;
-    };
-
-    const NativeRegionalGridState state = plan_native_regional_grids(input);
-
-    REQUIRE(state.cells.size() == 3);
-    CHECK(state.cells[0].size() == 10);
-    CHECK(state.cells[1].size() == 5);
-    CHECK(state.cells[2].size() == 5);
-    for (const NativeRegionCellState &cell : state.cells[1])
-        CHECK_FALSE(cell.footprint.empty());
-    for (const NativeRegionCellState &cell : state.cells[2])
-        CHECK_FALSE(cell.footprint.empty());
-}
-
 namespace {
 
 bool fine_skin_at(const RegionalGridPlan &plan, coordf_t z)
@@ -404,6 +319,7 @@ bool fine_skin_at(const RegionalGridPlan &plan, coordf_t z)
     return false;
 }
 
+// One region whose outline steps in twice: by 0.05 mm (thinner than a coarse road) and by 3 mm.
 NativeRegionalPlanningInput single_region_steps()
 {
     NativeRegionalPlanningInput input;

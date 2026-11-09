@@ -24,8 +24,8 @@ inline constexpr const char *MIXED_NOZZLE_TOWER_POLICY_FRESH_OPTION = "mixed_noz
 // v2 manages the whole prime-tower profile with typed serialized values; v1 payloads stay readable
 // with their three boolean keys and every newer key unmanaged. v3 adds the brim. Any other version
 // fails closed (preserve-only), so a build that predates a key refuses a payload carrying it rather
-// than dropping the ownership row.
-inline constexpr int MIXED_NOZZLE_TOWER_POLICY_VERSION = 3;
+// than dropping the ownership row. v4 adds tower interface features.
+inline constexpr int MIXED_NOZZLE_TOWER_POLICY_VERSION = 4;
 inline constexpr int MIXED_NOZZLE_TOWER_POLICY_MIN_VERSION = 1;
 
 // Shared process settings, owned in one project ledger because every plate consumes the same value;
@@ -41,6 +41,8 @@ inline constexpr const char *MIXED_NOZZLE_TOWER_WALL_TYPE_KEY = "wipe_tower_wall
 inline constexpr const char *MIXED_NOZZLE_TOWER_RIB_WIDTH_KEY = "wipe_tower_rib_width";
 inline constexpr const char *MIXED_NOZZLE_TOWER_INFILL_GAP_KEY = "prime_tower_infill_gap";
 inline constexpr const char *MIXED_NOZZLE_TOWER_FLAT_IRONING_KEY = "prime_tower_flat_ironing";
+// The stock H2D processes turn it on; both modes refuse it.
+inline constexpr const char *MIXED_NOZZLE_TOWER_INTERFACE_KEY = "enable_tower_interface_features";
 inline constexpr const char *MIXED_NOZZLE_TOWER_BRIM_KEY = "prime_tower_brim_width";
 inline constexpr const char *MIXED_NOZZLE_TOWER_PRIME_MODE_KEY = "prime_volume_mode";
 inline constexpr const char *MIXED_NOZZLE_TOWER_CHANGE_PRIME_KEY = "mixed_nozzle_extruder_change_prime_volume";
@@ -86,6 +88,8 @@ inline const std::vector<MixedNozzleTowerManagedKey> &mixed_nozzle_tower_managed
          MixedNozzleTowerRecommendation::Value, "150%", 2, "Infill gap", "Bambu default"},
         {MIXED_NOZZLE_TOWER_FLAT_IRONING_KEY, MixedNozzleTowerKeyTarget::Process,
          MixedNozzleTowerRecommendation::Value, "0", 2, "Flat ironing", nullptr},
+        {MIXED_NOZZLE_TOWER_INTERFACE_KEY, MixedNozzleTowerKeyTarget::Process,
+         MixedNozzleTowerRecommendation::Value, "0", 4, "Tower interface features", nullptr},
         // -1 is the option's own "Auto". The tower height is only known once sliced, so Automatic
         // leaves the brim to the engine (mixed_nozzle_tower_brim_width).
         {MIXED_NOZZLE_TOWER_BRIM_KEY, MixedNozzleTowerKeyTarget::Process,
@@ -736,7 +740,7 @@ inline MixedNozzleTowerPolicyEvaluation evaluate_tower_policy(const MixedNozzleT
             "Tower is explicitly disabled for a setup that requires two tools.");
         return result;
     }
-    // Automatic always applies the optimised purge route: prime_volume_mode is managed with Default
+    // Automatic always applies the optimized purge route: prime_volume_mode is managed with Default
     // as its recommended value, the previous value goes in the ledger for Undo, and the review
     // lists it.
 

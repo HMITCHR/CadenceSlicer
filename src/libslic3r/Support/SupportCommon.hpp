@@ -1,11 +1,21 @@
 #ifndef slic3r_SupportCommon_hpp_
 #define slic3r_SupportCommon_hpp_
 
-#include "../Layer.hpp"
 #include "../Polygon.hpp"
 #include "../Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
+#include "../Point.hpp"
+#include "../libslic3r.h"
+#include <utility>
+#include <algorithm>
+#include <vector>
+
+namespace Slic3r { class Fill; }
+namespace Slic3r { class Flow; }
+namespace Slic3r { struct SlicingParameters; }
 
 namespace Slic3r {
 
@@ -54,11 +64,6 @@ SupportGeneratorLayersPtr generate_raft_base(
 // fine_body_polygons, for the interface nozzle. So does the body at the height of a base interface,
 // which that nozzle lays too. On the first layer that body, and an interface layer there, is printed
 // with the part's own filament on that nozzle, never the interface filament.
-// The last check of mixed_nozzle_band_support_body(): the coarse nozzle never lays a body road thinner than its
-// minimum above the bed. Banding only makes legal bands, so this should never move anything; should a planner bug
-// leave such a layer, its body goes to the interface nozzle at that height instead of a squashed coarse road.
-// Returns how many layers it moved. Raft layers are left alone.
-size_t mixed_nozzle_thin_coarse_body_to_fine(SupportGeneratorLayersPtr &base_layers, coordf_t body_min, const SlicingParameters &slicing_params);
 
 // Raft layers are left alone.
 // Call after generate_interface_layers() and generate_raft_base(), before generate_support_layers().
@@ -95,6 +100,32 @@ void tree_supports_generate_paths(ExtrusionEntitiesPtr &dst, const Polygons &pol
 
 void fill_expolygons_with_sheath_generate_paths(
     ExtrusionEntitiesPtr &dst, const Polygons &polygons, Fill *filler, float density, ExtrusionRole role, const Flow &flow, const SupportParameters& support_params, bool with_sheath, bool no_sort);
+
+// Return every logical filament which may be selected for this support role.
+// An explicit assignment has one result; "current filament" is intentionally
+// print-wide because Orca resolves it later while ordering tools and wiping.
+std::vector<unsigned int> support_exclusion_filaments(
+    const PrintObject &object,
+    bool interface_material);
+
+// Build conservative, object-local exclusion masks for generated support.
+// `interface_material` selects the support-interface filament; false selects
+// the base support filament. Each pair describes the actual extrusion slab.
+std::vector<Polygons> support_exclusion_areas_for_layers(
+    const PrintObject &object,
+    const std::vector<std::pair<coordf_t, coordf_t>> &layer_z_ranges,
+    bool interface_material);
+
+// Remove exclusion volumes from every support and raft polygon category before
+// SupportLayer installation and toolpath generation.
+void trim_support_layers_by_exclusion_volumes(
+    const PrintObject                     &object,
+    const SupportGeneratorLayersPtr       &raft_layers,
+    const SupportGeneratorLayersPtr       &bottom_contacts,
+    const SupportGeneratorLayersPtr       &top_contacts,
+    const SupportGeneratorLayersPtr       &intermediate_layers,
+    const SupportGeneratorLayersPtr       &interface_layers,
+    const SupportGeneratorLayersPtr       &base_interface_layers);
 
 // returns sorted layers
 SupportGeneratorLayersPtr generate_support_layers(
@@ -193,6 +224,16 @@ int idx_lower_or_equal(const std::vector<T*> &vec, int idx, FN_LOWER_EQUAL fn_lo
 {
     return idx_lower_or_equal(vec.begin(), vec.end(), idx, fn_lower_equal);
 }
+
+// Belt floor: compute the belt-side half-plane polygon at a given print_z.
+// Used to clip support polygons against the belt surface.
+Polygons belt_floor_surface_polygon(
+    const SlicingParameters &slicing_params, const PrintConfig &print_config,
+    const PrintObject &object, coordf_t print_z);
+
+// Build plate tilt: XY drift of gravity per unit of layer height, zero on a level plate.
+// The tilt is capped below 90 degrees to keep the drift finite.
+Vec2d build_plate_tilt_slope(const PrintConfig &print_config);
 
 } // namespace Slic3r
 

@@ -150,13 +150,6 @@ struct PhysicalToolEventSummary {
     std::string diagnostic;
 };
 
-PhysicalToolEventSummary build_physical_tool_event_summary(
-    const PhysicalToolPreviewSnapshot& snapshot,
-    const std::vector<PhysicalToolVertexFact>& final_converted_facts,
-    uint32_t selected_layer_id,
-    std::optional<float> selected_event_z,
-    bool depositing_only = false);
-
 enum class PhysicalToolEventKind {
     InitialSelection,
     SamePhysicalFilamentChange,
@@ -282,15 +275,6 @@ struct PhysicalToolPresentation
     std::vector<std::string> diagnostics;
 };
 
-// Build the presentation projection from the owned snapshot outputs. Transition rows include
-// only proven different-T PhysicalTransition events in the marker sidecar. Logical usage is read
-// from each legend row's logical-keyed aggregate, never indexed by physical tool.
-PhysicalToolPresentation build_physical_tool_presentation(
-    const PhysicalToolPreviewSnapshot& snapshot,
-    const PhysicalToolPalette& palette,
-    const PhysicalToolEventSummary& event_summary,
-    const PhysicalToolClassification& classification);
-
 // Counts and elapsed times from the cache invoked by GCodeViewer, not an independent
 // benchmark model. Times are wall-clock CPU call durations, never predicted print time.
 struct PhysicalToolPreviewCacheMetrics {
@@ -322,7 +306,6 @@ public:
                  const PhysicalToolClassification& classification, const PhysicalToolPalette& palette);
     void clear();
     void set_palette(const PhysicalToolPalette& palette);
-    void set_classification(const PhysicalToolClassification& classification);
     void set_view_type(libvgcode::EViewType view_type);
     const PhysicalToolPresentation& presentation(uint32_t layer_id, std::optional<float> event_z);
     const PhysicalToolPreviewCacheMetrics& metrics() const { return m_metrics; }

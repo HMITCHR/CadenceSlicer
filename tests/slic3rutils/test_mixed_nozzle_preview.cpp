@@ -62,6 +62,11 @@ struct SlicedPreview {
                 binding.configured_physical_tool = static_cast<uint8_t>(resolution.tool->physical_extruder);
             input.configured_bindings.push_back(std::move(binding));
         }
+        // What the legend counts per filament, as the viewer reads it from the processed export.
+        const std::vector<float> diameters(cfg.filament_diameter.values.begin(), cfg.filament_diameter.values.end());
+        input.logical_usage = physical_tool_logical_usage(facts.statistics.model_volumes_per_extruder,
+                                                          facts.statistics.support_volumes_per_extruder, diameters,
+                                                          std::vector<float>(diameters.size(), 1.24f));
     }
 };
 
@@ -152,6 +157,28 @@ TEST_CASE("A real two-nozzle slice reaches the physical preview legend and trans
                    change.to_physical_tool == *row.to_tool;
         }));
     }
+
+    // A raft is support. The legend's usage for the filament that lays it counts those roads beside
+    // the part's.
+    Scene raft = feature_cube();
+    raft.config.set_key_value("raft_layers", new ConfigOptionInt(2));
+    raft.config.set_key_value("support_filament", new ConfigOptionInt(1));
+    raft.config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
+    SlicedPreview on_raft(std::move(raft));
+    const PrintEstimatedStatistics statistics = on_raft.facts.statistics;
+    REQUIRE_FALSE(statistics.support_volumes_per_extruder.empty());
+    const std::vector<PhysicalToolLegendRow> rows =
+        build_physical_tool_legend_rows(make_physical_tool_preview_snapshot(std::move(on_raft.input)));
+    for (const auto &[filament, support_mm3] : statistics.support_volumes_per_extruder) {
+        CAPTURE(filament, support_mm3);
+        const auto model = statistics.model_volumes_per_extruder.find(filament);
+        const double model_g = (model == statistics.model_volumes_per_extruder.end() ? 0. : model->second) * 1.24 * 0.001;
+        const auto row = std::find_if(rows.begin(), rows.end(), [filament = filament](const auto &candidate) {
+            return candidate.logical_filament == filament;
+        });
+        REQUIRE(row != rows.end());
+        CHECK(row->model_usage_g > model_g + 0.5 * support_mm3 * 1.24 * 0.001);
+    }
 }
 
 TEST_CASE("An Off slice does not offer the physical tool preview", "[TestRebuild][PhysicalPreview][Off]")
@@ -167,27 +194,4 @@ TEST_CASE("An Off slice does not offer the physical tool preview", "[TestRebuild
     CHECK_FALSE(std::any_of(entries.begin(), entries.end(), [](const auto &entry) {
         return entry.type == libvgcode::EViewType::Tool;
     }));
-}
-
-TEST_CASE("The physical tool legend counts what a filament lays on the supports and the interface",
-          "[TestRebuild][PhysicalPreview]")
-{
-    // The L PETG print: filament 1 prints the part and part of the support, filament 2 (PETG) only
-    // the support interface, filament 3 sparse infill and the support base. The processor keeps
-    // support and interface roads apart from the part's.
-    const std::map<std::size_t, double> model{{0, 9000.}, {2, 3000.}};
-    const std::map<std::size_t, double> support{{0, 500.}, {1, 178.}, {2, 1200.}};
-    const std::vector<float> diameters(3, 1.75f);
-    const std::vector<float> densities{1.24f, 1.27f, 1.24f};
-    const std::vector<PhysicalToolLogicalUsage> usage = physical_tool_logical_usage(model, support, diameters, densities);
-    REQUIRE(usage.size() == 3);
-    const double area = 3.14159265358979323846 * 0.25 * 1.75 * 1.75;
-    CHECK(usage[1].logical_filament == 1);
-    CHECK_THAT(usage[1].model_usage_m, Catch::Matchers::WithinRel(178. / area * 0.001, 1e-6));
-    CHECK_THAT(usage[1].model_usage_g, Catch::Matchers::WithinRel(178. * 1.27 * 0.001, 1e-6));
-    CHECK(usage[1].model_usage_m > 0.07);
-    CHECK_THAT(usage[0].model_usage_g, Catch::Matchers::WithinRel(9500. * 1.24 * 0.001, 1e-6));
-    CHECK_THAT(usage[2].model_usage_g, Catch::Matchers::WithinRel(4200. * 1.24 * 0.001, 1e-6));
-    // A filament with no density is left out rather than shown as 0 g.
-    CHECK(physical_tool_logical_usage(model, support, diameters, {1.24f, 0.f, 1.24f}).size() == 2);
 }

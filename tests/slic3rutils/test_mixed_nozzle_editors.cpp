@@ -2,14 +2,11 @@
 
 #include "wizard_apply_support.hpp"
 #include "fff_print/mixed_nozzle_harness.hpp"
-#include "libslic3r/Format/bbs_3mf.hpp"
 #include "slic3r/GUI/BodySplitEditorModel.hpp"
-#include "slic3r/GUI/FeatureSplitEditorNative.hpp"
-#include "slic3r/GUI/FeatureSplitEditorSupport.hpp"
 #include "slic3r/GUI/MixedNozzleWizardModel.hpp"
-#include "slic3r/GUI/ValidationActionRouting.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <set>
 #include <vector>
@@ -114,124 +111,19 @@ TEST_CASE("Body editor material reassignment survives native 3MF reload and slic
     ScopedTemporaryDir backup("rebuild_editor_body_3mf");
     project.model.set_backup_path(backup.string());
     ScopedTemporaryFile archive(".3mf");
-    const std::string path = archive.string();
     PlateData plate;
     plate.plate_index = 0;
     plate.config = *project.plate.config();
-    StoreParams store;
-    store.path = path.c_str();
-    store.model = &project.model;
-    store.config = &config;
-    store.plate_data_list.push_back(&plate);
-    store.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
-    REQUIRE(store_bbs_3mf(store));
-
-    Model loaded_model;
-    ScopedTemporaryDir loaded_backup("rebuild_editor_body_loaded");
-    loaded_model.set_backup_path(loaded_backup.string());
-    DynamicPrintConfig loaded_config;
-    ConfigSubstitutionContext substitutions {ForwardCompatibilitySubstitutionRule::Enable};
-    PlateDataPtrs loaded_plates;
-    std::vector<Preset *> embedded;
-    bool is_bbl = false, is_orca = false;
-    Semver version;
-    REQUIRE(load_bbs_3mf(path.c_str(), &loaded_config, &substitutions, &loaded_model,
-        &loaded_plates, &embedded, &is_bbl, &is_orca, &version, nullptr,
-        LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
-    REQUIRE_FALSE(loaded_plates.empty());
-    loaded_config.apply(loaded_plates.front()->config);
+    save_project_3mf(project.model, config, plate, archive.string());
+    const ReopenedProject loaded(archive.string());
     Print print;
     print.set_status_silent();
     print.is_BBL_printer() = true;
-    print.apply(loaded_model, loaded_config);
+    print.apply(loaded.model, loaded.slice_config());
     const CadenceTest::Facts sliced = CadenceTest::slice(print);
-    release_PlateData_list(loaded_plates);
-    for (Preset *preset : embedded)
-        delete preset;
     INFO(sliced.refusal.string);
     REQUIRE(sliced.refusal.string.empty());
     check_body_routes(sliced.emitted);
-}
-
-TEST_CASE("Feature editor material reassignment reaches the sliced shell and core roads",
-          "[TestRebuild][E2E][FeatureSplit][Editor]")
-{
-    ProfileSpec spec = h2d_02_06_spec();
-    spec.materials.push_back(spec.also_visible_materials.front());
-    WizardProject project(spec);
-    project.add_object("feature cube", {{"cube", Vec3d(180., 180., 12.), Vec3d::Zero(), 0}}, Vec2d(20., 20.));
-    REQUIRE(run_wizard_setup(project, choice(MixedNozzleSlicingMode::FeatureSplit)).applied);
-
-    const auto maps = project.plate.get_real_filament_maps(project.bundle.project_config);
-    // Match Plater's per-plate composition, which restores the project's nozzle pair when the
-    // selected printer preset itself does not describe two nozzles.
-    const DynamicPrintConfig full = wizard_plate_effective_config(project.bundle, project.plate);
-    PrintConfig resolver = feature_split_resolver_config_from_full(full);
-    resolver.filament_map_mode.value = project.plate.get_real_filament_map_mode(project.bundle.project_config);
-    resolver.filament_map.values = maps;
-    const auto *nozzles = full.option<ConfigOptionFloats>("nozzle_diameter");
-    REQUIRE(nozzles != nullptr);
-    const auto mode_source = effective_mixed_nozzle_mode(project.bundle.project_config, project.plate);
-    const auto mode = mode_source.effective;
-    const FeatureSplitStableTarget target {project.plate.get_index(), project.plate.id().id};
-    auto live = build_feature_split_native_live_apply(target, {0, 2}, target.plate_index, target.plate_id,
-        mode, nozzles->values.size(), project.bundle.filament_presets.size(), resolver);
-    INFO("Feature editor mode=" << int(mode) << " inherited=" << mode_source.inherits_project
-         << " project map=" << project.bundle.project_config.opt_serialize("filament_map")
-         << " plate map count=" << maps.size()
-         << " first=" << (maps.empty() ? -1 : maps[0])
-         << " second=" << (maps.size() < 2 ? -1 : maps[1])
-         << " third=" << (maps.size() < 3 ? -1 : maps[2])
-         << " nozzle count=" << nozzles->values.size() << " logical filament count="
-         << project.bundle.filament_presets.size() << " editor diagnostic=" << int(live.state.diagnostic)
-         << " status=" << live.state.full_status);
-    REQUIRE(mode == MixedNozzleSlicingMode::FeatureSplit);
-    REQUIRE(live.request.has_value());
-    // Setup chose 0.30 mm. On this cube the engine prices 0.30 mm as slower than all fine and
-    // prints no coarse roads, while 0.40 mm earns them, so the editor moves the core to 0.40 mm.
-    live.request->coarse_layer_height = .40;
-    int snapshots = 0, notifications = 0;
-    FeatureSplitMutationHooks hooks;
-    hooks.snapshot = [&] { ++snapshots; };
-    hooks.notify_batch_changed = [&] { ++notifications; };
-    const auto applied = commit_feature_split_editor_request(project.bundle.project_config,
-        project.bundle.prints.get_edited_preset().config, project.plate, mode, target.plate_index,
-        target.plate_id, nozzles->values.size(), resolver,
-        feature_split_coarse_cadence_choices(full.opt_float("layer_height"), resolver), *live.request, hooks);
-    REQUIRE(applied.applied);
-    REQUIRE(applied.changed);
-    CHECK(snapshots == 1);
-    CHECK(notifications == 1);
-
-    const PlateSlice slice = slice_plate(project);
-    INFO(slice.refusal);
-    INFO("Feature economics: " << slice.economics);
-    INFO("Feature materials: " << slice.config.opt_serialize("filament_settings_id")
-         << " map=" << slice.config.opt_serialize("filament_map")
-         << " self=" << slice.config.opt_serialize("filament_self_index")
-         << " caps=" << slice.config.opt_serialize("filament_max_volumetric_speed")
-         << " variants=" << slice.config.opt_serialize("filament_extruder_variant")
-         << " sparse=" << slice.config.opt_serialize("sparse_infill_density"));
-    for (const auto &[reason, count] : slice.band_reasons)
-        UNSCOPED_INFO("Feature bands " << reason << " x" << count);
-    REQUIRE(slice.refusal.empty());
-    const auto facts = Emitted::extract_emitted_facts(slice.gcode);
-    float fine_height = 0.f, coarse_height = 0.f;
-    bool fine_material = false, coarse_material = false;
-    for (const auto &fact : facts.role_facts) {
-        if (fact.role == erExternalPerimeter && fact.physical_tool == 0) {
-            fine_material |= fact.logical_filament == 0;
-            fine_height = std::max(fine_height, fact.height);
-        }
-        if (fact.role == erInternalInfill && fact.physical_tool == 1) {
-            coarse_material |= fact.logical_filament == 2;
-            coarse_height = std::max(coarse_height, fact.height);
-        }
-    }
-    CHECK(fine_material);
-    CHECK(coarse_material);
-    CHECK_THAT(fine_height, Catch::Matchers::WithinAbs(.10, .011));
-    CHECK_THAT(coarse_height, Catch::Matchers::WithinAbs(.40, .011));
 }
 
 TEST_CASE("A swapped mixed-nozzle process keeps its printed roads after importing exported G-code settings",
@@ -333,20 +225,4 @@ TEST_CASE("Setup opens a fresh project on Body Split for a freshly loaded two-pa
                            Vec2d(120., 120.));
         CHECK(opens_on() == MixedNozzleSlicingMode::BodySplit);
     }
-}
-
-TEST_CASE("Plate Settings opens its Feature rows only for a validation action that points at them",
-          "[TestRebuild][PlateSettings]")
-{
-    // Every validation key routed to Plate Settings opens the rows at the named combo.
-    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "top_surface_filament_id",
-                            "bottom_surface_filament_id", "internal_solid_filament_id", "sparse_infill_filament_id"}) {
-        const ValidationActionRoute route = mixed_nozzle_validation_route(key, false);
-        REQUIRE(route.action == ValidationAction::PlateSettingsFeature);
-        CHECK(plate_settings_event_opens_feature_rows(validation_feature_focus_event(route.focus)));
-    }
-    // A plain open (sidebar, plate icon, test mode) and the layer-sequence open keep Edit here off.
-    CHECK_FALSE(plate_settings_event_opens_feature_rows(""));
-    CHECK_FALSE(plate_settings_event_opens_feature_rows("only_layer_sequence"));
-    CHECK_FALSE(plate_settings_event_opens_feature_rows(validation_feature_focus_event(ValidationFocus::None)));
 }

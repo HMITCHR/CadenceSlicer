@@ -1,8 +1,15 @@
 #ifndef slic3r_Surface_hpp_
 #define slic3r_Surface_hpp_
 
-#include "libslic3r.h"
+#include "Polygon.hpp"
+#include "Point.hpp"
 #include "ExPolygon.hpp"
+#include <utility>
+#include <vector>
+#include <cstddef>
+#include <algorithm>
+#include <iterator>
+#include "BoundingBox.hpp"
 
 namespace Slic3r {
 
@@ -72,7 +79,7 @@ public:
             bridge_angle(other.bridge_angle), extra_perimeters(other.extra_perimeters),
             coarse_band_roof(other.coarse_band_roof)
         {};
-    Surface(Surface &&rhs)
+    Surface(Surface &&rhs) noexcept
         : surface_type(rhs.surface_type), expolygon(std::move(rhs.expolygon)),
             thickness(rhs.thickness), thickness_layers(rhs.thickness_layers),
             bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters),
@@ -102,7 +109,7 @@ public:
         return *this;
     }
 
-    Surface& operator=(Surface &&rhs)
+    Surface& operator=(Surface &&rhs) noexcept
     {
         surface_type     = rhs.surface_type;
         expolygon        = std::move(rhs.expolygon);

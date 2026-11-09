@@ -40,8 +40,8 @@
   --plugin-status-warn-bg: rgba(199, 122, 22, 0.12);
   --plugin-status-inactive-bg: #edf1f5;
   --plugin-status-inactive-text: #44505c;
-  --plugin-source-mine-bg: rgba(0, 137, 123, 0.12);
-  --plugin-source-mine-text: #00897b;
+  --plugin-source-mine-bg: rgba(249, 195, 20, 0.12);
+  --plugin-source-mine-text: #856400;
   --plugin-source-neutral-bg: #edf1f5;
   --plugin-source-neutral-text: #44505c;
   --plugin-source-subscribed-bg: rgba(37, 99, 170, 0.12);
@@ -57,8 +57,13 @@
   /* Speed dial icon tile treatment */
   --speed-tile-bg: #efefef;
   --speed-tile-border: #d8d8d8;
-  --speed-tile-text-s: 74%;
-  --speed-tile-text-l: 34%;
+
+  /* Transparency and control markers are UI surfaces, never color data. */
+  --checker-light: #eeeeee;
+  --checker-dark: #aaaaaa;
+  --color-marker-outline: #ffffff;
+  --color-marker-shadow: rgba(0, 0, 0, 0.7);
+  --control-invalid: var(--plugin-status-danger);
 }
 
 :root[data-orca-theme="dark"] {
@@ -80,8 +85,8 @@
   --plugin-status-warn-bg: rgba(240, 180, 90, 0.18);
   --plugin-status-inactive-bg: #36363b;
   --plugin-status-inactive-text: #c7ccd2;
-  --plugin-source-mine-bg: rgba(0, 150, 136, 0.18);
-  --plugin-source-mine-text: #8de5d6;
+  --plugin-source-mine-bg: rgba(249, 195, 20, 0.18);
+  --plugin-source-mine-text: #f9c314;
   --plugin-source-neutral-bg: #36363b;
   --plugin-source-neutral-text: #c7ccd2;
   --plugin-source-subscribed-bg: rgba(88, 166, 255, 0.18);
@@ -97,8 +102,8 @@
   /* Speed dial icon tile treatment */
   --speed-tile-bg: #34343b;
   --speed-tile-border: #50505a;
-  --speed-tile-text-s: 82%;
-  --speed-tile-text-l: 84%;
+  --checker-light: #68686f;
+  --checker-dark: #414148;
 }
 
 /* Re-theme the shared common.css chrome through variables (replaces dark.css's

@@ -2,9 +2,12 @@
 #define slic3r_Utils_UndoRedo_hpp_
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cassert>
 

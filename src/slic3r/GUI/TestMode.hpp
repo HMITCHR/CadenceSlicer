@@ -61,6 +61,9 @@ struct TestModeWizardAccess
     static bool set_exact_slot(MixedNozzleWizardDialog &dialog, std::size_t part, int slot, std::string &error);
     static bool pick_row(MixedNozzleWizardDialog &dialog, std::size_t row, std::string &error);
     static void dump(MixedNozzleWizardDialog &dialog, nlohmann::json &out);
+    // For the step timings: a row still slicing or without its time, and step 3 shown with every time in.
+    static bool ranking_busy(MixedNozzleWizardDialog &dialog);
+    static bool ranking_shown(MixedNozzleWizardDialog &dialog);
 };
 
 } // namespace Slic3r::GUI

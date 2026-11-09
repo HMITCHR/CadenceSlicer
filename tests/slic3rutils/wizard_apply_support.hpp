@@ -9,6 +9,7 @@
 #include "slic3r/GUI/MixedNozzleSetupController.hpp"
 #include "slic3r/GUI/MixedNozzleWizardTransaction.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
 
@@ -50,9 +51,7 @@ inline PresetBundle installed_bbl_profiles() { return installed_vendor_profiles(
 
 struct HookLog {
     int snapshots {0};
-    int prepared_snapshots {0};
     int notifications {0};
-    std::vector<std::size_t> invalidated;
 };
 
 inline WizardApplyHooks hooks_for(HookLog &log)
@@ -61,10 +60,9 @@ inline WizardApplyHooks hooks_for(HookLog &log)
     hooks.take_snapshot = [&log] { ++log.snapshots; };
     hooks.take_snapshot_with_setup_transition = [&log](const MixedNozzleSetupPlan &) {
         ++log.snapshots;
-        ++log.prepared_snapshots;
         return true;
     };
-    hooks.invalidate = [&log](std::size_t plate_id) { log.invalidated.push_back(plate_id); };
+    hooks.invalidate = [](std::size_t) {};
     hooks.notify_batch_changed = [&log] { ++log.notifications; };
     return hooks;
 }
@@ -401,56 +399,11 @@ inline WizardSetupStage build_wizard_setup_stage(WizardProject &project, const S
 // must pass; the committed result is returned.
 inline WizardApplyResult run_wizard_setup(WizardProject &project, const SetupChoice &choice)
 {
-    INFO("test: " << Catch::getResultCapture().getCurrentTestName());
     INFO("setup on " << project.bundle.printers.get_edited_preset().name << ": "
          << (choice.mode == MixedNozzleSlicingMode::BodySplit ? "Body Split" : "Feature Split")
          << " fine " << choice.fine_height << " ratio " << choice.ratio);
     const WizardSetupStage stage = build_wizard_setup_stage(project, choice);
     PreparedWizardApply prepared = prepare_wizard_apply(stage.draft, stage.review, project.owners);
-    const auto config_value = [](const DynamicPrintConfig &config, const char *key) {
-        return config.has(key) ? config.opt_serialize(key) : std::string("absent");
-    };
-    INFO("prepared names printer=" << prepared.setup_plan.after.printer_name
-         << " process=" << prepared.setup_plan.after.process_name
-         << " live printer=" << project.bundle.printers.get_edited_preset().name
-         << " live process=" << project.bundle.prints.get_edited_preset().name);
-    INFO("prepared process first=" << config_value(prepared.setup_plan.after.process_config, "initial_layer_print_height")
-         << " layer=" << config_value(prepared.setup_plan.after.process_config, "layer_height")
-         << " min=" << config_value(prepared.setup_plan.after.process_config, "min_layer_height")
-         << " max=" << config_value(prepared.setup_plan.after.process_config, "max_layer_height"));
-    INFO("prepared project nozzles=" << config_value(prepared.project_config, "nozzle_diameter")
-         << " min=" << config_value(prepared.project_config, "min_layer_height")
-         << " max=" << config_value(prepared.project_config, "max_layer_height"));
-    INFO("prepared printer nozzles=" << config_value(prepared.setup_plan.after.printer_config, "nozzle_diameter")
-         << " min=" << config_value(prepared.setup_plan.after.printer_config, "min_layer_height")
-         << " max=" << config_value(prepared.setup_plan.after.printer_config, "max_layer_height"));
-    const Preset *prepared_printer = project.bundle.printers.find_preset(
-        prepared.setup_plan.after.printer_name, false, true);
-    const Preset *prepared_process = project.bundle.prints.find_preset(
-        prepared.setup_plan.after.process_name, false, true);
-    INFO("prepared preset lookup printer=" << (prepared_printer != nullptr)
-         << " visible=" << (prepared_printer != nullptr && prepared_printer->is_visible)
-         << " process=" << (prepared_process != nullptr)
-         << " visible=" << (prepared_process != nullptr && prepared_process->is_visible));
-    if (!prepared.admission_refusal.empty()) {
-        PresetBundle staged(project.bundle);
-        staged.project_config = prepared.project_config;
-        staged.prints.get_edited_preset().config = prepared.setup_plan.after.process_config;
-        staged.printers.get_edited_preset().config = prepared.setup_plan.after.printer_config;
-        std::vector<int> maps = project.plate.get_real_filament_maps(staged.project_config);
-        DynamicPrintConfig staged_full = staged.full_config(false, maps,
-            project.plate.get_filament_volume_maps());
-        const auto plate_delta = std::find_if(prepared.plate_deltas.begin(), prepared.plate_deltas.end(),
-            [&project](const WizardPlateConfigDelta &delta) { return delta.owner == &project.plate; });
-        staged_full.apply(plate_delta == prepared.plate_deltas.end()
-            ? *project.plate.config() : plate_delta->config, true);
-        INFO("admission composition first=" << config_value(staged_full, "initial_layer_print_height")
-             << " layer=" << config_value(staged_full, "layer_height")
-             << " coarse=" << config_value(staged_full, "mixed_nozzle_coarse_layer_height")
-             << " nozzles=" << config_value(staged_full, "nozzle_diameter")
-             << " min=" << config_value(staged_full, "min_layer_height")
-             << " max=" << config_value(staged_full, "max_layer_height"));
-    }
     INFO("prepare: " << prepared.diagnostic);
     REQUIRE(prepared.diagnostic.empty());
     INFO("engine refusal at Review: " << prepared.admission_refusal);
@@ -466,15 +419,7 @@ inline WizardApplyResult run_wizard_setup(WizardProject &project, const SetupCho
 // on top (BackgroundSlicingProcess::apply), applied twice, validated, processed and exported.
 struct PlateSlice {
     DynamicPrintConfig config;
-    // Print::validate()'s refusal; empty when admitted.
-    std::string refusal;
     std::string gcode;
-    // Each printing region's sparse infill and outer wall filament (1-based), for failure messages.
-    std::vector<std::pair<int, int>> region_filaments;
-    // The Feature Split whole-print time decision (first line of the engine's digest), if it ran.
-    std::string economics;
-    // Feature bands by outcome and reason ("outcome:reason" -> count), from the advisor snapshot.
-    std::map<std::string, int> band_reasons;
     // The tower brim the engine resolved (mm), 0 without a tower.
     float tower_brim_width {0.f};
     // The G-code processor's moves and statistics from the export.
@@ -505,7 +450,8 @@ inline DynamicPrintConfig plate_slice_config(WizardProject &project)
     return plate_slice_config(project, project.plate);
 }
 
-inline PlateSlice slice_plate(WizardProject &project)
+// The plate sliced as Slice runs it; it must be admitted and export G-code.
+inline PlateSlice admitted_slice(WizardProject &project)
 {
     PlateSlice out;
     out.config = plate_slice_config(project);
@@ -515,20 +461,10 @@ inline PlateSlice slice_plate(WizardProject &project)
     print.set_plate_origin(project.plate.get_origin());
     print.apply(project.model, out.config);
     print.apply(project.model, out.config);
-    out.refusal = print.validate().string;
-    if (!out.refusal.empty())
-        return out;
+    const std::string refusal = print.validate().string;
+    INFO("Slice refused: " << refusal);
+    REQUIRE(refusal.empty());
     print.process();
-    const std::string &digest = print.feature_economics_whole_print_digest();
-    out.economics = digest.substr(0, digest.find('\n'));
-    for (const PrintObject *object : print.objects())
-        for (std::size_t region = 0; region < object->num_printing_regions(); ++region)
-            out.region_filaments.emplace_back(object->printing_region(region).config().sparse_infill_filament_id.value,
-                                              object->printing_region(region).config().outer_wall_filament_id.value);
-    for (const PrintObject *object : print.objects())
-        if (const auto observations = object->mixed_nozzle_advisor_observations())
-            for (const auto &band : observations->feature_bands)
-                ++out.band_reasons[std::to_string(int(band.outcome)) + ":" + band.reason];
     if (print.has_wipe_tower())
         out.tower_brim_width = print.wipe_tower_data().brim_width;
     ScopedTemporaryFile file(".gcode");
@@ -538,7 +474,57 @@ inline PlateSlice slice_plate(WizardProject &project)
     out.statistics = result.print_statistics;
     std::ifstream stream(file.string());
     out.gcode.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    REQUIRE_FALSE(out.gcode.empty());
     return out;
 }
+
+// Saves the model, the project config and one plate's own settings as the app's 3MF.
+inline void save_project_3mf(Model &model, DynamicPrintConfig &config, PlateData &plate, const std::string &path)
+{
+    StoreParams store;
+    store.path = path;
+    store.model = &model;
+    store.config = &config;
+    store.plate_data_list.push_back(&plate);
+    store.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store));
+}
+
+// A 3MF opened again as File > Open reads it: the model, the project config, and the first plate's
+// own settings.
+struct ReopenedProject {
+    ScopedTemporaryDir backup {"cadence_reopened_3mf"};
+    Model model;
+    DynamicPrintConfig config;
+    DynamicPrintConfig plate_config;
+
+    explicit ReopenedProject(const std::string &path)
+    {
+        model.set_backup_path(backup.string());
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+        PlateDataPtrs plates;
+        std::vector<Preset *> embedded;
+        bool is_bbl = false, is_orca = false;
+        Semver version;
+        const bool loaded = load_bbs_3mf(path.c_str(), &config, &substitutions, &model, &plates, &embedded, &is_bbl,
+                                         &is_orca, &version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+        const bool has_plate = !plates.empty();
+        if (has_plate)
+            plate_config = plates.front()->config;
+        release_PlateData_list(plates);
+        for (Preset *preset : embedded)
+            delete preset;
+        REQUIRE(loaded);
+        REQUIRE(has_plate);
+    }
+
+    // The config Slice reads: the project config with the plate's own settings on top.
+    DynamicPrintConfig slice_config() const
+    {
+        DynamicPrintConfig out = config;
+        out.apply(plate_config);
+        return out;
+    }
+};
 
 } // namespace Slic3r::GUI::WizardTest

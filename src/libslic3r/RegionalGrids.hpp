@@ -103,7 +103,7 @@ struct RegionalOwnershipResolution
 // clearly the smaller: the shared volume is at most 10% of the bigger part's volume and the smaller
 // part is at most half the bigger part's volume. Text sunk 0.2 mm into a 60 x 40 x 10 mm base shares
 // about 0.2% of the base and is about 1% of its volume. Two boxes of similar size, or a heavy overlap
-// of half a box, are refused as before: neither part is clearly the one the user meant to win.
+// of half a box, are refused: neither part is clearly the one the user meant to win.
 constexpr double body_split_kept_overlap_max_share  = 0.10;
 constexpr double body_split_kept_part_max_share     = 0.50;
 [[nodiscard]] bool body_split_smaller_part_keeps_overlap(double smaller_mm3, double bigger_mm3, double shared_mm3);

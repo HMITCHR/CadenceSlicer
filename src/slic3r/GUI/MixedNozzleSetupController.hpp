@@ -59,7 +59,7 @@ struct MixedNozzleSetupRequest {
     std::vector<double> max_layer_heights;
     // Keeping it on the request pins the automatic policy to this transaction.
     std::optional<MixedNozzleTowerPolicyRequest> tower_policy;
-    // Resolved by detached staging before the snapshot. Empty keeps the mode-only behaviour; a
+    // Resolved by detached staging before the snapshot. Empty keeps the mode-only behavior; a
     // value is preflighted by the bundle adapter.
     std::optional<std::string> resolved_process_name;
     std::optional<std::string> resolved_printer_name;
@@ -135,7 +135,7 @@ struct MixedNozzleSetupHooks {
     std::function<void(PartPlate &)> invalidate;
     std::function<void()> notify_batch_changed;
     // Called after the snapshot and before project and plate writes, to publish preflighted preset
-    // values. Empty keeps the mode-only behaviour.
+    // values. Empty keeps the mode-only behavior.
     std::function<bool()> publish_staged_state;
     std::function<void(const std::string &, const DynamicPrintConfig &,
                        const std::string &, const DynamicPrintConfig &,

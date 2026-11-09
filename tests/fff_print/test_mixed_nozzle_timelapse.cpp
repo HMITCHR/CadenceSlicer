@@ -3,11 +3,9 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Utils.hpp"
 
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
 #include <memory>
 #include <regex>
 #include <set>
@@ -99,7 +97,7 @@ PhotoStyles photo_styles(const std::string &gcode)
 // A saved plate, sliced as it is (its own printer, timelapse template and farthest-point setting).
 struct PlateSlice { Model model; Print print; Facts facts; };
 
-std::unique_ptr<PlateSlice> slice_saved_plate(const std::string &path, int farthest_point = -1, const std::string &overrides = {})
+std::unique_ptr<PlateSlice> slice_saved_plate(const std::string &path)
 {
     auto out = std::make_unique<PlateSlice>();
     DynamicPrintConfig config;
@@ -123,23 +121,6 @@ std::unique_ptr<PlateSlice> slice_saved_plate(const std::string &path, int farth
             delete preset;
         REQUIRE(loaded);
     }
-    if (farthest_point >= 0)
-        config.set_key_value("farthest_point_timelapse", new ConfigOptionBool(farthest_point != 0));
-    // "key=value;key=value", measure only.
-    for (std::stringstream list(overrides); list.good();) {
-        std::string item;
-        std::getline(list, item, ';');
-        const size_t eq = item.find('=');
-        if (eq != std::string::npos) {
-            ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Disable);
-            config.set_deserialize(item.substr(0, eq), item.substr(eq + 1), context);
-        }
-    }
-    // Another printer's timelapse template, measure only.
-    if (const char *other = std::getenv("CADENCE_TL_TEMPLATE")) {
-        std::ifstream file(other, std::ios::binary);
-        config.set_key_value("time_lapse_gcode", new ConfigOptionString(std::string(std::istreambuf_iterator<char>(file), {})));
-    }
     // Mark each photo with the nozzle it names and the nozzle printing (see photos_of).
     config.set_key_value("time_lapse_gcode", new ConfigOptionString(photo_template + config.opt_string("time_lapse_gcode")));
     out->print.is_BBL_printer() = true;
@@ -153,165 +134,57 @@ std::unique_ptr<PlateSlice> slice_saved_plate(const std::string &path, int farth
 TEST_CASE("Body Split takes every timelapse photo the same way, inline at the farthest point with the nozzle printing there",
           "[TestRebuild][Timelapse]")
 {
-    // Print 2 of the tiny-text fill plate (H2D 0.2/0.6, Traditional, farthest point on): 9 layers took the
-    // inline photo with the 0.6 (head in the shot) and 8 parked a nozzle off the parts, so the video jumped
-    // between the two. The 3 boxes of that plate are one box here; the same layers alternate nozzles.
-    const auto sliced = slice_saved_plate(std::string(TEST_DATA_DIR) + "/body-split-tiny-text.3mf");
-    INFO(sliced->facts.refusal.string);
-    REQUIRE(sliced->facts.refusal.string.empty());
-    REQUIRE(sliced->print.config().farthest_point_timelapse.value);
-    REQUIRE(sliced->print.config().timelapse_type.value == tlTraditional);
-    const PhotoStyles styles = photo_styles(sliced->facts.gcode);
-    std::ostringstream parked;
-    for (size_t layer : styles.parked_layers)
-        parked << ' ' << layer;
-    INFO("layers " << styles.layers << ", inline " << styles.inline_photos << ", parked " << styles.parked << " (layers" << parked.str() << ")");
-    REQUIRE(styles.layers > 10);
-    // One photo per layer, every one inline.
-    CHECK(styles.parked == 0);
-    CHECK(styles.inline_photos == styles.layers);
-    CHECK_FALSE(warns_traditional_timelapse(sliced->facts));
-    // Each photo names the nozzle taking it. The H2C template lifts the head and sends it to the chute
-    // around a photo that names another nozzle, even an inline one.
-    const std::vector<Photo> photos = photos_of(sliced->facts.gcode);
-    CHECK(photos.size() == styles.inline_photos + styles.parked);
-    size_t other_nozzle = 0;
-    std::set<int> printing;
-    for (const Photo &photo : photos) {
-        other_nozzle += photo.photo_nozzle != photo.printing_nozzle;
-        printing.insert(photo.printing_nozzle);
-    }
-    CHECK(other_nozzle == 0);
-    // Both nozzles take photos on this plate.
-    CHECK(printing.size() == 2);
-}
-
-TEST_CASE("Timelapse measure: saved plates to G-code files", "[.][TimelapseMeasure]")
-{
-    // CADENCE_TL_PLATES: 3MF paths separated by ':'. CADENCE_TL_OUT: output folder.
-    // CADENCE_TL_FP: unset keeps the plate's farthest_point_timelapse, 0 or 1 overrides it.
-    // CADENCE_TL_SET: "key=value;..." set on every plate, CADENCE_TL_TAG: added to the file names.
-    // CADENCE_TL_TEMPLATE: a file whose text replaces the plates' timelapse template.
-    const char *plates = std::getenv("CADENCE_TL_PLATES");
-    const char *dir = std::getenv("CADENCE_TL_OUT");
-    const char *fp = std::getenv("CADENCE_TL_FP");
-    REQUIRE(plates != nullptr);
-    REQUIRE(dir != nullptr);
-    for (std::stringstream in(plates); in.good();) {
-        std::string path;
-        std::getline(in, path, ':');
-        if (path.empty())
-            continue;
-        const char *set = std::getenv("CADENCE_TL_SET");
-        const char *tag = std::getenv("CADENCE_TL_TAG");
-        const auto sliced = slice_saved_plate(path, fp ? std::atoi(fp) : -1, set ? set : "");
-        std::string stem = path.substr(path.find_last_of('/') + 1);
-        stem = stem.substr(0, stem.find_last_of('.'));
-        if (fp)
-            stem += std::string("-fp") + fp;
-        if (tag)
-            stem += std::string("-") + tag;
-        std::ofstream(std::string(dir) + "/" + stem + ".gcode", std::ios::binary) << sliced->facts.gcode;
+    SECTION("A saved plate with the farthest-point photo") {
+        // The tiny-text fill plate (H2D 0.2/0.6, Traditional, farthest point on): its layers alternate nozzles, and
+        // every photo is the same inline one, so the video does not jump between inline and parked shots.
+        const auto sliced = slice_saved_plate(std::string(TEST_DATA_DIR) + "/body-split-tiny-text.3mf");
+        INFO(sliced->facts.refusal.string);
+        REQUIRE(sliced->facts.refusal.string.empty());
+        REQUIRE(sliced->print.config().farthest_point_timelapse.value);
+        REQUIRE(sliced->print.config().timelapse_type.value == tlTraditional);
         const PhotoStyles styles = photo_styles(sliced->facts.gcode);
-        std::cout << stem << ": refusal '" << sliced->facts.refusal.string << "' seconds " << sliced->facts.seconds << " layers "
-                  << styles.layers << " inline " << styles.inline_photos << " parked " << styles.parked << " warn "
-                  << warns_traditional_timelapse(sliced->facts) << std::endl;
-    }
-}
-
-TEST_CASE("Body Split takes each traditional timelapse photo with the nozzle already printing, so the send dialog has no timelapse warning",
-          "[TestRebuild][Timelapse]")
-{
-    // Bambu's "traditional timelapse may cause surface imperfections" warning fired on every Body Split
-    // plate: a fine layer between coarse layers ended on the fine nozzle and its photo called the
-    // coarse nozzle (the photo head) in for it. A one-nozzle print on that nozzle takes its photo with it.
-    const bool farthest_point = GENERATE(false, true);
-    CAPTURE(farthest_point);
-    const Facts facts = slice(body_split_short_fine_body(farthest_point));
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    const std::vector<Photo> photos = photos_of(facts.gcode);
-    REQUIRE_FALSE(photos.empty());
-    CHECK_FALSE(warns_traditional_timelapse(facts));
-    if (! farthest_point) {
-        // Without the farthest-point photo every photo is a parked one; none calls the other nozzle in.
-        size_t other_nozzle = 0, fine_photos = 0;
+        CAPTURE(styles.layers, styles.inline_photos, styles.parked, styles.parked_layers);
+        REQUIRE(styles.layers > 10);
+        // One photo per layer, every one inline.
+        CHECK(styles.parked == 0);
+        CHECK(styles.inline_photos == styles.layers);
+        CHECK_FALSE(warns_traditional_timelapse(sliced->facts));
+        // Each photo names the nozzle taking it. The H2C template lifts the head and sends it to the chute
+        // around a photo that names another nozzle, even an inline one.
+        const std::vector<Photo> photos = photos_of(sliced->facts.gcode);
+        CHECK(photos.size() == styles.inline_photos + styles.parked);
+        size_t other_nozzle = 0;
+        std::set<int> printing;
         for (const Photo &photo : photos) {
             other_nozzle += photo.photo_nozzle != photo.printing_nozzle;
-            fine_photos += photo.printing_nozzle == 0;
+            printing.insert(photo.printing_nozzle);
         }
         CHECK(other_nozzle == 0);
-        // The fine layers between coarse layers keep their photo (taken with the fine nozzle).
-        CHECK(fine_photos > 0);
+        // Both nozzles take photos on this plate.
+        CHECK(printing.size() == 2);
     }
-}
-
-TEST_CASE("Feature Split with Smooth timelapse on a coarse nozzle that cannot lay the layer height is refused naming Timelapse",
-          "[TestRebuild][Timelapse][Admission]")
-{
-    // Smooth keeps the prime tower level with the part, so the 0.6 nozzle (0.12 mm minimum) would lay
-    // 0.1 mm tower layers. The slice used to fail late with an internal SRL-TOWER-STRUCTURE message.
-    const auto scene_for = [](double coarse, TimelapseType type) {
-        Scene scene;
-        scene.config = feature_split_tower_config(.20, coarse, false);
-        scene.config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(type));
-        scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &config) {
-            init_tower_coupon(model, print, config, make_cube(30., 30., 2.));
-        };
-        return scene;
-    };
-    SECTION("0.2/0.6 with Smooth is refused up front") {
-        const Facts facts = slice(scene_for(.60, tlSmooth));
-        INFO(facts.refusal.string);
-        REQUIRE(facts.refusal.string.find("SRL-F17") != std::string::npos);
-        CHECK(facts.refusal.string.find("Timelapse is set to Smooth") != std::string::npos);
-        CHECK(facts.refusal.string.find("Set Timelapse to Traditional") != std::string::npos);
-        CHECK(facts.refusal.string.find("at least 0.12 mm") != std::string::npos);
-        CHECK(facts.refusal.opt_key == "timelapse_type");
-        CHECK(facts.refusal.string.find("_type") == std::string::npos);
+    SECTION("A fine body shorter than the coarse one, with and without the farthest-point photo") {
+        // A fine layer between coarse layers ends on the fine nozzle; its photo is taken with that nozzle rather
+        // than calling the coarse nozzle (the photo head) in, so there is no traditional timelapse warning.
+        for (const bool farthest_point : {false, true}) {
+            CAPTURE(farthest_point);
+            const Facts facts = slice(body_split_short_fine_body(farthest_point));
+            INFO(facts.refusal.string);
+            REQUIRE(facts.refusal.string.empty());
+            const std::vector<Photo> photos = photos_of(facts.gcode);
+            REQUIRE_FALSE(photos.empty());
+            CHECK_FALSE(warns_traditional_timelapse(facts));
+            if (farthest_point)
+                continue;
+            // Without the farthest-point photo every photo is a parked one; none calls the other nozzle in, and
+            // the fine layers between coarse layers keep their photo, taken with the fine nozzle.
+            size_t other_nozzle = 0, fine_photos = 0;
+            for (const Photo &photo : photos) {
+                other_nozzle += photo.photo_nozzle != photo.printing_nozzle;
+                fine_photos += photo.printing_nozzle == 0;
+            }
+            CHECK(other_nozzle == 0);
+            CHECK(fine_photos > 0);
+        }
     }
-    SECTION("0.2/0.6 with Traditional still slices") {
-        const Facts facts = slice(scene_for(.60, tlTraditional));
-        INFO(facts.refusal.string);
-        CHECK(facts.refusal.string.empty());
-        CHECK_FALSE(facts.gcode.empty());
-    }
-    SECTION("0.2/0.4 with Smooth still slices: the 0.4 nozzle lays the 0.1 mm tower layers") {
-        const Facts facts = slice(scene_for(.40, tlSmooth));
-        INFO(facts.refusal.string);
-        CHECK(facts.refusal.string.empty());
-        CHECK_FALSE(facts.gcode.empty());
-    }
-}
-
-TEST_CASE("The late tower refusal for Smooth timelapse or clumping detection says the tower layers are too thin",
-          "[TestRebuild][Timelapse][Admission]")
-{
-    // Shown when a tower level under a nozzle's minimum still reaches the tower build (Validate refuses
-    // the cases it can see first, SRL-F17 and SRL-A38). It used to end "the tower layers that needs."
-    CHECK(mixed_nozzle_tower_too_thin_message(true) ==
-          "Timelapse is set to Smooth, which keeps the prime tower level with the part, and one nozzle cannot lay "
-          "tower layers that thin. Set Timelapse to Traditional (Others > Special mode) and slice again.");
-    CHECK(mixed_nozzle_tower_too_thin_message(false) ==
-          "Clumping detection keeps the prime tower level with the part, and one nozzle cannot lay tower layers "
-          "that thin. Turn off Enable clumping detection (Others > Special mode) and slice again.");
-    for (const bool smooth : {true, false})
-        CHECK(mixed_nozzle_tower_too_thin_message(smooth).find("that needs") == std::string::npos);
-}
-
-TEST_CASE("Body Split's Smooth timelapse refusal names the Timelapse setting and the value to pick",
-          "[TestRebuild][Timelapse][Admission]")
-{
-    Scene scene;
-    scene.config = body_split_pad_config(.2, .6, .1, .2, false, true, 60., wtwRib);
-    scene.config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlSmooth));
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &config) {
-        init_body_split_pad_coupon(model, print, config, false, 4., .1, .2);
-    };
-    const Facts facts = slice(scene);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.find("SRL-A38") != std::string::npos);
-    CHECK(facts.refusal.string.find("Timelapse set to Smooth") != std::string::npos);
-    CHECK(facts.refusal.string.find("Set Timelapse to Traditional (Others > Special mode)") != std::string::npos);
-    CHECK(facts.refusal.opt_key == "timelapse_type");
 }

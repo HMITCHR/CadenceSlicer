@@ -1,6 +1,14 @@
 #include "slic3r/GUI/CadencePalette.hpp"
 #include "HyperLink.hpp"
 #include "Label.hpp"
+#include <wx/string.h>
+#include <wx/wx.h>
+#include <wx/colour.h>
+#include <wx/gdicmn.h>
+#include <wx/event.h>
+#include <wx/utils.h>
+
+class wxWindow;
 
 namespace Slic3r { namespace GUI {
 

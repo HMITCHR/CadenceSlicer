@@ -1,6 +1,7 @@
 {
 	"type": "process",
 	"name": "MN Body 0.4-0.6 Standard 0.16-0.32 @BBL",
+	"renamed_from": "MN Body 0.4-0.6 Standard 0.16-0.32 Candidate @BBL",
 	"inherits": "fdm_process_dual_0.16_nozzle_0.4",
 	"from": "system",
 	"setting_id": "h0oKvMUZigMfCZVg",
@@ -34,6 +35,10 @@
 		"1",
 		"1",
 		"2",
+		"2",
+		"1",
+		"2",
+		"1",
 		"2"
 	],
 	"print_extruder_variant": [
@@ -44,7 +49,11 @@
 		"Bowden Standard",
 		"Bowden High Flow",
 		"Bowden Standard",
-		"Bowden High Flow"
+		"Bowden High Flow",
+		"Direct Drive E3D High Flow",
+		"Direct Drive E3D High Flow",
+		"Bowden E3D High Flow",
+		"Bowden E3D High Flow"
 	],
 	"mixed_nozzle_process_nozzle_diameters": [
 		"0.4",
@@ -58,6 +67,10 @@
 		"50",
 		"50",
 		"50",
+		"50",
+		"120",
+		"60",
+		"50",
 		"50"
 	],
 	"inner_wall_speed": [
@@ -68,6 +81,10 @@
 		"200",
 		"200",
 		"120",
+		"120",
+		"300",
+		"120",
+		"200",
 		"120"
 	],
 	"top_surface_speed": [
@@ -78,6 +95,10 @@
 		"200",
 		"200",
 		"150",
+		"150",
+		"200",
+		"150",
+		"200",
 		"150"
 	],
 	"internal_solid_infill_speed": [
@@ -88,6 +109,10 @@
 		"200",
 		"200",
 		"150",
+		"150",
+		"250",
+		"150",
+		"200",
 		"150"
 	],
 	"sparse_infill_speed": [
@@ -98,6 +123,10 @@
 		"200",
 		"200",
 		"100",
+		"100",
+		"270",
+		"100",
+		"200",
 		"100"
 	],
 	"gap_infill_speed": [
@@ -108,6 +137,10 @@
 		"250",
 		"250",
 		"50",
+		"50",
+		"250",
+		"50",
+		"250",
 		"50"
 	],
 	"default_acceleration": [
@@ -118,6 +151,10 @@
 		"1000",
 		"1000",
 		"4000",
+		"4000",
+		"10000",
+		"4000",
+		"1000",
 		"4000"
 	],
 	"outer_wall_acceleration": [
@@ -128,6 +165,10 @@
 		"1000",
 		"1000",
 		"2000",
+		"2000",
+		"5000",
+		"2000",
+		"1000",
 		"2000"
 	],
 	"sparse_infill_density": "25%",
@@ -142,6 +183,10 @@
 		"105",
 		"105",
 		"55",
+		"55",
+		"105",
+		"105",
+		"105",
 		"55"
 	],
 	"overhang_3_4_speed": [
@@ -152,6 +197,10 @@
 		"30",
 		"20",
 		"15",
+		"15",
+		"30",
+		"30",
+		"20",
 		"15"
 	],
 	"bridge_speed": [
@@ -162,6 +211,10 @@
 		"50",
 		"50",
 		"30",
+		"30",
+		"50",
+		"50",
+		"50",
 		"30"
 	],
 	"top_surface_acceleration": [
@@ -172,7 +225,14 @@
 		"1000",
 		"1000",
 		"2000",
+		"2000",
+		"2000",
+		"2000",
+		"1000",
 		"2000"
 	],
-	"renamed_from": "MN Body 0.4-0.6 Standard 0.16-0.32 Candidate @BBL"
+	"fuzzy_skin": "disabled_fuzzy",
+	"fuzzy_skin_point_distance": "0.3",
+	"fuzzy_skin_thickness": "0.2",
+	"support_ironing_spacing": "0.1"
 }

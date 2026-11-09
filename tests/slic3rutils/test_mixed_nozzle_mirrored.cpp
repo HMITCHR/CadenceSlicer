@@ -98,9 +98,7 @@ PairSlice set_up_and_slice(double left, double right, MixedNozzleSlicingMode mod
     choice.fine_height = fine_height;
     choice.ratio = ratio;
     run_wizard_setup(project, choice);
-    const PlateSlice slice = slice_plate(project);
-    INFO("Slice refused: " << slice.refusal);
-    REQUIRE(slice.refusal.empty());
+    const PlateSlice slice = admitted_slice(project);
 
     PairSlice out;
     out.process_name = project.bundle.prints.get_edited_preset().name;

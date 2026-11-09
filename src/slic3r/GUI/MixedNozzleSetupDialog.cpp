@@ -27,8 +27,10 @@
 #include <wx/statbmp.h>
 
 #include "libslic3r/MixedNozzleRanking.hpp"
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Slicing.hpp"
 
+#include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
 #include "wxExtensions.hpp"
@@ -1093,6 +1095,8 @@ void MixedNozzleWizardDialog::refresh_ranking()
     const std::optional<WizardEstimate> baseline = m_ranking->estimate(WIZARD_RANKING_BASELINE_ROW);
     m_cadence_page = wizard_cadence_page(m_candidates, m_input.draft.chosen_fine_height,
                                          m_input.effective_config, baseline ? *baseline : WizardEstimate{});
+    // The baseline that keeps the colors says so (app setting, off by default).
+    m_cadence_page.colors_kept = wxGetApp().app_config->get_bool("cadence_setup_baseline_keep_colors");
     wizard_mark_current(m_cadence_page, m_input.draft.chosen_fine_height, m_existing_layers);
     // The row being sliced now says so.
     const std::optional<std::string> &slicing = m_ranking->running_row();
@@ -1260,7 +1264,8 @@ MixedNozzleRankingSlice MixedNozzleWizardDialog::compose_ranking_row(const std::
     MixedNozzleRankingSlice slice = m_input.compose_ranking_slice(m_input.draft, *candidate, body);
     if (baseline)
         return wizard_baseline_ranking_slice(std::move(slice), m_input.draft.fine_logical_filament,
-                                             candidate->fine_height);
+                                             candidate->fine_height,
+                                             wxGetApp().app_config->get_bool("cadence_setup_baseline_keep_colors"));
     return slice;
 }
 
@@ -1484,6 +1489,7 @@ bool MixedNozzleWizardDialog::refresh_review()
     summary.estimate = candidate.estimate;
     if (m_ranking)
         summary.baseline = m_ranking->estimate(WIZARD_RANKING_BASELINE_ROW);
+    summary.baseline_colors_kept = wxGetApp().app_config->get_bool("cadence_setup_baseline_keep_colors");
     // The supports as the project has them; setup keeps them. The prepared process below, when it
     // is read, has the final word.
     const std::vector<std::string> &filament_types = m_input.effective_config.filament_type.values;

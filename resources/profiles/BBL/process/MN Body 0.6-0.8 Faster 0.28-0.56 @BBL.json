@@ -1,6 +1,7 @@
 {
 	"type": "process",
 	"name": "MN Body 0.6-0.8 Faster 0.28-0.56 @BBL",
+	"renamed_from": "MN Body 0.6-0.8 Faster 0.28-0.56 External-test candidate @BBL",
 	"inherits": "fdm_process_dual_0.30_nozzle_0.6",
 	"from": "system",
 	"setting_id": "ggtxfrdTf0Nber3A",
@@ -36,6 +37,10 @@
 		"1",
 		"1",
 		"2",
+		"2",
+		"1",
+		"2",
+		"1",
 		"2"
 	],
 	"print_extruder_variant": [
@@ -46,7 +51,11 @@
 		"Bowden Standard",
 		"Bowden High Flow",
 		"Bowden Standard",
-		"Bowden High Flow"
+		"Bowden High Flow",
+		"Direct Drive E3D High Flow",
+		"Direct Drive E3D High Flow",
+		"Bowden E3D High Flow",
+		"Bowden E3D High Flow"
 	],
 	"mixed_nozzle_process_nozzle_diameters": [
 		"0.6",
@@ -60,6 +69,10 @@
 		"50",
 		"50",
 		"50",
+		"50",
+		"120",
+		"60",
+		"50",
 		"50"
 	],
 	"inner_wall_speed": [
@@ -70,9 +83,17 @@
 		"150",
 		"150",
 		"120",
+		"120",
+		"150",
+		"120",
+		"150",
 		"120"
 	],
 	"top_surface_speed": [
+		"150",
+		"150",
+		"150",
+		"150",
 		"150",
 		"150",
 		"150",
@@ -90,9 +111,17 @@
 		"150",
 		"150",
 		"150",
+		"150",
+		"150",
+		"150",
+		"150",
 		"150"
 	],
 	"sparse_infill_speed": [
+		"100",
+		"100",
+		"100",
+		"100",
 		"100",
 		"100",
 		"100",
@@ -110,6 +139,10 @@
 		"50",
 		"50",
 		"50",
+		"50",
+		"50",
+		"50",
+		"50",
 		"50"
 	],
 	"default_acceleration": [
@@ -118,6 +151,10 @@
 		"4000",
 		"4000",
 		"4000",
+		"4000",
+		"4000",
+		"4000",
+		"10000",
 		"4000",
 		"4000",
 		"4000"
@@ -130,6 +167,10 @@
 		"4000",
 		"4000",
 		"2000",
+		"2000",
+		"5000",
+		"2000",
+		"4000",
 		"2000"
 	],
 	"sparse_infill_density": "25%",
@@ -144,7 +185,14 @@
 		"10",
 		"10",
 		"5",
+		"5",
+		"10",
+		"10",
+		"10",
 		"5"
 	],
-	"renamed_from": "MN Body 0.6-0.8 Faster 0.28-0.56 External-test candidate @BBL"
+	"fuzzy_skin": "disabled_fuzzy",
+	"fuzzy_skin_point_distance": "0.3",
+	"fuzzy_skin_thickness": "0.2",
+	"support_ironing_spacing": "0.1"
 }

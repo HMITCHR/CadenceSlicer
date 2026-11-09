@@ -48,7 +48,8 @@ TEST_CASE("The Windows executable is CadenceSlicer.exe", "[WindowsIdentity]")
     CHECK(contains(app.substr(gui, 120), "OUTPUT_NAME \"CadenceSlicer\""));
 
     const std::string root = source_file("CMakeLists.txt");
-    CHECK(contains(root, "set (CPACK_NSIS_INSTALLED_ICON_NAME  \"$INSTDIR\\\\\\\\CadenceSlicer.exe\")"));
+    // OrcaSlicer 2.5 names the icon relative to the install dir (CPack's NSIS template adds $INSTDIR).
+    CHECK(contains(root, "set (CPACK_NSIS_INSTALLED_ICON_NAME \"CadenceSlicer.exe\")"));
     CHECK(contains(root, "set(CPACK_PACKAGE_EXECUTABLES \"CadenceSlicer;${SLIC3R_APP_NAME}\")"));
     CHECK(contains(root, "set(CPACK_CREATE_DESKTOP_LINKS \"CadenceSlicer\")"));
 

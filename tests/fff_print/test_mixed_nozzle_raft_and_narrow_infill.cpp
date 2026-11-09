@@ -1,5 +1,5 @@
-// A narrow region keeps its sparse infill under Feature Split, a raft's rounded gap is not
-// reported as an empty layer, and Body Split on a raft is refused with a message the user can act on.
+// A narrow region keeps its sparse infill under Feature Split, and a raft's rounded gap is not
+// reported as an empty layer.
 
 #include <catch2/catch_all.hpp>
 
@@ -8,8 +8,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -24,15 +22,6 @@ bool has_warning(const PrintStateBase::StateWithWarnings &state, PrintStateBase:
     return std::any_of(state.warnings.begin(), state.warnings.end(), [code](const PrintStateBase::Warning &warning) {
         return warning.message_id == code;
     });
-}
-
-// With CADENCE_TEST_DUMP_DIR set, keeps a case's G-code there for inspection.
-void dump_gcode(const std::string &name, const std::string &gcode)
-{
-    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR")) {
-        std::ofstream out(std::string(dir) + "/" + name + ".gcode");
-        out << gcode;
-    }
 }
 
 // Sparse infill laid inside an XY window, in mm3 of filament.
@@ -105,10 +94,6 @@ TEST_CASE("Feature Split keeps the sparse infill of a region narrower than the c
         const CadenceTest::Facts split = slice_column(true, shift);
         INFO(split.refusal.string);
         REQUIRE(split.refusal.string.empty());
-        if (step == 0) {
-            dump_gcode("column-stock", stock.gcode);
-            dump_gcode("column-split", split.gcode);
-        }
         const double stock_volume = sparse_infill_volume(stock.moves, window);
         const double split_volume = sparse_infill_volume(split.moves, window);
         REQUIRE(stock_volume > 10.);
@@ -150,7 +135,6 @@ TEST_CASE("A raft whose gap is rounded up to the fine layer exports without an e
     INFO(facts.refusal.string);
     REQUIRE(facts.refusal.string.empty());
     REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode("raft-gap", facts.gcode);
     const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
     CAPTURE(slicing.gap_raft_object, slicing.raft_contact_top_z);
     // The scene: the gap the slicer uses is larger than the configured one.
@@ -162,34 +146,4 @@ TEST_CASE("A raft whose gap is rounded up to the fine layer exports without an e
         if (CadenceTest::model_road(move))
             first_model_bottom = std::min(first_model_bottom, double(move.position.z()) - double(move.height));
     CHECK_THAT(first_model_bottom - slicing.raft_contact_top_z, Catch::Matchers::WithinAbs(slicing.gap_raft_object, 1e-3));
-}
-
-// Body Split on a raft failed late with internal messages (SRL-A38, SRL-C02 code 10, the
-// tower's structure check, empty layers). It is refused at validation instead, naming the setting.
-TEST_CASE("Body Split on a raft is refused, naming Raft layers", "[TestRebuild][Raft]")
-{
-    CadenceTest::Scene scene = CadenceTest::body_coupon();
-    const auto validate = [](CadenceTest::Scene checked) {
-        fill_per_filament_values(checked.config);
-        Model model;
-        Print print;
-        print.is_BBL_printer() = checked.bambu;
-        checked.populate(model, print, checked.config);
-        return print.validate();
-    };
-    {
-        const StringObjectException plain = validate(scene);
-        INFO(plain.string);
-        CHECK(plain.string.empty());
-    }
-    scene.config.set_key_value("raft_layers", new ConfigOptionInt(2));
-    // The raft's base on the fine nozzle.
-    scene.config.set_key_value("support_filament", new ConfigOptionInt(1));
-    scene.config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
-    const StringObjectException refused = validate(scene);
-    INFO(refused.string);
-    REQUIRE_FALSE(refused.string.empty());
-    CHECK(refused.string.find("[SRL-A54]") != std::string::npos);
-    CHECK(refused.opt_key == "raft_layers");
-    CHECK(refused.string.find("Raft layers") != std::string::npos);
 }

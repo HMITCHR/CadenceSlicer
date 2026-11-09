@@ -1,21 +1,48 @@
+#include "Flow.hpp"
+#include "Config.hpp"
+#include "ExPolygon.hpp"
+#include "ExtrusionEntity.hpp"
+#include "Exception.hpp"
 #include "Layer.hpp"
 #include "BridgeDetector.hpp"
 #include "ClipperUtils.hpp"
 #include "Geometry.hpp"
 #include "MixedNozzleConfig.hpp"
+#include "Line.hpp"
 #include "PerimeterGenerator.hpp"
 #include "Point.hpp"
+#include "Polygon.hpp"
+#include "Polyline.hpp"
 #include "Print.hpp"
+#include "PrintConfig.hpp"
 #include "Surface.hpp"
 #include "BoundingBox.hpp"
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
+#include "libslic3r.h"
+#include "Utils.hpp"
 
+#include <cmath>
+#include <array>
+#include <cstddef>
+#include <initializer_list>
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <iterator>
+#include <stdexcept>
+#include <math.h>
+#include <cassert>
 #include <string>
 #include <map>
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/clamp.hpp>
+#include <utility>
+#include <vector>
+#include "ExtrusionEntityCollection.hpp"
+#include "MultiMaterialSegmentation.hpp"
+#include "SurfaceCollection.hpp"
 
 namespace Slic3r {
 
@@ -90,9 +117,13 @@ Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge, double layer_h
     const std::optional<unsigned int> cell_override = this->flow_filament_override(role);
     const unsigned int       logical_filament = cell_override ? *cell_override : region.extruder(role) - 1;
     // One lookup for the nozzle this road is laid with, shared with every check that has to agree with
-    // it. Off mode reads the filament's own column; an active mode reads the physical tool the map
-    // sends the filament to, and refuses to guess when it cannot resolve one.
-    const std::optional<double> resolved_nozzle = mixed_nozzle_flow_nozzle_diameter(print_config, logical_filament);
+    // it. Off mode reads it as upstream does, with nozzle_diameter_for_filament; here
+    // logical_filament may underflow to MAX_INT, the + 1 wraps it back to 0, and get_at() then falls
+    // back to the zero'th element. An active mode reads the physical tool the map sends the filament
+    // to, and refuses to guess when it cannot resolve one.
+    const std::optional<double> resolved_nozzle = is_mixed_nozzle_slicing_enabled(print_config) ?
+        mixed_nozzle_flow_nozzle_diameter(print_config, logical_filament) :
+        std::optional<double>(nozzle_diameter_for_filament(print_config, int(logical_filament + 1), print_object.print()->is_BBL_printer()));
     if (!resolved_nozzle)
         throw Slic3r::SlicingError("Mixed-Nozzle bridge flow requires a resolved physical extruder.", print_object.model_object()->id().id);
     auto nozzle_diameter = float(*resolved_nozzle);
@@ -132,10 +163,11 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
         by_surface[size_t(surface.surface_type)].emplace_back(&surface);
     // Trim surfaces by the fill_boundaries.
     this->fill_surfaces.surfaces.clear();
+    const Polygons fill_boundaries = to_polygons(this->fill_expolygons);
     for (size_t surface_type = 0; surface_type < size_t(stCount); ++ surface_type) {
         const SurfacesPtr &this_surfaces = by_surface[surface_type];
         if (! this_surfaces.empty())
-            this->fill_surfaces.append(intersection_ex(this_surfaces, this->fill_expolygons), SurfaceType(surface_type));
+            this->fill_surfaces.append(intersection_ex_by_piece(to_expolygons(this_surfaces), fill_boundaries), SurfaceType(surface_type));
     }
 }
 
@@ -143,8 +175,7 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
 // says. Its walls are about three times as wide as the fine body's, so the usual wall count (four on the
 // MN presets) takes 2.5 mm or more from every edge of a top surface, and from every hole in it. A top
 // around text or another part sunk into the body is then nearly all walls meeting at odd angles, with
-// the slivers between them left to gap fill or left open (owner print of the combined L test, build 5:
-// one top-surface road per letter gap, 250 gap fill roads per layer, holes between the letters).
+// the slivers between them left to gap fill or left open.
 // One wall is the stock Bambu default (fdm_process_common), so this hands the top to the top surface
 // pattern the way a single-nozzle slice would. Cells converted to the fine nozzle by fine skins are
 // left alone, and so are Off mode and Feature Split, where no region is a coarse Body Split cell.
@@ -210,12 +241,6 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         fill_no_overlap
     );
     
-    if (const Layer *lower_event = this->lower_event_layer())
-        // What this wall rests on: every region that finished on the plane at its bottom. For an ordinary
-        // layer that is the layer below. For a Body Split cell it is the event layer at the cell's own
-        // bottom, without the cells that only pass through that plane: those print later and hold nothing
-        // up. Off mode and Feature Split read the ordinary lslices.
-        g.lower_slices = &lower_event->lslices;
     if (const Layer *upper_event = this->upper_event_layer())
         g.upper_slices = &upper_event->slab_coverage();
 
@@ -224,7 +249,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.upper_slices_same_region = &upper_cell->slices;
     else if (g.upper_slices != nullptr) {
         // A Body region's last cell can have an event layer above it and no cell of its own there. The
-        // same-region neighbour is then empty, never unset.
+        // same-region neighbor is then empty, never unset.
         static const SurfaceCollection no_same_region_cell;
         g.upper_slices_same_region = &no_same_region_cell;
     }
@@ -234,6 +259,18 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter, effective_height);
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges, effective_height);
     g.solid_infill_flow     = this->flow(frSolidInfill, effective_height);
+
+    // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
+    // What this wall rests on: every region that finished on the plane at its bottom. For an ordinary
+    // layer that is the layer below. For a Body Split cell it is the event layer at the cell's own
+    // bottom, without the cells that only pass through that plane: those print later and hold nothing
+    // up. Off mode and Feature Split use the layer below's lslices; every mode then drops what that
+    // layer could not print (printable_slices).
+    ExPolygons lower_slices;
+    if (const Layer *lower_event = this->lower_event_layer()) {
+        lower_slices   = g.printable_slices(lower_event->lslices);
+        g.lower_slices = &lower_slices;
+    }
 
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
@@ -299,7 +336,6 @@ std::vector<Bridge> get_grouped_bridges(
     {
         result.reserve(bridge_expansions.size());
         uint32_t group_id = 0;
-        using std::move_iterator;
         for (ExPolygon& expolygon : bridge_expolygons)
             result.push_back({ std::move(expolygon), group_id ++, bridge_expansions.end() });
     }
@@ -501,7 +537,6 @@ Surfaces expand_bridges_detect_orientations(
     const float closing_radius
 )
 {
-    using namespace Slic3r::Algorithm;
 
     double thickness;
     ExPolygons bridge_expolygons = fill_surfaces_extract_expolygons(surfaces, {stBottomBridge}, thickness);
@@ -723,9 +758,9 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
 }
 #else
 
-//#define EXTERNAL_SURFACES_OFFSET_PARAMETERS ClipperLib::jtMiter, 3.
-//#define EXTERNAL_SURFACES_OFFSET_PARAMETERS ClipperLib::jtMiter, 1.5
-#define EXTERNAL_SURFACES_OFFSET_PARAMETERS ClipperLib::jtSquare, 0.
+//#define EXTERNAL_SURFACES_OFFSET_PARAMETERS jtMiter, 3.
+//#define EXTERNAL_SURFACES_OFFSET_PARAMETERS jtMiter, 1.5
+#define EXTERNAL_SURFACES_OFFSET_PARAMETERS jtSquare, 0.
 
 void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Polygons *lower_layer_covered)
 {
@@ -1170,17 +1205,14 @@ void LayerRegion::simplify_entity_collection(ExtrusionEntityCollection* entity_c
 
 void LayerRegion::simplify_path(ExtrusionPath* path)
 {
-    const auto print_config = this->layer()->object()->print()->config();
-    const bool spiral_mode = print_config.spiral_mode;
-    const bool enable_arc_fitting = print_config.enable_arc_fitting;
+    const auto &print_config = this->layer()->object()->print()->config();
+    const ArcFittingMode arc_fitting = print_config.enable_arc_fitting.value;
+    const bool is_sparse_infill = path->role() == erInternalInfill;
     const auto scaled_resolution = scaled<double>(print_config.resolution.value);
 
-    if (enable_arc_fitting &&
-        !spiral_mode) {
-        if (path->role() == erInternalInfill)
-            path->simplify_by_fitting_arc(SCALED_SPARSE_INFILL_RESOLUTION);
-        else
-            path->simplify_by_fitting_arc(scaled_resolution);
+    if (!print_config.spiral_mode &&
+        (arc_fitting == ArcFittingMode::Enabled || (arc_fitting == ArcFittingMode::SparseInfill && is_sparse_infill))) {
+        path->simplify_by_fitting_arc(is_sparse_infill ? SCALED_SPARSE_INFILL_RESOLUTION : scaled_resolution);
     } else {
         path->simplify(scaled_resolution);
     }
@@ -1188,42 +1220,14 @@ void LayerRegion::simplify_path(ExtrusionPath* path)
 
 void LayerRegion::simplify_multi_path(ExtrusionMultiPath* multipath)
 {
-    const auto print_config = this->layer()->object()->print()->config();
-    const bool spiral_mode = print_config.spiral_mode;
-    const bool enable_arc_fitting = print_config.enable_arc_fitting;
-    const auto scaled_resolution = scaled<double>(print_config.resolution.value);
-
-    for (size_t i = 0; i < multipath->paths.size(); ++i) {
-        if (enable_arc_fitting &&
-            !spiral_mode) {
-            if (multipath->paths[i].role() == erInternalInfill)
-                multipath->paths[i].simplify_by_fitting_arc(SCALED_SPARSE_INFILL_RESOLUTION);
-            else
-                multipath->paths[i].simplify_by_fitting_arc(scaled_resolution);
-        } else {
-            multipath->paths[i].simplify(scaled_resolution);
-        }
-    }
+    for (ExtrusionPath &path : multipath->paths)
+        this->simplify_path(&path);
 }
 
 void LayerRegion::simplify_loop(ExtrusionLoop* loop)
 {
-    const auto print_config = this->layer()->object()->print()->config();
-    const bool spiral_mode = print_config.spiral_mode;
-    const bool enable_arc_fitting = print_config.enable_arc_fitting;
-    const auto scaled_resolution = scaled<double>(print_config.resolution.value);
-
-    for (size_t i = 0; i < loop->paths.size(); ++i) {
-        if (enable_arc_fitting &&
-            !spiral_mode) {
-            if (loop->paths[i].role() == erInternalInfill)
-                loop->paths[i].simplify_by_fitting_arc(SCALED_SPARSE_INFILL_RESOLUTION);
-            else
-                loop->paths[i].simplify_by_fitting_arc(scaled_resolution);
-        } else {
-            loop->paths[i].simplify(scaled_resolution);
-        }
-    }
+    for (ExtrusionPath &path : loop->paths)
+        this->simplify_path(&path);
 }
 
 }

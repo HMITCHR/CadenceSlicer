@@ -6,6 +6,8 @@
 #define VGCODE_GCODEINPUTDATA_HPP
 
 #include "PathVertex.hpp"
+#include <vector>
+#include "Types.hpp"
 
 #include <cstddef>
 
@@ -26,11 +28,11 @@ struct GCodeInputData
     //
     // Palette for extruders colors
     //
-    Palette tools_colors;
+    PaletteWithAlpha tools_colors;
     //
     // Palette for color print colors
     //
-    Palette color_print_colors;
+    PaletteWithAlpha color_print_colors;
     //
     // ORCA Mixed-Nozzle Preview: physical-tool palette, independent of filament colors and
     // indexed only by a valid zero-based physical_tool_id. 255 / index >= size is neutral gray.

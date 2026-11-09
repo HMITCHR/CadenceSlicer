@@ -222,7 +222,7 @@ inline MixedNozzleAssignmentBindingObjectScope capture_assignment_binding_object
         instance_scope.instance_id = instance.id();
         instance_scope.transform = instance.get_matrix();
         instance_scope.printable = instance.printable;
-        instance_scope.auto_drop = instance.auto_drop;
+        instance_scope.auto_drop = object.auto_drop; // auto_drop is per object
         instance_scope.arrange_order = instance.arrange_order;
         instance_scope.loaded_id = instance.loaded_id;
         instance_scope.use_loaded_id_for_label = instance.use_loaded_id_for_label;
@@ -277,7 +277,7 @@ inline bool assignment_binding_instance_metadata_matches(
 {
     return instance.id() == scope.instance_id &&
            assignment_binding_transform_matches(instance.get_matrix(), scope.transform) &&
-           instance.printable == scope.printable && instance.auto_drop == scope.auto_drop &&
+           instance.printable == scope.printable && instance.get_object()->auto_drop == scope.auto_drop &&
            instance.arrange_order == scope.arrange_order && instance.loaded_id == scope.loaded_id &&
            instance.use_loaded_id_for_label == scope.use_loaded_id_for_label &&
            instance.print_volume_state == scope.print_volume_state;

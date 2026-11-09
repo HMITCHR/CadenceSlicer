@@ -805,7 +805,7 @@ WizardReview build_wizard_review(const WizardDraft &draft, const WizardCandidate
     review.preserved_locks = draft.locked_keys;
     review.affected_plate_ids.push_back(draft.scope.current_plate_id);
 
-    const auto shared_process_delta = [&draft](const WizardKeyDelta &delta) {
+    const auto shared_process_delta = [](const WizardKeyDelta &delta) {
         return delta.scope == "Shared process" || delta.key == "layer_height" ||
                delta.key == "mixed_nozzle_coarse_layer_height";
     };
@@ -1316,7 +1316,13 @@ static std::string wizard_speed_time_text(const WizardEstimate &estimate)
     case WizardEstimateStatus::Failed:
         return "could not be sliced";
     case WizardEstimateStatus::Unavailable:
-        return estimate.note.empty() ? std::string("no time") : "no time: " + estimate.note;
+        if (estimate.note.empty())
+            return "no time";
+        // A refusal's reason can run to several sentences; the row keeps its first one and the
+        // speed line under the rows gives the whole reason.
+        if (const std::size_t end = estimate.note.find(". "); end != std::string::npos && estimate.note.size() > 60)
+            return "no time: " + estimate.note.substr(0, end) + " (why: below)";
+        return "no time: " + estimate.note;
     case WizardEstimateStatus::Estimated:
         break;
     }
@@ -1476,7 +1482,31 @@ bool wizard_switching_saves_no_time(const WizardCadencePage &page)
     });
 }
 
+// The whole reason a coarse row has no time when its label could only keep the first sentence; empty
+// when every row's label already says it all, or when the one-nozzle line gives the same reason.
+static std::string wizard_rows_refusal_reason(const WizardCadencePage &page)
+{
+    for (const WizardCadenceRow &row : page.rows)
+        if (row.estimate && row.estimate->status == WizardEstimateStatus::Unavailable &&
+            row.estimate->note.size() > 60 && row.estimate->note.find(". ") != std::string::npos) {
+            const std::optional<WizardEstimate> &baseline = page.baseline_estimate;
+            if (baseline && baseline->status == WizardEstimateStatus::Unavailable && baseline->note == row.estimate->note)
+                return {};
+            return "Coarse rows without a time: " + row.estimate->note;
+        }
+    return {};
+}
+
 std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine_height,
+                                      std::optional<std::size_t> selected_row, bool explicit_pick)
+{
+    std::string line = wizard_speed_summary_body(page, fine_height, selected_row, explicit_pick);
+    if (const std::string why = wizard_rows_refusal_reason(page); !why.empty())
+        line += (line.empty() ? "" : " ") + why;
+    return line;
+}
+
+std::string wizard_speed_summary_body(const WizardCadencePage &page, double fine_height,
                                       std::optional<std::size_t> selected_row, bool explicit_pick)
 {
     const std::optional<WizardEstimate> &baseline = page.baseline_estimate;
@@ -1491,14 +1521,19 @@ std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine
         // "slicing now..." and a note that is a whole sentence ("Add a model ... times.") already
         // end it.
         const bool ends_sentence = !state.empty() && state.back() == '.';
-        return "One nozzle only, " + height_text(fine_height) + " mm everywhere: " + state + (ends_sentence ? "" : ".");
+        return std::string(page.colors_kept ? "Same colors, no coarse nozzle, " : "One nozzle only, ") +
+               height_text(fine_height) + " mm everywhere: " + state + (ends_sentence ? "" : ".");
     }
-    std::string line = "One nozzle only, " + height_text(fine_height) + " mm everywhere: " +
+    std::string line = std::string(page.colors_kept ? "Same colors, no coarse nozzle, " : "One nozzle only, ") +
+                       height_text(fine_height) + " mm everywhere: " +
                        estimate_duration_text(baseline->seconds) + ".";
     if (wizard_switching_saves_no_time(page)) {
         const double faster = page.rows.front().estimate->seconds - baseline->seconds;
-        line += " Two nozzles are slower than one on this plate. One nozzle only is " +
-                estimate_duration_text(faster) + " faster, so it is the better choice here.";
+        line += page.colors_kept
+            ? " The coarse nozzle saves no time on this plate. Printing without it is " +
+                  estimate_duration_text(faster) + " faster, so that is the better choice here."
+            : " Two nozzles are slower than one on this plate. One nozzle only is " +
+                  estimate_duration_text(faster) + " faster, so it is the better choice here.";
         return line;
     }
     if (page.ranked && !page.rows.empty() && page.rows.front().estimate &&
@@ -1527,7 +1562,7 @@ std::string wizard_idle_coarse_nozzle_note(const WizardCadencePage &page, std::o
                                                    : std::string("the fine nozzle");
     std::string note;
     if (row.estimate->all_solid) {
-        // A solid plate (the tester's 100% parts): raising the density cannot help.
+        // A solid plate (parts at 100% density): raising the density cannot help.
         note = coarse + " has nothing to print on this plate. Feature Split gives it the sparse infill, and at 100% "
                         "density there is none (the inside is all solid infill, which " + fine + " prints). To use "
                         "both nozzles, lower the sparse infill density below 100%.";
@@ -2192,7 +2227,7 @@ WizardProcessFamily family_of(const std::string &name)
 
 std::vector<double> pair_of(const std::string &name)
 {
-    for (const std::string prefix : {std::string(kBodyFamilyPrefix), std::string(kFeatureFamilyPrefix)}) {
+    for (const std::string &prefix : {std::string(kBodyFamilyPrefix), std::string(kFeatureFamilyPrefix)}) {
         if (name.rfind(prefix, 0) != 0)
             continue;
         // "0.2-0.6 ..." read with a dot whatever the app language. sscanf follows the C locale, so
@@ -2714,23 +2749,39 @@ WizardMaterialDefaults wizard_default_materials(const std::vector<double> &nozzl
     for (std::size_t slot = 0; !defaults.coarse && slot < count; ++slot)
         if (slot != fine && on(slot, coarse_physical))
             defaults.coarse = slot;
-    if (!defaults.coarse) {
-        for (std::size_t slot = 0; !defaults.coarse && slot < count; ++slot)
-            if (slot != fine)
-                defaults.coarse = slot;
-        if (defaults.coarse) {
-            defaults.empty_nozzle = nozzle_diameters.size() == 2
-                ? "the " + height_text(nozzle_diameters[coarse_physical]) + " mm nozzle" : std::string("the coarse nozzle");
-            defaults.note = wizard_empty_nozzle_note(defaults.empty_nozzle, *defaults.coarse);
-        }
+    // The coarse nozzle prints the material mapped to it. With none mapped, setup picks nothing
+    // and the page asks.
+    if (!defaults.coarse && count > 1 && coarse_physical < nozzle_diameters.size()) {
+        const std::string diameter = height_text(nozzle_diameters[coarse_physical]);
+        // Two nozzles: the slot the user picks is moved onto the coarse nozzle, and the page names it. A tool
+        // changer prints slot i on tool i, so nothing moves.
+        const std::string nozzle = nozzle_diameters.size() == 2
+            ? "the " + diameter + " mm nozzle"
+            : "toolhead " + std::to_string(coarse_physical + 1) + " (" + diameter + " mm)";
+        if (nozzle_diameters.size() == 2)
+            defaults.empty_nozzle = nozzle;
+        defaults.note = "None of this project's materials prints on " + nozzle + ". Choose the one it should print.";
     }
     return defaults;
 }
 
+std::string wizard_colors_tools_notice(std::size_t colors, std::size_t tools, bool one_material_per_tool)
+{
+    if (!one_material_per_tool || tools == 0 || colors <= tools)
+        return {};
+    const std::size_t without = colors - tools;
+    return "This plate uses " + std::to_string(colors) + " colors, and the printer has " + std::to_string(tools) +
+           " tools. Each tool prints one color, so " + std::to_string(without) + (without == 1 ? " color has" : " colors have") +
+           " no tool. Setup does not merge colors for you. You can cancel and put the colors on " + std::to_string(tools) +
+           " filaments yourself (object list and color painting), or continue setup as it is.";
+}
+
 std::string wizard_empty_nozzle_note(const std::string &empty_nozzle, std::size_t coarse_slot)
 {
-    return "No material sits on " + empty_nozzle + " yet, so setup puts slot " + std::to_string(coarse_slot + 1) +
-           " there. Pick another if you like.";
+    // About the project's materials, not the printer's AMS: an AMS can hold material for a nozzle the
+    // project has not put anything on yet.
+    return "None of this project's materials prints on " + empty_nozzle + " yet, so setup puts slot " +
+           std::to_string(coarse_slot + 1) + " there. Pick another if you like.";
 }
 
 std::vector<WizardBodyRole> wizard_default_body_roles(const std::vector<WizardBodyRoleRow> &rows,
@@ -2946,7 +2997,11 @@ WizardPickerDefaults wizard_body_picker_defaults(const std::vector<WizardBodyRol
     const auto closest = [&](std::size_t physical) -> std::optional<std::size_t> {
         if (type.empty())
             return std::nullopt;
+        // The coarse nozzle prints only a material mapped to it.
+        const bool only_on_nozzle = physical == coarse_physical;
         for (const bool on_nozzle : {true, false}) {
+            if (!on_nozzle && only_on_nozzle)
+                break;
             std::optional<std::size_t> best;
             for (std::size_t slot = 0; slot < filament_types.size(); ++slot) {
                 if (slot == shared || filament_types[slot] != type || (on_nozzle && !on(slot, physical)))
@@ -2978,6 +3033,9 @@ WizardPickerDefaults wizard_body_picker_defaults(const std::vector<WizardBodyRol
         defaults.note = opening + ". The " + keeps_role + " parts keep it on " + nozzle(keeps_physical) +
                         ", and the " + other_role + " parts print with " + label(*other) + ", the closest " +
                         material + " slot on " + nozzle(other_physical) + ".";
+    else if (other_physical == coarse_physical)
+        defaults.note = opening + ", and no other " + material + " slot is mapped to " + nozzle(coarse_physical) +
+                        ". Pick the material for the coarse layers.";
     else
         defaults.note = opening + ", and no other " + material + " slot is loaded. Pick the material for the " +
                         other_role + " layers.";
@@ -3058,9 +3116,13 @@ std::string wizard_joining_summary(std::size_t joined_assemblies)
     return "Parts that touch across the two nozzles are joined with interlocking beams.";
 }
 
-MixedNozzleSlicingMode wizard_default_mode(MixedNozzleSlicingMode configured, bool split_by_part)
+MixedNozzleSlicingMode wizard_default_mode(MixedNozzleSlicingMode configured, bool split_by_part,
+                                           bool body_paint_unusable)
 {
-    if (configured == MixedNozzleSlicingMode::BodySplit || split_by_part)
+    // A project that has a mode opens on it. Only a new setup picks by the model.
+    if (configured == MixedNozzleSlicingMode::FeatureSplit || configured == MixedNozzleSlicingMode::BodySplit)
+        return configured;
+    if (split_by_part && !body_paint_unusable)
         return MixedNozzleSlicingMode::BodySplit;
     return MixedNozzleSlicingMode::FeatureSplit;
 }
@@ -3300,7 +3362,8 @@ WizardReviewSummary wizard_review_summary(const WizardReviewSummaryInput &input)
         if (input.estimate && input.estimate->status == WizardEstimateStatus::Estimated) {
             std::string time = estimate_duration_text(input.estimate->seconds);
             if (input.baseline && input.baseline->status == WizardEstimateStatus::Estimated)
-                time += " (one nozzle only: " + estimate_duration_text(input.baseline->seconds) + ")";
+                time += std::string(input.baseline_colors_kept ? " (same colors, no coarse nozzle: " : " (one nozzle only: ") +
+                        estimate_duration_text(input.baseline->seconds) + ")";
             summary.rows.push_back({"Print time", time});
         }
         if (!input.process_after.empty()) {
@@ -3379,7 +3442,7 @@ WizardModeCardText wizard_mode_card_text(const std::vector<double> &nozzle_diame
                    "layer height. Supports can go on either nozzle, with some limits for tree supports. "
                    "Works on any model.";
     text.body = "Split by part. Each part prints entirely on the nozzle you pick for it, outside "
-                "included. Selected for you when the plate has a multi-part or painted object.";
+                "included. Selected for you on a new setup when the plate has a multi-part or painted object.";
     return text;
 }
 

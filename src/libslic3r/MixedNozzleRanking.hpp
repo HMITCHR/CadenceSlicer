@@ -94,6 +94,17 @@ void mixed_nozzle_set_brim_inputs(const DynamicPrintConfig &config);
 void mixed_nozzle_single_nozzle_baseline(Model &model, DynamicPrintConfig &config,
                                          std::size_t fine_logical_filament, double fine_height);
 
+// The baseline that keeps the colors: mode Off and `fine_height` everywhere like the one above, but color painting
+// and each part's own color stay. A material reference to a slot on another nozzle size (the coarse material) moves
+// to the fine material, or for a feature follows the part. On two nozzles every slot goes on the fine nozzle; a tool
+// changer keeps each color on its own tool. `fine_logical_filament` is zero based.
+void mixed_nozzle_color_baseline(Model &model, DynamicPrintConfig &config,
+                                 std::size_t fine_logical_filament, double fine_height);
+
+// The material slots these objects print their parts with: each part's own slot (or its object's) and every
+// painted color, zero based and sorted. Feature and support slots are not model colors and are not counted.
+std::vector<std::size_t> mixed_nozzle_model_color_slots(const std::vector<ModelObject *> &objects);
+
 // Plate id, a hash of what the model prints and a hash of the config, as one string.
 std::string mixed_nozzle_ranking_key(std::size_t plate_id, const Model &model,
                                      const DynamicPrintConfig &config);

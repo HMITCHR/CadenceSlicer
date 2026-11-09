@@ -1,11 +1,10 @@
-// Off behavior is checked against the fork's emitted stream and planned outcomes, and
-// against stock OrcaSlicer G-code for the scenes in stock_off_scenes.hpp.
-// Some tower stream details deliberately differ from upstream Orca.
+// Off against the emitted stream, the tower plan, and stock OrcaSlicer G-code (stock_off_scenes.hpp).
 
 #include <catch2/catch_all.hpp>
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedNozzleConfig.hpp"
@@ -149,36 +148,41 @@ void name_enum_lists(DynamicPrintConfig &config)
             config.set_key_value(key, new ConfigOptionEnumsGeneric(def->enum_keys_map, 2, value));
     }
 }
-void add_two_tool_object(Model &model, Print &print, const DynamicPrintConfig &config, double height = 3.0)
+// One box per part, each on its own filament; a zero offset leaves the part where it is added.
+struct BoxPart { Vec3d size, offset; int filament; ModelVolumeType type = ModelVolumeType::MODEL_PART; };
+
+void add_parts(Model &model, const char *name, const std::vector<BoxPart> &parts)
 {
     ModelObject *object = model.add_object();
-    object->name = "off-parity-two-tool";
-    ModelVolume *left = object->add_volume(make_cube(10., 20., height), ModelVolumeType::MODEL_PART, false);
-    left->config.set_key_value("extruder", new ConfigOptionInt(1));
-    ModelVolume *right = object->add_volume(make_cube(20., 20., height), ModelVolumeType::MODEL_PART, false);
-    right->set_offset(Vec3d(10., 0., 0.));
-    right->config.set_key_value("extruder", new ConfigOptionInt(2));
+    object->name = name;
+    for (const BoxPart &part : parts) {
+        ModelVolume *volume = object->add_volume(make_cube(part.size.x(), part.size.y(), part.size.z()), part.type, false);
+        if (!part.offset.isZero())
+            volume->set_offset(part.offset);
+        volume->config.set_key_value("extruder", new ConfigOptionInt(part.filament));
+    }
     object->add_instance();
     object->ensure_on_bed();
+}
+
+void apply_silent(Model &model, Print &print, const DynamicPrintConfig &config)
+{
     print.apply(model, config);
     print.set_status_silent();
 }
+
+void add_two_tool_object(Model &model, Print &print, const DynamicPrintConfig &config, double height = 3.0)
+{
+    add_parts(model, "off-parity-two-tool", {{Vec3d(10., 20., height), Vec3d::Zero(), 1}, {Vec3d(20., 20., height), Vec3d(10., 0., 0.), 2}});
+    apply_silent(model, print, config);
+}
+
+// The second part has a 1 mm gap: layers between 1 and 2 mm print on one tool.
 void add_gapped_two_tool_object(Model &model, Print &print, const DynamicPrintConfig &config)
 {
-    ModelObject *object = model.add_object();
-    object->name = "off-parity-gapped-two-tool";
-    ModelVolume *tall = object->add_volume(make_cube(10., 20., 3.), ModelVolumeType::MODEL_PART, false);
-    tall->config.set_key_value("extruder", new ConfigOptionInt(1));
-    ModelVolume *low = object->add_volume(make_cube(20., 20., 1.), ModelVolumeType::MODEL_PART, false);
-    low->set_offset(Vec3d(10., 0., 0.));
-    low->config.set_key_value("extruder", new ConfigOptionInt(2));
-    ModelVolume *high = object->add_volume(make_cube(20., 20., 1.), ModelVolumeType::MODEL_PART, false);
-    high->set_offset(Vec3d(10., 0., 2.));
-    high->config.set_key_value("extruder", new ConfigOptionInt(2));
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    add_parts(model, "off-parity-gapped-two-tool", {{Vec3d(10., 20., 3.), Vec3d::Zero(), 1}, {Vec3d(20., 20., 1.), Vec3d(10., 0., 0.), 2},
+                                                    {Vec3d(20., 20., 1.), Vec3d(10., 0., 2.), 2}});
+    apply_silent(model, print, config);
 }
 
 std::string tower_start_tag()
@@ -242,9 +246,10 @@ struct Move {
     size_t line_index   = 0;
     double length       = 0.;   // mm of XY travel
     double e            = 0.;   // this move's own E (the fixtures run relative E)
-    bool   carries_xy   = false;
+    bool   has_x = false, has_y = false;
     bool   has_feedrate = false;
     double feedrate     = 0.;
+    bool   carries_xy() const { return has_x || has_y; }
     double e_per_mm() const { return length > 0. ? e / length : 0.; }
 };
 std::vector<Move> moves_of(const std::vector<std::string> &lines)
@@ -262,13 +267,14 @@ std::vector<Move> moves_of(const std::vector<std::string> &lines)
         const double f  = word_value(code, 'F');
         Move move;
         move.line_index   = i;
-        move.carries_xy   = ! std::isnan(nx) || ! std::isnan(ny);
+        move.has_x        = ! std::isnan(nx);
+        move.has_y        = ! std::isnan(ny);
         move.has_feedrate = ! std::isnan(f);
         move.feedrate     = std::isnan(f) ? 0. : f;
         move.e            = std::isnan(e) ? 0. : e;
         const double to_x = std::isnan(nx) ? x : nx;
         const double to_y = std::isnan(ny) ? y : ny;
-        if (move.carries_xy && ! std::isnan(x) && ! std::isnan(y) && ! std::isnan(to_x) && ! std::isnan(to_y))
+        if (move.carries_xy() && ! std::isnan(x) && ! std::isnan(y) && ! std::isnan(to_x) && ! std::isnan(to_y))
             move.length = std::hypot(to_x - x, to_y - y);
         x = to_x;
         y = to_y;
@@ -398,70 +404,41 @@ void require_validates(Print &print)
     INFO("print.validate() said: '" << reason << "'");
     REQUIRE(reason.empty());
 }
-} // namespace
-
-TEST_CASE("Off parity: a single-filament cube slices twice to the same file and says nothing about mixed nozzles",
-          "[TestRebuild][OffParityRebuild]")
+// The G-code of an Off plate on a Bambu printer with the two-tool object `height` tall, or with `gapped` the
+// object whose second part has a gap, validated and exported.
+std::string off_gcode(Model &model, Print &print, const DynamicPrintConfig &config, bool gapped = false, double height = 3.)
 {
-    auto slice_once = []() {
-        Print print;
-        Model model;
-        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-        config.set_key_value("mixed_nozzle_slicing_mode",
-                             new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::Off));
-        Slic3r::Test::init_print({Slic3r::Test::cube(20.)}, print, model, config);
-        return Slic3r::Test::gcode(print);
-    };
-    const std::string first  = slice_once();
-    const std::string second = slice_once();
-    REQUIRE_FALSE(first.empty());
-    check_no_mixed_nozzle_trace(first);
-    CHECK(first.find(tower_start_tag()) == std::string::npos);
-    CHECK(strip_nondeterministic_lines(first) == strip_nondeterministic_lines(second));
+    print.is_BBL_printer() = true;
+    if (gapped)
+        add_gapped_two_tool_object(model, print, config);
+    else
+        add_two_tool_object(model, print, config, height);
+    require_validates(print);
+    std::string gcode = Slic3r::Test::gcode(print);
+    REQUIRE_FALSE(gcode.empty());
+    return gcode;
 }
 
-TEST_CASE("An Off two-filament tower keeps planned brackets and tool changes with either timelapse mode",
-          "[TestRebuild][OffParityRebuild]")
+// The two-tool object on a Bambu printer, sliced through the harness; requires G-code.
+CadenceTest::Facts off_facts(DynamicPrintConfig config)
 {
-    const bool smooth = GENERATE(false, true);
-    DynamicPrintConfig config = off_parity_tower_config();
-    if (smooth)
-        config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(TimelapseType::tlSmooth));
-    auto slice_once = [&config](std::string &gcode) {
-        Model model;
-        Print print;
-        print.is_BBL_printer() = true;
-        add_two_tool_object(model, print, config);
-        REQUIRE(print.validate().string.empty());
-        gcode = Slic3r::Test::gcode(print);
-        REQUIRE_FALSE(gcode.empty());
-        REQUIRE(print.has_wipe_tower());
-        const auto lines = lines_of(gcode);
-        const auto brackets = brackets_of(lines);
-        check_no_mixed_nozzle_trace(gcode);
-        check_brackets_match_plan(print, brackets);
-        check_tool_change_count_matches_plan(print, gcode);
-        check_no_tower_return_lead_in(lines, brackets);
-    };
-    std::string first, second;
-    slice_once(first);
-    slice_once(second);
-    CHECK(strip_nondeterministic_lines(first) == strip_nondeterministic_lines(second));
-}
-
-TEST_CASE("Off parity: the tower stream's deliberate differences from upstream are stated, not hidden",
-          "[TestRebuild][OffParityRebuild]")
-{
+    mixed_nozzle_fixtures::fill_per_filament_values(config);
     Model model;
     Print print;
     print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, off_parity_tower_config());
-    REQUIRE(print.validate().string.empty());
-    const std::string gcode = Slic3r::Test::gcode(print);
-    REQUIRE_FALSE(gcode.empty());
-    REQUIRE(print.has_wipe_tower());
-    const std::vector<std::string> lines    = lines_of(gcode);
-    const std::vector<Bracket>     brackets = brackets_of(lines);
+    add_two_tool_object(model, print, config);
+    CadenceTest::Facts facts = CadenceTest::slice(print);
+    INFO("validation key=" << facts.refusal.opt_key << "; " << facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    return facts;
+}
+
+// The tower stream's deliberate differences from upstream are stated, not hidden: every bracket states its
+// height, every feedrate in it is real, every block's first move states its feedrate, and E keeps the stream's
+// precision.
+void check_stated_tower_stream(const Print &print, const std::vector<std::string> &lines, const std::vector<Bracket> &brackets)
+{
     REQUIRE_FALSE(brackets.empty());
     for (const Bracket &bracket : brackets) {
         REQUIRE(bracket.start_line + 1 < lines.size());
@@ -486,7 +463,6 @@ TEST_CASE("Off parity: the tower stream's deliberate differences from upstream a
             }
         }
     }
-    INFO("feedrates inside tower brackets checked: " << checked_feedrates);
     CHECK(checked_feedrates > 0);
     size_t checked_first_moves = 0;
     for (const std::vector<WipeTower::ToolChangeResult> &level : print.wipe_tower_data().tool_changes)
@@ -495,7 +471,7 @@ TEST_CASE("Off parity: the tower stream's deliberate differences from upstream a
                 continue;
             const std::vector<std::string> block_lines = lines_of(block.gcode);
             for (const Move &move : moves_of(block_lines)) {
-                if (! move.carries_xy)
+                if (! move.carries_xy())
                     continue;
                 INFO("first XY move of a tower block: '" << block_lines[move.line_index] << "'");
                 CHECK(move.has_feedrate);
@@ -503,9 +479,8 @@ TEST_CASE("Off parity: the tower stream's deliberate differences from upstream a
                 break;
             }
         }
-    INFO("tower blocks with a first XY move checked: " << checked_first_moves);
     CHECK(checked_first_moves > 0);
-    const int digits = Slic3r::GCodeFormatter::E_EXPORT_DIGITS;
+    const int digits = Slic3r::GCodeFormatter::e_digits(false);
     size_t    at_full_precision = 0;
     for (const Bracket &bracket : brackets) {
         if (! bracket.closed)
@@ -529,8 +504,33 @@ TEST_CASE("Off parity: the tower stream's deliberate differences from upstream a
                 ++ at_full_precision;
         }
     }
-    INFO("tower E tokens at the stream's full precision: " << at_full_precision);
     CHECK(at_full_precision > 0);
+}
+} // namespace
+
+TEST_CASE("An Off two-filament tower keeps planned brackets and tool changes with either timelapse mode",
+          "[TestRebuild][OffParityRebuild]")
+{
+    const bool smooth = GENERATE(false, true);
+    DynamicPrintConfig config = off_parity_tower_config();
+    if (smooth)
+        config.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(TimelapseType::tlSmooth));
+    std::string gcodes[2];
+    for (std::string &gcode : gcodes) {
+        Model model;
+        Print print;
+        gcode = off_gcode(model, print, config);
+        REQUIRE(print.has_wipe_tower());
+        const auto lines = lines_of(gcode);
+        const auto brackets = brackets_of(lines);
+        check_no_mixed_nozzle_trace(gcode);
+        check_brackets_match_plan(print, brackets);
+        check_tool_change_count_matches_plan(print, gcode);
+        check_no_tower_return_lead_in(lines, brackets);
+        if (!smooth && &gcode == &gcodes[0])
+            check_stated_tower_stream(print, lines, brackets);
+    }
+    CHECK(strip_nondeterministic_lines(gcodes[0]) == strip_nondeterministic_lines(gcodes[1]));
 }
 
 TEST_CASE("Off parity: no sparse layers deposits on the levels upstream deposits on", "[TestRebuild][OffParityRebuild]")
@@ -539,11 +539,7 @@ TEST_CASE("Off parity: no sparse layers deposits on the levels upstream deposits
     config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(true));
     Model model;
     Print print;
-    print.is_BBL_printer() = true;
-    add_gapped_two_tool_object(model, print, config);
-    require_validates(print);
-    const std::string gcode = Slic3r::Test::gcode(print);
-    REQUIRE_FALSE(gcode.empty());
+    const std::string gcode = off_gcode(model, print, config, true);
     REQUIRE(print.has_wipe_tower());
     size_t expected_brackets = 0;
     size_t skipped_levels    = 0;
@@ -571,25 +567,11 @@ TEST_CASE("Off parity: purge rows keep the tower's shared width on unequal nozzl
 {
     DynamicPrintConfig config = off_parity_tower_config();
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    // The stock absolute bridge width equals this plate's 0.2 mm layer and
-    // fails validation before the tower can be exported. Auto width leaves
-    // the unequal-nozzle tower choice under test unchanged.
-    config.set_key_value("bridge_line_width", new ConfigOptionFloatOrPercent(0., false));
-    // These newer role defaults are 100% of the smallest nozzle and also fail
-    // the old global width validator when the layer equals that diameter.
-    config.set_key_value("skin_infill_line_width", new ConfigOptionFloatOrPercent(0., false));
-    config.set_key_value("skeleton_infill_line_width", new ConfigOptionFloatOrPercent(0., false));
-    mixed_nozzle_fixtures::fill_per_filament_values(config);
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, config);
-    const CadenceTest::Facts facts = CadenceTest::slice(print);
-    INFO("validation key=" << facts.refusal.opt_key << "; " << facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    // In Off mode both tools build the tower at the shared last-nozzle width. Confirm
-    // positive-flow tower roads from each physical nozzle in the exported stream.
+    // Absolute widths of 100% of the 0.2 nozzle equal the 0.2 mm layer and fail validation; auto widths do not.
+    for (const char *key : {"bridge_line_width", "skin_infill_line_width", "skeleton_infill_line_width"})
+        config.set_key_value(key, new ConfigOptionFloatOrPercent(0., false));
+    const CadenceTest::Facts facts = off_facts(config);
+    // Both tools build the tower at the shared last-nozzle width.
     std::array<size_t, 2> shared_roads{};
     for (const auto &move : facts.moves)
         if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower &&
@@ -607,17 +589,8 @@ TEST_CASE("Off parity: a first-layer flow ratio above one reaches the tower whol
     DynamicPrintConfig config = off_parity_tower_config();
     config.set_key_value("set_other_flow_ratios", new ConfigOptionBool(true));
     config.set_key_value("first_layer_flow_ratio", new ConfigOptionFloat(double(ratio)));
-    mixed_nozzle_fixtures::fill_per_filament_values(config);
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, config);
-    const CadenceTest::Facts facts = CadenceTest::slice(print);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    // 0.4 mm is the shared nozzle; the first-layer ratio widens its flow-equivalent
-    // 0.5 mm tower road to 0.65 mm. Ordinary later tower rows stay at 0.5 mm.
+    const CadenceTest::Facts facts = off_facts(config);
+    // The first-layer ratio widens the shared 0.4 nozzle's 0.5 mm tower road to 0.65 mm; later rows stay at 0.5 mm.
     float first_print_z = std::numeric_limits<float>::max();
     for (const auto &move : facts.moves)
         if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower &&
@@ -630,8 +603,7 @@ TEST_CASE("Off parity: a first-layer flow ratio above one reaches the tower whol
             move.mm3_per_mm <= 0.)
             continue;
         const bool boosted = std::abs(move.width - ratio * .5f) < .01f;
-        // Travel and Z-hop can put an exported vertex above its print layer.
-        // Classify by the first declared tower level, not by vertex height.
+        // By declared tower level: travel and Z-hop can put a vertex above its print layer.
         if (std::abs(move.print_z - first_print_z) < .01f)
             first_boosted += boosted;
         else {
@@ -647,6 +619,8 @@ TEST_CASE("Off parity: a first-layer flow ratio above one reaches the tower whol
 
 namespace {
 struct PurgeRow {
+    size_t block = 0;      // the tool-change block it is in
+    float  print_z = 0.f;  // that block's print Z
     double effective_f = 0.;
     double width = 0.;
     double height = 0.;
@@ -667,70 +641,43 @@ std::vector<PurgeRow> purge_rows(const DynamicPrintConfig &config, size_t &state
 {
     Model model;
     Print print;
-    print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, config);
-    require_validates(print);
-    const std::string gcode = Slic3r::Test::gcode(print);
-    REQUIRE_FALSE(gcode.empty());
+    off_gcode(model, print, config);
     REQUIRE(print.has_wipe_tower());
     std::vector<PurgeRow> rows;
     stated_feedrates = 0;
+    size_t blocks = 0;
     for (const std::vector<WipeTower::ToolChangeResult> &level : print.wipe_tower_data().tool_changes)
         for (const WipeTower::ToolChangeResult &block : level) {
             if (! block.is_tool_change || block.gcode.empty())
                 continue;
-            double x = std::nan("");
-            double y = std::nan("");
-            double current_f = 0.;
-            double width     = 0.;
-            double height    = 0.;
+            ++ blocks;
+            const std::vector<std::string> lines = lines_of(block.gcode);
+            double current_f = 0., width = 0., height = 0.;
             bool   in_nozzle_change = false;
-            for (const std::string &line : lines_of(block.gcode)) {
-                if (line.find(GCodeProcessor::Nozzle_Change_Start_Tag) != std::string::npos) {
-                    in_nozzle_change = true;
-                    continue;
+            size_t next = 0;
+            for (const Move &move : moves_of(lines)) {
+                // The nozzle-change tags and the stated cross-section on the lines before this move.
+                for (; next < move.line_index; ++ next) {
+                    const std::string &line = lines[next];
+                    if (line.find(GCodeProcessor::Nozzle_Change_Start_Tag) != std::string::npos)
+                        in_nozzle_change = true;
+                    else if (line.find(GCodeProcessor::Nozzle_Change_End_Tag) != std::string::npos)
+                        in_nozzle_change = false;
+                    else {
+                        if (const double stated = stated_width(line); ! std::isnan(stated))
+                            width = stated;
+                        if (const double stated = stated_height(line); ! std::isnan(stated))
+                            height = stated;
+                    }
                 }
-                if (line.find(GCodeProcessor::Nozzle_Change_End_Tag) != std::string::npos) {
-                    in_nozzle_change = false;
-                    continue;
+                next = move.line_index + 1;
+                if (move.has_feedrate) {
+                    current_f = move.feedrate;
+                    stated_feedrates += in_nozzle_change ? 0 : 1;
                 }
-                const double line_width  = stated_width(line);
-                const double line_height = stated_height(line);
-                if (! std::isnan(line_width))
-                    width = line_width;
-                if (! std::isnan(line_height))
-                    height = line_height;
-                const std::string code = code_of(line);
-                if (! is_g1(code))
-                    continue;
-                const double nx = word_value(code, 'X');
-                const double ny = word_value(code, 'Y');
-                const double e  = word_value(code, 'E');
-                const double f  = word_value(code, 'F');
-                const bool   states_f  = ! std::isnan(f);
-                if (states_f) {
-                    current_f = f;
-                    if (! in_nozzle_change)
-                        ++ stated_feedrates;
-                }
-                const double from_x = x;
-                const double to_x   = std::isnan(nx) ? x : nx;
-                const double to_y   = std::isnan(ny) ? y : ny;
-                double length = 0.;
-                if (! std::isnan(x) && ! std::isnan(y) && ! std::isnan(to_x) && ! std::isnan(to_y))
-                    length = std::hypot(to_x - x, to_y - y);
-                x = to_x;
-                y = to_y;
-                if (in_nozzle_change)
-                    continue;
-                if (std::isnan(nx) || ! std::isnan(ny) || std::isnan(e) || e <= 0. || length <= 0.)
-                    continue;
-                PurgeRow row;
-                row.effective_f = current_f;
-                row.width = width;
-                row.height = height;
-                row.states_f = states_f;
-                rows.emplace_back(row);
+                // A purge row: a positive-E move along X only.
+                if (! in_nozzle_change && move.has_x && ! move.has_y && move.e > 0. && move.length > 0.)
+                    rows.push_back({blocks, block.print_z, current_f, width, height, move.has_feedrate});
             }
         }
     return rows;
@@ -789,51 +736,18 @@ TEST_CASE("Off parity: the first-layer purge lays the rows the plan reserves", "
 {
     DynamicPrintConfig config = off_parity_tower_config();
     config.set_key_value("prime_tower_infill_gap", new ConfigOptionPercent(400));
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, config);
-    require_validates(print);
-    const std::string gcode = Slic3r::Test::gcode(print);
-    REQUIRE_FALSE(gcode.empty());
-    REQUIRE(print.has_wipe_tower());
-    auto purge_rows_of = [](const std::string &block_gcode) {
-        size_t rows = 0;
-        bool   in_nozzle_change = false;
-        for (const std::string &line : lines_of(block_gcode)) {
-            if (line.find(GCodeProcessor::Nozzle_Change_Start_Tag) != std::string::npos) {
-                in_nozzle_change = true;
-                continue;
-            }
-            if (line.find(GCodeProcessor::Nozzle_Change_End_Tag) != std::string::npos) {
-                in_nozzle_change = false;
-                continue;
-            }
-            if (in_nozzle_change)
-                continue;
-            const std::string code = code_of(line);
-            if (! is_g1(code))
-                continue;
-            if (std::isnan(word_value(code, 'X')) || ! std::isnan(word_value(code, 'Y')))
-                continue;
-            const double e = word_value(code, 'E');
-            if (! std::isnan(e) && e > 0.)
-                ++ rows;
-        }
-        return rows;
-    };
+    size_t statements = 0;
+    std::map<size_t, std::pair<float, size_t>> blocks; // per tool-change block: its print Z and its purge rows
+    for (const PurgeRow &row : purge_rows(config, statements)) {
+        blocks[row.block].first = row.print_z;
+        ++ blocks[row.block].second;
+    }
     size_t first_layer_rows = 0;
     size_t later_rows       = 0;
-    for (const std::vector<WipeTower::ToolChangeResult> &level : print.wipe_tower_data().tool_changes)
-        for (const WipeTower::ToolChangeResult &block : level) {
-            if (! block.is_tool_change || block.gcode.empty())
-                continue;
-            const size_t rows = purge_rows_of(block.gcode);
-            if (block.print_z <= 0.25f)
-                first_layer_rows = std::max(first_layer_rows, rows);
-            else
-                later_rows = std::max(later_rows, rows);
-        }
+    for (const auto &[block, rows] : blocks) {
+        size_t &most = rows.first <= 0.25f ? first_layer_rows : later_rows;
+        most = std::max(most, rows.second);
+    }
     INFO("purge rows, first-layer block: " << first_layer_rows << ", ordinary block: " << later_rows);
     REQUIRE(later_rows > 0);
     REQUIRE(first_layer_rows > 0);
@@ -849,12 +763,9 @@ TEST_CASE("Off parity: a support filament resolves at its own column", "[TestReb
     dynamic.set_key_value("support_filament", new ConfigOptionInt(1));
     dynamic.set_key_value("support_interface_filament", new ConfigOptionInt(2));
     dynamic.set_key_value("support_type", new ConfigOptionEnum<SupportType>(stNormalAuto));
-    dynamic.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0., false));
-    dynamic.set_key_value("line_width", new ConfigOptionFloatOrPercent(0., false));
-    dynamic.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0., false));
-    dynamic.set_key_value("bridge_line_width", new ConfigOptionFloatOrPercent(0., false));
-    dynamic.set_key_value("skin_infill_line_width", new ConfigOptionFloatOrPercent(0., false));
-    dynamic.set_key_value("skeleton_infill_line_width", new ConfigOptionFloatOrPercent(0., false));
+    for (const char *key : {"support_line_width", "line_width", "initial_layer_line_width", "bridge_line_width",
+                            "skin_infill_line_width", "skeleton_infill_line_width"})
+        dynamic.set_key_value(key, new ConfigOptionFloatOrPercent(0., false));
     dynamic.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
     mixed_nozzle_fixtures::fill_per_filament_values(dynamic);
     Model model;
@@ -868,8 +779,7 @@ TEST_CASE("Off parity: a support filament resolves at its own column", "[TestReb
     for (const auto &move : facts.moves) {
         if (move.type != EMoveType::Extrude)
             continue;
-        // Off intentionally reads the logical filament column: filament 1 maps to the .6
-        // physical tool but its support flow still uses column 1's .2 mm width, and vice versa.
+        // Off reads the filament's own column: filament 1 on the 0.6 tool keeps column 1's 0.2 mm width, and vice versa.
         if (move.extrusion_role == erSupportMaterial) {
             ++base;
             wrong += move.extruder_id != 0 || move.physical_tool_id != 1 ||
@@ -944,11 +854,7 @@ TEST_CASE("Off parity: a legacy change_filament_gcode expands as it was written"
         "M620.10 A1 H{nozzle_diameter[next_extruder]}\n"));
     Model model;
     Print print;
-    print.is_BBL_printer() = true;
-    add_two_tool_object(model, print, config);
-    require_validates(print);
-    const std::string gcode = Slic3r::Test::gcode(print);
-    REQUIRE_FALSE(gcode.empty());
+    const std::string gcode = off_gcode(model, print, config);
     size_t arriving_lines = 0;
     size_t arriving_at_the_fine_filament = 0;
     for (const std::string &line : lines_of(gcode)) {
@@ -967,27 +873,15 @@ TEST_CASE("Off parity: a legacy change_filament_gcode expands as it was written"
 namespace {
 void add_off_trim_object(Model &model, bool with_modifier)
 {
-    ModelObject *object = model.add_object();
-    object->name = with_modifier ? "off-trim-modifier" : "off-trim-two-parts";
-    if (with_modifier) {
-        ModelVolume *body = object->add_volume(make_cube(30., 20., 3.), ModelVolumeType::MODEL_PART, false);
-        body->config.set_key_value("extruder", new ConfigOptionInt(1));
-        ModelVolume *modifier = object->add_volume(make_cube(20., 20., 3.), ModelVolumeType::PARAMETER_MODIFIER, false);
-        modifier->set_offset(Vec3d(10., 0., 0.));
-        modifier->config.set_key_value("extruder", new ConfigOptionInt(2));
-    } else {
-        ModelVolume *left = object->add_volume(make_cube(10., 20., 3.), ModelVolumeType::MODEL_PART, false);
-        left->config.set_key_value("extruder", new ConfigOptionInt(1));
-        ModelVolume *right = object->add_volume(make_cube(20., 20., 3.), ModelVolumeType::MODEL_PART, false);
-        right->set_offset(Vec3d(10., 0., 0.));
-        right->config.set_key_value("extruder", new ConfigOptionInt(2));
-    }
-    object->add_instance();
-    object->ensure_on_bed();
+    if (with_modifier)
+        add_parts(model, "off-trim-modifier", {{Vec3d(30., 20., 3.), Vec3d::Zero(), 1},
+                                               {Vec3d(20., 20., 3.), Vec3d(10., 0., 0.), 2, ModelVolumeType::PARAMETER_MODIFIER}});
+    else
+        add_parts(model, "off-trim-two-parts", {{Vec3d(10., 20., 3.), Vec3d::Zero(), 1}, {Vec3d(20., 20., 3.), Vec3d(10., 0., 0.), 2}});
 }
 } // namespace
 
-TEST_CASE("Off parity: a multi-region object keeps XY compensation and elephant-foot trimming",
+TEST_CASE("Off parity: a multi-region object keeps XY compensation and elephant-foot trimming, whatever its fine-skin counts",
           "[TestRebuild][OffParityRebuild][SynchronizedRegionalLayers]")
 {
     const bool with_modifier = GENERATE(false, true);
@@ -1001,14 +895,23 @@ TEST_CASE("Off parity: a multi-region object keeps XY compensation and elephant-
     config.set_key_value("xy_hole_compensation", new ConfigOptionFloat(0.));
     config.set_key_value("elefant_foot_compensation", new ConfigOptionFloat(trim.elephant_foot));
     config.set_key_value("elefant_foot_compensation_layers", new ConfigOptionInt(1));
-    Model model;
-    Print print;
-    add_off_trim_object(model, with_modifier);
-    print.apply(model, config);
-    print.set_status_silent();
-    REQUIRE(print.validate().string.empty());
-    REQUIRE_NOTHROW(print.process());
-    const auto moves = Slic3r::Emitted::emitted_moves(Slic3r::Test::gcode(print));
+    const auto sliced = [&config, with_modifier](bool fine_skin_counts) {
+        Model model;
+        add_off_trim_object(model, with_modifier);
+        if (fine_skin_counts)
+            for (const auto &[volume, count] : {std::pair<size_t, int>{0, 2}, {1, 5}})
+                model.objects.front()->volumes[volume]->config.set_key_value("mixed_nozzle_body_fine_skin_layers", new ConfigOptionInt(count));
+        Print print;
+        apply_silent(model, print, config);
+        REQUIRE(print.validate().string.empty());
+        return Slic3r::Test::gcode(print);
+    };
+    const std::string gcode = sliced(false);
+    // Parts saved with different Body Split fine-skin layer counts print as if neither had one: the counts must not
+    // split the regions' perimeters into separate passes.
+    if (!with_modifier)
+        CHECK(strip_nondeterministic_lines(sliced(true)) == strip_nondeterministic_lines(gcode));
+    const auto moves = Slic3r::Emitted::emitted_moves(gcode);
     std::map<int, BoundingBoxf> outlines;
     for (const auto &move : moves) {
         if (move.type != EMoveType::Extrude || move.extrusion_role != erExternalPerimeter)
@@ -1153,9 +1056,8 @@ SplitGcode split_config_block(const std::vector<std::string> &lines)
     return out;
 }
 
-// The print-progress lines (M73) and the estimated-time comments come from the time estimate, and a
-// whole-suite run can move the estimate by a few seconds, which adds or drops an M73 line. They are
-// taken out of the line-by-line comparison; the estimated normal-mode time is kept, in seconds.
+// Takes out the time estimate's own lines (M73 progress, estimated-time comments), which a whole-suite run can move,
+// keeping the normal-mode estimate in seconds.
 struct ProgressFree
 {
     std::vector<std::string> lines;
@@ -1191,13 +1093,12 @@ ProgressFree without_progress_lines(const std::vector<std::string> &body)
     return out;
 }
 
-// Settings stock does not list. Mode Off ignores the mixed-nozzle ones. This tree also keeps the
-// differs-from-system mask in the print config, because the G-code handoff reads it, so the
-// block lists it too. All are comment lines; no move, temperature or tool change depends on them.
+// Settings stock does not list: the mixed-nozzle ones Off ignores, and the differs-from-system mask the G-code handoff reads.
 bool is_documented_added_setting(const std::string &key)
 {
-    return key.rfind("mixed_nozzle_", 0) == 0 || key.rfind("regional_", 0) == 0 ||
-           key == "synchronized_multi_nozzle_layering" || key == "different_settings_to_system";
+    return key.rfind("mixed_nozzle_", 0) == 0 || key.rfind("regional_", 0) == 0 || key.rfind("tool_changer_tower_", 0) == 0 ||
+           key == "tool_changer_idle_cooldown" || key == "synchronized_multi_nozzle_layering" ||
+           key == "different_settings_to_system";
 }
 } // namespace
 
@@ -1298,4 +1199,172 @@ TEST_CASE("Off: a tower road that names no feedrate does not run at the tower's 
     CHECK(roads > 0);
     CHECK(over_limit == 0);
     CHECK(at_travel_speed == 0);
+}
+
+// Upstream's tower continuity: every tower row with neither object nor support gets a placeholder support layer
+// (id -1), above a raft and under a part floating above another.
+TEST_CASE("Off: tower rows with neither object nor support get placeholder support layers",
+          "[TestRebuild][OffParityRebuild][Rebase25]")
+{
+    DynamicPrintConfig config = off_parity_tower_config();
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+
+    SECTION("between the raft and the first object layer") {
+        config.set_key_value("raft_layers", new ConfigOptionInt(3));
+        add_two_tool_object(model, print, config);
+    }
+    SECTION("a part floating above another, held by support") {
+        config.set_key_value("enable_support", new ConfigOptionBool(true));
+        config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(stNormalAuto));
+        config.set_key_value("support_filament", new ConfigOptionInt(0));
+        config.set_key_value("support_interface_filament", new ConfigOptionInt(0));
+        config.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
+        add_parts(model, "off-floating-part", {{Vec3d(20., 20., 1.), Vec3d::Zero(), 1}, {Vec3d(20., 20., 1.), Vec3d(0., 0., 3.), 2}});
+        apply_silent(model, print, config);
+    }
+
+    const StringObjectException refusal = print.validate();
+    INFO(refusal.string);
+    REQUIRE(refusal.string.empty());
+    print.process();
+    REQUIRE(print.has_wipe_tower());
+
+    const ToolOrdering &ordering = print.wipe_tower_data().tool_ordering;
+    REQUIRE_FALSE(ordering.cadence_tower_rows());
+    size_t tower_rows = 0, bare_rows = 0, typed_events = 0;
+    for (const LayerTools &lt : ordering.layer_tools()) {
+        if (!lt.has_wipe_tower)
+            continue;
+        ++tower_rows;
+        bare_rows += !lt.has_object && !lt.has_support;
+        typed_events += lt.tower_support_event;
+    }
+    size_t placeholders = 0;
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        if (layer->id() == size_t(-1)) {
+            ++placeholders;
+            CHECK(layer->support_fills.entities.empty());
+        }
+    CAPTURE(tower_rows, bare_rows, typed_events, placeholders);
+    CHECK(tower_rows > 0);
+    // Every tower row is printed through an object or a support layer, none as a Cadence event.
+    CHECK(bare_rows == 0);
+    CHECK(typed_events == 0);
+    CHECK(placeholders > 0);
+
+    // The plate still exports, with the tower on its layers.
+    const std::string gcode = Slic3r::Test::gcode(print);
+    CHECK(gcode.find(tower_start_tag()) != std::string::npos);
+}
+
+TEST_CASE("Off parity: an object's layer height limits come from its filament's own column", "[TestRebuild][OffParityRebuild]")
+{
+    // Filament 1 prints on the 0.6 nozzle. Off reads the limits as upstream does, from the filament's
+    // own column (the 0.2 nozzle's 0.04 mm minimum); a mode reads the nozzle that prints it (0.16 mm).
+    const bool mode = GENERATE(false, true);
+    CAPTURE(mode);
+    DynamicPrintConfig dynamic = off_parity_base_config();
+    dynamic.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    dynamic.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.16});
+    dynamic.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    dynamic.set_key_value("filament_map", new ConfigOptionInts{2, 1});
+    if (mode)
+        dynamic.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
+    PrintConfig print_config;
+    print_config.apply(dynamic, true);
+    PrintObjectConfig object_config;
+    object_config.apply(dynamic, true);
+    object_config.layer_height.value = 0.3;
+    const SlicingParameters params = SlicingParameters::create_from_config(print_config, object_config, 10., {0u}, Vec3d::Ones());
+    CHECK_THAT(params.min_layer_height, Catch::Matchers::WithinAbs(mode ? 0.16 : 0.04, 1e-9));
+}
+
+TEST_CASE("Off parity: sparse infill keeps the object's line spacing on thinner layers", "[TestRebuild][OffParityRebuild]")
+{
+    // Upstream spaces sparse infill at the object's layer height, also across a range printed at 0.1 mm.
+    DynamicPrintConfig config = off_parity_base_config();
+    config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40.));
+    config.set_key_value("sparse_infill_line_width", new ConfigOptionFloatOrPercent(0.45, false));
+    config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+    config.set_key_value("bottom_shell_layers", new ConfigOptionInt(0));
+    Model model;
+    add_parts(model, "off-sparse-spacing", {{Vec3d(50., 50., 6.), Vec3d::Zero(), 1}});
+    DynamicPrintConfig range;
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.1));
+    model.objects.front()->layer_config_ranges[{2.0, 4.0}].assign_config(std::move(range));
+    Print print;
+    apply_silent(model, print, config);
+    REQUIRE(print.validate().string.empty());
+    REQUIRE_NOTHROW(print.process());
+    const auto moves = Slic3r::Emitted::emitted_moves(Slic3r::Test::gcode(print));
+    std::map<int, double> length_by_layer;
+    Vec3f previous = Vec3f::Zero();
+    for (const auto &move : moves) {
+        if (move.type == EMoveType::Extrude && move.extrusion_role == erInternalInfill)
+            length_by_layer[int(std::lround(move.position.z() * 1000.))] += (move.position - previous).head<2>().norm();
+        previous = move.position;
+    }
+    double thick = 0., thin = 0.;
+    size_t thick_layers = 0, thin_layers = 0;
+    for (const auto &[z, length] : length_by_layer) {
+        if (z > 600 && z <= 1800) { thick += length; ++thick_layers; }
+        else if (z > 2400 && z <= 3600) { thin += length; ++thin_layers; }
+    }
+    REQUIRE(thick_layers >= 4);
+    REQUIRE(thin_layers >= 8);
+    const double ratio = (thin / thin_layers) / (thick / thick_layers);
+    CAPTURE(thick_layers, thin_layers, ratio);
+    CHECK_THAT(ratio, Catch::Matchers::WithinAbs(1., 0.02));
+}
+
+TEST_CASE("Off parity: a tool on a fine nozzle may lay the tower's 0.2 mm bridge road", "[TestRebuild][OffParityRebuild]")
+{
+    // Upstream lets every tool thicken a floating tower area with a 0.2 mm road. A mode holds back a tool
+    // whose nozzle cannot lay 0.2 mm layers (here the 0.2 mm nozzle, at most 0.14 mm).
+    const bool mode = GENERATE(false, true);
+    CAPTURE(mode);
+    DynamicPrintConfig dynamic = off_parity_tower_config();
+    dynamic.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
+    dynamic.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
+    dynamic.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
+    if (mode)
+        dynamic.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
+    mixed_nozzle_fixtures::fill_per_filament_values(dynamic);
+    PrintConfig config;
+    config.apply(dynamic, true);
+    const std::vector<unsigned int> used{0, 1};
+    std::vector<MultiNozzleUtils::NozzleInfo> nozzle_list(2);
+    for (int e = 0; e < 2; ++e) {
+        nozzle_list[size_t(e)].diameter    = e == 0 ? "0.2" : "0.6";
+        nozzle_list[size_t(e)].volume_type = nvtStandard;
+        nozzle_list[size_t(e)].extruder_id = e;
+        nozzle_list[size_t(e)].group_id    = e;
+    }
+    const auto group = MultiNozzleUtils::LayeredNozzleGroupResult::create(std::vector<int>{0, 1}, nozzle_list, used);
+    REQUIRE(group.has_value());
+    WipeTower tower(config, 0, Vec3d::Zero(), 0, 3.f, used);
+    tower.set_nozzle_group_result(*group);
+    for (size_t idx = 0; idx < used.size(); ++idx)
+        tower.set_extruder(idx, config);
+    CHECK(tower.tool_can_thicken(0) == !mode);
+    CHECK(tower.tool_can_thicken(1));
+}
+
+TEST_CASE("Off parity: after a nozzle change the tool unretracts at its first road", "[TestRebuild][OffParityRebuild]")
+{
+    // Upstream unretracts where the arriving tool starts printing. A mode first travels into the tool's
+    // sparse infill, clear of the walls, and unretracts there ("Travel to first infill point").
+    DynamicPrintConfig config = off_parity_tower_config();
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.4, 0.6});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.08, 0.12});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.28, 0.42});
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    Model model;
+    Print print;
+    const std::string gcode = off_gcode(model, print, config, false, 6.);
+    REQUIRE(print.has_wipe_tower());
+    REQUIRE(gcode.find("NOZZLE_CHANGE_START") != std::string::npos);
+    CHECK(gcode.find("Travel to first infill point") == std::string::npos);
 }

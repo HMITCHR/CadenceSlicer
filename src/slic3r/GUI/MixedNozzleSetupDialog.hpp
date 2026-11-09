@@ -116,7 +116,7 @@ struct MixedNozzleWizardDialogInput {
     // seen.
     bool show_intro_line {false};
     // filament_colour per slot for the material picker squares. A short or empty list falls back to
-    // grey.
+    // gray.
     std::vector<std::string> filament_colors;
     // The first layer the selected process preset itself states.
     double preset_first_layer_height {0.};

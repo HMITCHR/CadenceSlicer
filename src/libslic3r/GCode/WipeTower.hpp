@@ -2,18 +2,23 @@
 #define WipeTower_
 
 #include <cmath>
-#include <limits>
 #include <map>
+#include <cstddef>
+#include <math.h>
+#include <limits>
 #include <string>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <algorithm>
 
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include <unordered_set>
+#include <vector>
 #include "libslic3r/MultiNozzleUtils.hpp"
 namespace Slic3r
 {
@@ -75,9 +80,36 @@ public:
     // The part of the first-layer flow boost a road of this width can take without its effective
     // width exceeding 1.25 x the tool's nozzle. Purge rows are already at that limit.
     float base_flow_ratio_for_width(int tool, float road_width) const;
+    // Both generators lay the brim in whole loops one line spacing apart, so the printed width
+    // differs from the configured one. WipeTower reports it with half a spacing of line width
+    // added, WipeTower2 reports the loops alone; an estimate has to round like the generator
+    // whose G-code it stands in for.
+    static float estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2);
+    // Depth a Type1 tower reserves once nothing but wrapping detection asks for one.
+    static float get_wrapping_detection_depth();
+    // Line width of the nozzle-change purge lines at this nozzle diameter.
+    static float nozzle_change_perimeter_width(float nozzle_diameter);
     static TriangleMesh                 its_make_rib_tower(float width, float depth, float height, float rib_length, float rib_width, bool fillet_wall);
     static TriangleMesh                 its_make_rib_brim(const Polygon& brim, float layer_height);
     static Polygon                      rib_section(float width, float depth, float rib_length, float rib_width, bool fillet_wall);
+    // One filament's share of a Type1 tower layer, as plan_tower_new() reserves it.
+    struct PurgeEstimate
+    {
+        float prime_volume           = 0.f;   // mm3 wiped after changing to this filament
+        int   category               = 0;     // filament_adhesiveness_category; one purge block per category
+        float filament_change_length = 0.f;   // mm of filament rammed when it leaves its nozzle; 0 when no nozzle change is planned
+        float filament_diameter      = 1.75f;
+    };
+    // Depth of the Type1 purge stack at the given width (also the rectangle-wall depth): each
+    // purge is whole lines at the block infill gap, one block per adhesiveness category sized by
+    // its worst layer, stacked behind one perimeter width.
+    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing);
+    // Side of the square bounding a rib-wall tower's first layer, brim excluded: the body plus the
+    // rib bulge, with the ribs extended to the height-based minimum as both generators do.
+    static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height);
+    // Type1 rib tower: plan_tower_new() squares the tower from the depth at the configured width,
+    // then re-plans the depth at the squared width.
+    static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height);
     // Translation that brings a footprint inside the printable outline, padded by offset. The prime
     // tower is validated against the real outline (see layered_print_cleareance_valid), so clamping
     // against the bounding box alone would leave it off a delta or hexagonal bed. box and polygons
@@ -140,7 +172,7 @@ public:
 	struct ToolChangeResult
 	{
 		// Print heigh of this tool change.
-		// Scalars are initialised: a result for a level that laid nothing is still summed.
+		// Scalars are initialized: a result for a level that laid nothing is still summed.
 		float					print_z { 0.f };
 		float 					layer_height { 0.f };
 		// Tower top when this visit began, where the head must be before the first road. Equals
@@ -195,6 +227,10 @@ public:
 
         bool               is_contact = false;
         NozzleChangeResult nozzle_change_result;
+
+        // Orca: folded into a later, thicker layer, so the emitter drops it. Set by the tower, so
+        // the two cannot disagree about which layers print.
+        bool               combined_away = false;
 
 		// Sum the total length of the extrusion.
 		float total_extrusion_length_in_plane() {
@@ -286,6 +322,15 @@ public:
     // ram_length_override_mm >= 0 replaces the vendor filament_change_length of the outgoing tool
     // for both planning and the emission budget; -1 keeps the vendor value.
     void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume_ec = 0.f, float wipe_volume_nc = 0.f, float prime_volume = 0.f, bool force_emit = false, float ram_length_override_mm = -1.f);
+    // Idle cooldown for the tool change planned last: the standby temperature its arriving tool was parked at
+    // (-1 when kept hot) and the planner's estimate of that park.
+    void set_last_toolchange_cooldown(int standby, float idle_seconds)
+    {
+        if (!m_plan.empty() && !m_plan.back().tool_changes.empty()) {
+            m_plan.back().tool_changes.back().arrival_standby = m_idle_cooldown ? standby : -1;
+            m_plan.back().tool_changes.back().planned_idle    = idle_seconds;
+        }
+    }
 
 
 	// Iterates through prepared m_plan, generates ToolChangeResults and appends them to "result"
@@ -360,7 +405,18 @@ public:
 	float     		 width()    const { return m_wipe_tower_width; }
     void set_preserve_planned_width(bool preserve) { m_preserve_planned_width = preserve; }
     // Used by Print for a Body Split plate on the lagging tower; call before plan_toolchange().
-    void set_no_sparse_layers(bool no_sparse) { m_no_sparse_layers = no_sparse; }
+    // Skipping wins over combining, as in wipe_tower_sparse_layers_combined().
+    void set_no_sparse_layers(bool no_sparse)
+    {
+        m_sparse_layers_skipped = no_sparse;
+        if (no_sparse)
+            m_sparse_layers_combined = false;
+    }
+    // What this tower actually does with sparse layers, after any set_no_sparse_layers(). Print
+    // publishes these for the emitter and the post-slice checks (see
+    // mixed_nozzle_wipe_tower_sparse_layers_skipped()).
+    bool sparse_layers_skipped() const { return m_sparse_layers_skipped; }
+    bool sparse_layers_combined() const { return m_sparse_layers_combined; }
 	// The wipe tower is finished, there should be no more tool changes or wipe tower prints.
 	bool 	  		 finished() const { return m_max_color_changes == 0; }
 
@@ -465,6 +521,11 @@ public:
         bool                is_soluble = false;
         // BBS
         bool                is_support = false;
+        // The material's multi-tool ramming (filament_multitool_ramming, _volume in mm3, _flow in mm3/s), read by
+        // the tool changer option tool_changer_tower_ram_from_profile.
+        bool                multitool_ramming = false;
+        float               multitool_ramming_volume = 0.f;
+        float               multitool_ramming_flow = 0.f;
         int  			    nozzle_temperature = 0;
         int  			    nozzle_temperature_initial_layer = 0;
         // BBS: remove useless config
@@ -481,8 +542,9 @@ public:
         float               max_e_speed = std::numeric_limits<float>::max();
         std::vector<float>  ramming_speed;
         float               nozzle_diameter;
-        // Max road height for this filament's nozzle, infinity when unresolved.
-        float               max_layer_height { std::numeric_limits<float>::infinity() };
+        // Max road height for this filament's nozzle, infinity when unresolved. Named apart from
+        // upstream's max_layer_height below (sparse layer combination cap), which reads differently.
+        float               nozzle_max_layer_height { std::numeric_limits<float>::infinity() };
         // Min road height for this filament's nozzle, 0 when unknown or not mixed-nozzle.
         float               min_layer_height { 0.f };
         float               filament_area;
@@ -500,6 +562,8 @@ public:
         float filament_tower_interface_pre_extrusion_dist = 0;
         float filament_tower_interface_pre_extrusion_length = 0;
         float filament_petg_pre_extrusion_offset_dist = 0;
+        // Tallest layer this filament's nozzle can lay down; caps the sparse layer combination.
+        float max_layer_height = 0.f;
     };
 
 
@@ -552,8 +616,15 @@ public:
     // heights are the cadences, lag_max the allowed lag. filament_extruders maps each filament to
     // its physical extruder and coarse_extruder is the widest nozzle's. Without a coarse tool or
     // cadences the tower keeps pace.
+    // Keep each material's blocks on its own material through its runs (own_block_height(), catch_up_for(), the
+    // shared wall on fine returns). On by default.
+    void set_material_runs(bool on) { m_material_runs = on; }
     void set_lagging(float lag_max, int coarse_tool, std::vector<int> filament_extruders,
                      int coarse_extruder, float coarse_layer_height, float fine_layer_height);
+    // How far past lag_max the schedule lets the tower sit, and so how far the structure audit (Print.cpp) accepts:
+    // the tower top is a float sum of every level laid, so a tower held exactly at the ceiling on a tall print
+    // drifts by a few 1e-4 mm. Both sides use this one value.
+    static constexpr float lag_tolerance() { return 1e-3f; }
     // Whether this filament is on the nozzle that builds the tower (falls back to coarse_tool
     // without a map).
     bool on_coarse_nozzle(int filament_id) const
@@ -586,12 +657,18 @@ public:
     // deposited. is_nozzle_change skips the color-flush ironing scrub (the tools share no filament).
     void toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinates &cleaning_box, float wipe_length,bool solid_toolchange=false, float wipe_volume_budget=0.f, bool is_nozzle_change=false);
     Vec2f              get_rib_offset() const { return m_rib_offset; }
-    // Whether this tool may lay the 0.2 mm bridge road; unknown tools may.
+    // Whether this tool may lay the 0.2 mm bridge road; unknown tools may. Only a plate in a mode holds a
+    // tool on a fine nozzle back (also when its tower is planned as Off plans it, so the tower config says
+    // Off); with Cadence off every tool may, as in upstream.
+    void               set_thickening_follows_nozzle(bool follows) { m_thickening_follows_nozzle = follows; }
+    // A Feature Split plate planned as Off: the tower config says Off, but only fine tools lay this tower, so its
+    // shared widths follow the smallest installed nozzle as in the mixed-nozzle modes. Set before set_extruder().
+    void               set_widths_from_smallest_nozzle(bool smallest) { m_widths_from_smallest_nozzle = smallest; }
     bool               tool_can_thicken(int tool) const
     {
-        if (tool < 0 || size_t(tool) >= m_filpar.size())
+        if (!m_thickening_follows_nozzle || tool < 0 || size_t(tool) >= m_filpar.size())
             return true;
-        return m_filpar[tool].max_layer_height + 1e-4f >= 0.2f;
+        return m_filpar[tool].nozzle_max_layer_height + 1e-4f >= 0.2f;
     }
     // Ramming height for the outgoing tool: level_height clamped to its nozzle limits (mixed-nozzle only).
     float              ramming_height(int tool, float level_height) const
@@ -600,13 +677,29 @@ public:
             return level_height;
         float height = level_height;
         const float lowest  = m_filpar[tool].min_layer_height;
-        const float highest = m_filpar[tool].max_layer_height;
+        const float highest = m_filpar[tool].nozzle_max_layer_height;
         if (lowest > 0.f && height < lowest - 1e-4f)
             height = lowest;
         if (std::isfinite(highest) && highest > 0.f && height > highest + 1e-4f)
             height = highest;
         return height;
     }
+    // On a lagging level whose arriving tool is of another material than this block, the height the block's own
+    // leaving tool lays it at, over the block's last road (m_block_top_z), when its nozzle can; zero otherwise.
+    float              own_block_height(size_t leaving_tool, const WipeTowerBlock *block) const;
+    // A block of another material than the coarse tool's, kept on its own material through a run of that material
+    // on a lagging tower: a level that would lay it with another material leaves it, and the material's next arrival
+    // catches it up in equal passes from its last road (catch_up_for()).
+    struct CatchUp {
+        int   passes{0};      // 0: no catch-up; the purge and any fill go at the level's own height
+        float top{0.f};       // the block's last road
+        float step{0.f};      // height of each pass
+        bool  fill_rest{false}; // the arrival also lays the rest of the block, at every pass
+    };
+    CatchUp            catch_up_for(size_t arriving_tool) const;
+    bool               leaves_block_for_catch_up(const WipeTowerBlock &block) const;
+    float              catch_up_clearance(size_t tool) const;
+    bool               category_on_coarse_nozzle(int category) const;
     bool               is_need_ramming(int filament_id_1, int filament_id_2, int layer_id) const;
     bool               is_same_extruder(int filament_id_1, int filament_id_2, int layer_id) const;
     bool               is_same_nozzle(int filament_id_1, int filament_id_2, int layer_id) const;
@@ -640,6 +733,52 @@ private:
     float  m_wipe_tower_brim_width      = 0.f; 	// Width of brim (mm) from config
     float  m_wipe_tower_brim_width_real = 0.f; 	// Width of brim (mm) after generation
     bool   m_mixed_nozzle_slicing       = false;
+    // tool_can_thicken(): the mode of the plate, which a tower planned as Off does not carry.
+    bool   m_thickening_follows_nozzle  = false;
+    // set_extruder(): shared widths from the smallest nozzle on a tower planned as Off (a mode sets them so itself).
+    bool   m_widths_from_smallest_nozzle = false;
+    // A tool changer under a mixed-nozzle mode: every tool keeps its own filament, so a tool change only re-primes
+    // a parked nozzle and its prime roads need no slow start (toolchange_Wipe).
+    bool   m_tool_changer_reprime       = false;
+    // A tool changer on this (Type 1) tower under a mixed-nozzle mode: an arriving tool that may be below its print
+    // temperature waits for it before it primes. With the mode off the tower stays stock.
+    bool   m_tool_changer               = false;
+    // Ooze prevention parks idle tools at a standby temperature, so an arriving tool may be cooler than it prints.
+    bool   m_standby_temperature        = false;
+    // Idle cooldown on a tool changer under a mixed-nozzle mode (mixed_nozzle_idle_cooldown_enabled): each park the
+    // planner found long enough cools to standby, and that tool's next arrival waits for its temperature.
+    bool   m_idle_cooldown              = false;
+    // The change tool_change_new() is laying: the outgoing tool's park temperature (-1: stays hot), the arriving
+    // tool's standby temperature (-1: arrives hot) and the planner's idle estimate for it.
+    int    m_change_park_cooldown       = -1;
+    int    m_change_arrival_standby     = -1;
+    float  m_change_planned_idle        = -1.f;
+    // Tools known to be at print temperature: the one that printed before a change, and any tool that has
+    // primed since. A tool not in it (parked by the start G-code, or under a standby temperature) waits for
+    // its temperature and primes with the stock ramp.
+    std::vector<char> m_tool_at_print_temperature;
+    // The current change's prime runs at full speed from the first row (toolchange_wipe_new).
+    bool   m_reprime_full_speed         = false;
+    // Tool changer tower options (tool_changer_tower_*), acting only with m_tool_changer_reprime.
+    bool   m_tc_ram_from_profile        = false;
+    bool   m_tc_fast_fill               = false;
+    float  m_tc_fill_speed_ceiling      = 1.5f;
+    bool   m_tc_sparse_fill             = false;
+    float  m_tc_fill_density            = 0.5f;
+    bool  tc_ram_from_profile() const { return m_tool_changer_reprime && m_tc_ram_from_profile; }
+    // The outgoing tool's ram in mm of filament under tool_changer_tower_ram_from_profile: its material's
+    // multi-tool ramming volume, or none when the material has multi-tool ramming off.
+    float tc_ram_length(size_t tool) const
+    {
+        if (tool >= m_filpar.size() || !m_filpar[tool].multitool_ramming)
+            return 0.f;
+        return m_filpar[tool].multitool_ramming_volume / filament_area();
+    }
+    // The fill rows' feedrate ceiling (mm/min): the purge speed, or with fast fill its multiple.
+    float tc_fill_ceiling() const { return (m_tool_changer_reprime && m_tc_fast_fill) ? m_max_speed * m_tc_fill_speed_ceiling : m_max_speed; }
+    bool  tc_sparse_fill() const { return m_tool_changer_reprime && m_tc_sparse_fill && m_tc_fill_density < 1.f - 1e-4f; }
+    // The inner box around the open part of a fill level is left out with sparse fill, at any density, above the base.
+    bool  tc_skip_fill_box() const { return m_tool_changer_reprime && m_tc_sparse_fill && !is_base_layer(); }
 	float  m_wipe_tower_rotation_angle = 0.f; // Wipe tower rotation angle in degrees (with respect to x axis)
     float  m_internal_rotation  = 0.f;
 	float  m_y_shift			= 0.f;  // y shift passed to writer
@@ -670,6 +809,23 @@ private:
     // Per block id, the top of the held coarse prime roads standing above the tower top (WipeTowerInfo::held_above),
     // until a full level reaches them. Purge and ramming rows laid in that block before then are lifted to it.
     std::map<int, float> m_held_road_z;
+    // Per block id, the highest Z any road of an earlier level reached in the block (lagging tower only). A block of
+    // the leaving tool's material is laid from there at its own height (generate_new).
+    std::map<int, float> m_block_top_z;
+    // Per block id, the material (adhesion category) of the road at m_block_top_z.
+    std::map<int, int>   m_block_top_category;
+    // The same for the shared wall (support domain 1).
+    float                m_wall_top_z{-1.f};
+    int                  m_wall_top_category{-1};
+    // Set by generate_new for one tool change: the purge goes at this Z and height (catch_up_for()).
+    float                m_purge_override_z{-1.f};
+    float                m_purge_override_height{0.f};
+    // When positive, finish_block keeps its fill this far in from the wall and the block's ends (a catch-up pass
+    // below the level's Z, beside higher roads).
+    float                m_fill_inset{0.f};
+    // A purge lowered to catch a kept block up is being laid (no scrub back past its first row's start).
+    bool                 m_purge_lowered{false};
+    bool                 m_material_runs{true};
     // Per block id, where the held level's rows end in the block (its cursor after them). A full level below the
     // held top starts its block fill there, so the fill lies beside the held rows, not under them.
     std::map<int, float> m_held_rows_end;
@@ -729,7 +885,8 @@ private:
     //float           m_parking_pos_retraction    = 0.f;
     //float           m_extra_loading_move        = 0.f;
     float           m_bridging                  = 0.f;
-    bool            m_no_sparse_layers          = false;
+    bool            m_sparse_layers_skipped     = false;
+    bool            m_sparse_layers_combined    = false;
     // BBS: remove useless config
     //bool            m_set_extruder_trimpot      = false;
     bool            m_adhesion                  = true;
@@ -803,6 +960,8 @@ private:
     }
 	// Calculates depth for all layers and propagates them downwards
 	void plan_tower();
+	// Whether the layer reaches the G-code, and so whether its extrusions count as filament used.
+	bool layer_is_printed(bool toolchanges_on_layer) const;
 
 	// Goes through m_plan and recalculates depths and width of the WT to make it exactly square - experimental
 	void make_wipe_tower_square();
@@ -839,6 +998,12 @@ private:
             // Resolved ram length for the outgoing tool, or -1 for the vendor value. Kept so that
             // re-deriving the block in set_toolchange() does not drop it.
             float ram_length_override_mm{-1.f};
+            // Idle cooldown (tool_changer_idle_cooldown, tool changers under a mixed-nozzle mode): the standby
+            // temperature the arriving tool was parked at, or -1 when it was kept hot; the planner's idle estimate;
+            // and, filled by generate_new(), the standby temperature the outgoing tool parks at here, or -1.
+            int   arrival_standby{-1};
+            float planned_idle{-1.f};
+            int   park_cooldown{-1};
 			// BBS
 			float purge_volume;
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, float wl = 0, float pv = 0)
@@ -869,6 +1034,8 @@ private:
         bool  held_above{false};
         // Compact-tower filler layer: deposit (and count) its wall although it has no tool change.
         bool  force_emit{false};
+		// Folded into a later, thicker layer, so this one prints nothing at all.
+		bool  combined_away{false};
 		float toolchanges_depth() const { float sum = 0.f; for (const auto &a : tool_changes) sum += a.required_depth; return sum; }
 
 		std::vector<ToolChange> tool_changes;
@@ -878,6 +1045,12 @@ private:
 	};
 
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
+    // The first later level, within two coarse layers of `from`, where a tool of this material arrives (catch-up).
+    std::vector<WipeTowerInfo>::const_iterator next_arrival_soon(std::vector<WipeTowerInfo>::const_iterator from, int category) const;
+    // Where a fine tool of this material lays its block (and the wall) ahead of the levels another material's fine
+    // tool lays before this material comes back: the highest of those levels' Z (block) and the first one's (wall),
+    // never above the current part layer; zero where nothing would cover them.
+    std::pair<float, float> ahead_targets(int category) const;
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
 
 	// See plan_digest().
@@ -919,6 +1092,96 @@ private:
 };
 
 
+// Compaction rule for wipe_tower_no_sparse_layers. Shared by the G-code emitter and by the
+// clearance validator so that both agree on where the compacted tower actually sits; a drift
+// between the two would either let a real nozzle collision through or reject a safe plate.
+
+// Whether sparse layers are really skipped, i.e. whether the tower is compacted at all. Smooth
+// timelapse and wrapping detection put a tower on every layer, so no layer is ever dropped and the
+// tower keeps following the object even though the option is on. Tower planning, G-code emission and
+// the clearance validator all ask this single question, so none of them can compact on its own.
+bool wipe_tower_sparse_layers_skipped(const PrintConfig &config);
+
+// The constructor's decision from the config it is given, and nothing more. In a mixed-nozzle mode
+// it is Cadence's compact tower rule (mixed_nozzle_compact_tower(): always in Feature Split,
+// otherwise the option, whatever the timelapse or wrapping detection); in Off it is
+// wipe_tower_sparse_layers_skipped() above. It does not see two run-time cases: a Body Split plate
+// on the lagging tower, which Print turns compact with set_no_sparse_layers(true), and a Feature
+// Split plate planned as Off, whose tower is built from mixed_nozzle_tower_config_as_off(). Code
+// outside WipeTower must not use this to learn whether the generated tower skips or combines; it
+// must read the generated tower's own flags.
+bool mixed_nozzle_wipe_tower_sparse_layers_skipped(const PrintConfig &config);
+
+// A planned layer prints no tower at all when its only toolchange keeps the same filament.
+bool wipe_tower_layer_is_sparse(const std::vector<WipeTower::ToolChangeResult> &layer_tool_changes);
+
+// Print z the compacted tower reaches on every planned layer. Sparse layers carry over the
+// previous value, so the tower falls one layer height behind the object for each of them. base_z is
+// the z the tower starts from, which Orca offsets by z_offset.
+std::vector<float> compute_compacted_wipe_tower_z(const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
+                                                  float base_z = 0.f);
+
+
+// Combination rule for wipe_tower_sparse_layers_combination. Nothing is compacted - the tower keeps
+// following the object - but a run of consecutive toolchange-free layers prints as one thicker layer,
+// the way infill combination merges sparse infill. Shared so that neither tower generator nor the
+// G-code emitter can combine on its own.
+
+// Whether sparse layers are really combined. Skipping them outright is the stronger answer to the
+// same problem and wins over this; smooth timelapse and wrapping detection need a tower on every
+// layer, so they rule it out too.
+bool wipe_tower_sparse_layers_combined(const PrintConfig &config);
+
+// The constructor's decision from the config it is given: never in a mixed-nozzle mode,
+// wipe_tower_sparse_layers_combined() in Off. Same limits as above: a Feature Split plate planned as
+// Off is built from an Off config, so this answers for that config. Code outside WipeTower must read
+// the generated tower's own flags.
+bool mixed_nozzle_wipe_tower_sparse_layers_combined(const PrintConfig &config);
+
+// A planned layer folded into a later, thicker one prints nothing at all.
+bool wipe_tower_layer_is_combined_away(const std::vector<WipeTower::ToolChangeResult> &layer_tool_changes);
+
+// Folds runs of sparse layers into one. layer_height is raised in place on the layer that prints a
+// run - always its last, so the merged extrusion lands on top of what it covers - and the returned
+// mask marks the layers that now print nothing. A run stops growing once one more layer would pass
+// max_layer_height of the nozzle that prints it. first_layer_idx and below never combine: the
+// tower's first layer carries the brim.
+std::vector<char> combine_sparse_wipe_tower_layers(std::vector<float>       &layer_height,
+                                                   const std::vector<char>  &layer_is_sparse,
+                                                   const std::vector<float> &max_layer_height,
+                                                   size_t                    first_layer_idx);
+
+// Applies the rule above to a planned tower. Either generator's plan fits: both carry height,
+// tool_changes and combined_away per layer, and index their filament parameters by tool.
+template<class PlanLayers, class FilamentParams>
+void combine_sparse_wipe_tower_plan(PlanLayers &plan, const FilamentParams &filpar, size_t first_layer_idx, size_t initial_tool)
+{
+    const size_t       n = plan.size();
+    std::vector<float> heights(n);
+    std::vector<char>  sparse(n);
+    std::vector<float> caps(n);
+
+    // A layer with no toolchange prints with the filament the layer below left loaded.
+    size_t tool = initial_tool;
+    for (const auto &layer : plan)
+        if (! layer.tool_changes.empty()) {
+            tool = layer.tool_changes.front().old_tool;
+            break;
+        }
+    for (size_t i = 0; i < n; ++i) {
+        heights[i] = plan[i].height;
+        sparse[i]  = plan[i].tool_changes.empty() ? 1 : 0;
+        caps[i]    = tool < filpar.size() ? filpar[tool].max_layer_height : 0.f;
+        if (! plan[i].tool_changes.empty())
+            tool = plan[i].tool_changes.back().new_tool;
+    }
+
+    const std::vector<char> combined_away = combine_sparse_wipe_tower_layers(heights, sparse, caps, first_layer_idx);
+    for (size_t i = 0; i < n; ++i) {
+        plan[i].height        = heights[i];
+        plan[i].combined_away = combined_away[i] != 0;
+    }
+}
 
 
 } // namespace Slic3r

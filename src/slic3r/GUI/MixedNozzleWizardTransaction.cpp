@@ -130,7 +130,7 @@ WizardNativeObjectState capture_object_state(const ModelObject &object)
         WizardNativeInstanceState instance_state;
         instance_state.instance_id = instance->id().id;
         instance_state.printable = instance->printable;
-        instance_state.auto_drop = instance->auto_drop;
+        instance_state.auto_drop = object.auto_drop; // auto_drop is per object
         instance_state.arrange_order = instance->arrange_order;
         instance_state.loaded_id = instance->loaded_id;
         instance_state.use_loaded_id_for_label = instance->use_loaded_id_for_label;
@@ -1259,8 +1259,7 @@ DynamicPrintConfig staged_plate_slice_config(PresetBundle &staged_bundle, PartPl
 }
 
 // Setup gives every plate it sets up a second tool, so a tower, at the spot the project stores for
-// that plate. A project saved while it printed one material can store a spot inside its parts (the
-// tester's 8-plate file: plates 2, 3 and 5 to 8). Where the spot overlaps the plate's parts it moves
+// that plate. A project saved while it printed one material can store a spot inside its parts. Where the spot overlaps the plate's parts it moves
 // clear of them, as the sidebar's Apply already does (set_default_wipe_tower_pos_for_plate); a safe
 // spot stays. Staged here, so step 3's slices use the spot Apply stores. Returns the 1-based numbers
 // of the plates whose tower moved.
@@ -2339,8 +2338,7 @@ MixedNozzleRankingSlice wizard_candidate_staged_slice(const WizardDraft &draft,
         return refused;
     }
     MixedNozzleRankingSlice slice = wizard_staged_slice(prepared, owners);
-    // The engine would refuse it at Slice. The row says why, as a row setup refuses does (a Body
-    // Split part at 100% density only said "Slice would refuse this row." until step 4).
+    // The engine would refuse it at Slice. The row says why, as a row setup refuses does.
     if (slice.diagnostic.empty() && !prepared.admission_refusal.empty())
         slice.diagnostic = "Slice would refuse this row. " + prepared.admission_refusal;
     return slice;

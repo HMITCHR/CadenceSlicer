@@ -1,19 +1,21 @@
-// Prime tower: feedrate after an in-tower travel, the bed level under a fine switch on
-// layer 1, and the coarse nozzle's first-layer wall width and ramming speed.
+// Prime tower: feedrate after an in-tower travel, the tower's first layer on every bed-level variant, the tower
+// width of a plate planned as Off, and the Fine skins tower refusal.
 
 #include <catch2/catch_all.hpp>
 
 #include "mixed_nozzle_harness.hpp"
 #include "mixed_nozzle_fixtures.hpp"
+#include "mixed_nozzle_printers.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
+#include <iomanip>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Slic3r;
@@ -22,47 +24,14 @@ using namespace mixed_nozzle_fixtures;
 namespace {
 using Move = GCodeProcessorResult::MoveVertex;
 
-// One-based G-code line numbers (gcode_id) that sit inside a nozzle-change (ramming) bracket.
-std::vector<bool> ramming_lines(const std::string &gcode)
+std::vector<size_t> ramming_lines(const std::string &gcode)
 {
-    std::vector<bool> out(1, false);
-    std::istringstream lines(gcode);
-    std::string line;
-    bool ramming = false;
-    while (std::getline(lines, line)) {
-        if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0)
-            ramming = true;
-        out.push_back(ramming);
-        if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0)
-            ramming = false;
-    }
-    return out;
+    return bracketed_lines(gcode, {"; NOZZLE_CHANGE_START"}, {"; NOZZLE_CHANGE_END"});
 }
 
-// With CADENCE_TEST_DUMP_DIR set, keeps a case's G-code there for inspection.
-void dump_gcode(const std::string &name, const std::string &gcode)
+bool on_line(const std::vector<size_t> &lines, const Move &move)
 {
-    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR")) {
-        std::ofstream out(std::string(dir) + "/" + name + ".gcode");
-        out << gcode;
-    }
-}
-
-CadenceTest::Scene feature_tower_scene(double fine_d, double coarse_d, double height)
-{
-    CadenceTest::Scene scene;
-    scene.config = feature_split_tower_config(fine_d, coarse_d, false);
-    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wtwRib));
-    scene.config.set_key_value("mixed_nozzle_auto_pad", new ConfigOptionBool(true));
-    scene.config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
-    scene.config.set_key_value("prime_tower_brim_width", new ConfigOptionFloat(-1.));
-    scene.config.set_key_value("first_layer_flow_ratio", new ConfigOptionFloat(1.));
-    apply_tower_exit_retraction(scene.config);
-    fill_per_filament_values(scene.config);
-    scene.populate = [height](Model &model, Print &print, const DynamicPrintConfig &config) {
-        init_feature_flow_fixture(model, print, config, height, 60.);
-    };
-    return scene;
+    return move.gcode_id < lines.size() && lines[move.gcode_id] != 0;
 }
 
 // Filaments 1 and 3 on the left 0.2 nozzle, 2 and 4 on the right coarse nozzle, Body Split, no support.
@@ -100,6 +69,50 @@ DynamicPrintConfig four_filament_body_config(double coarse_d, double coarse_min,
     return config;
 }
 
+// four_filament_body_config with the coarse nozzle on the left: filaments 1 and 3 on the right 0.2.
+void put_coarse_left(DynamicPrintConfig &config, double coarse_d, double coarse_min, double coarse_max)
+{
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{coarse_d, 0.2});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{coarse_min, 0.04});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{coarse_max, 0.14});
+    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{coarse_d, 0.2});
+    config.set_key_value("filament_map", new ConfigOptionInts{2, 1, 2, 1});
+}
+
+ModelVolume *add_block(ModelObject *object, const Vec3d &size, const Vec3d &offset, int filament, double height)
+{
+    ModelVolume *volume = object->add_volume(make_cube(size.x(), size.y(), size.z()), ModelVolumeType::MODEL_PART, false);
+    volume->set_offset(offset);
+    volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
+    volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
+    return volume;
+}
+
+void place_and_apply(ModelObject *object, Model &model, Print &print, const DynamicPrintConfig &config)
+{
+    object->add_instance();
+    object->instances.front()->set_offset(Vec3d(60., 60., 0.));
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+// Fine skins on a coarse body on the bed, a fine block on top and a fine strip on the front face from `strip_z` up
+// (raised text on the top and the side): with switches on every coarse layer the fine filament is the tower's usual
+// wall filament.
+void add_fine_skins_plate(Model &model, Print &print, const DynamicPrintConfig &config, double fine, double coarse, double strip_z)
+{
+    ModelObject *object = model.add_object();
+    object->name = "fine-skins";
+    ModelVolume *body = add_block(object, Vec3d(20., 12., 3.), Vec3d::Zero(), 2, coarse);
+    body->config.set_key_value("mixed_nozzle_body_fine_skins", new ConfigOptionBool(true));
+    for (const char *key : {"internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id"})
+        body->config.set_key_value(key, new ConfigOptionInt(1));
+    add_block(object, Vec3d(8., 6., 1.), Vec3d(6., 3., 3.), 1, fine);
+    add_block(object, Vec3d(10., 1., 2.), Vec3d(5., -1., strip_z), 1, fine);
+    place_and_apply(object, model, print, config);
+}
+
 // What the tower lays on and near the bed, read from the exported G-code in print order.
 struct TowerBedAudit {
     double first_z            = 0.;  // lowest tower road
@@ -118,21 +131,10 @@ struct TowerBedAudit {
 TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_layer_height)
 {
     TowerBedAudit audit;
-    const std::vector<bool> ramming = ramming_lines(facts.gcode);
+    const std::vector<size_t> ramming = ramming_lines(facts.gcode);
     // Lines inside a tool change or a block fill: what is left of the tower is its wall and brim.
-    std::vector<bool> not_wall(1, false);
-    {
-        std::istringstream lines(facts.gcode);
-        std::string line;
-        bool inside = false;
-        while (std::getline(lines, line)) {
-            if (line.rfind("; CP TOOLCHANGE START", 0) == 0 || line.rfind("; CP EMPTY GRID START", 0) == 0)
-                inside = true;
-            not_wall.push_back(inside);
-            if (line.rfind("; CP TOOLCHANGE END", 0) == 0 || line.rfind("; CP EMPTY GRID END", 0) == 0)
-                inside = false;
-        }
-    }
+    const std::vector<size_t> not_wall = bracketed_lines(facts.gcode, {"; CP TOOLCHANGE START", "; CP EMPTY GRID START"},
+                                                         {"; CP TOOLCHANGE END", "; CP EMPTY GRID END"});
     const double cell = 0.5;
     std::map<std::pair<int, int>, float> top;
     auto key = [cell](double x, double y) { return std::make_pair(int(std::floor(x / cell)), int(std::floor(y / cell))); };
@@ -149,7 +151,7 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
     };
     struct Level { double length = 0., bare = 0., fastest = 0.; std::set<int> tools; double height = 0.; };
     std::map<int, Level> levels; // by Z in microns
-    double min_x[2] = {1e9, 1e9}, max_x[2] = {-1e9, -1e9}, min_y[2] = {1e9, 1e9}, max_y[2] = {-1e9, -1e9};
+    BoundingBoxf bounds[2];      // the first tower layer, and the tower above 2 mm
     audit.first_z = 1e9;
     for (const Move &move : facts.moves)
         if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
@@ -165,16 +167,12 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
         if (length <= 0.)
             continue;
         if (z > 0.6) {
-            if (z > 2.) {
-                min_x[1] = std::min<double>(min_x[1], move.position.x());
-                max_x[1] = std::max<double>(max_x[1], move.position.x());
-                min_y[1] = std::min<double>(min_y[1], move.position.y());
-                max_y[1] = std::max<double>(max_y[1], move.position.y());
-            }
+            if (z > 2.)
+                bounds[1].merge(Vec2d(move.position.x(), move.position.y()));
             continue;
         }
         const bool on_first = z <= first_layer_height + 0.02;
-        const bool rams     = move.gcode_id < ramming.size() && ramming[move.gcode_id];
+        const bool rams     = on_line(ramming, move);
         Level &level = levels[int(std::lround(z * 1000.))];
         level.length += length;
         level.tools.insert(int(move.physical_tool_id));
@@ -196,8 +194,9 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
         bare = std::min(bare, length);
         if (on_first) {
             audit.bed_tools.insert(int(move.physical_tool_id));
-            if (move.physical_tool_id < 2 && ! rams && move.gcode_id < not_wall.size() && ! not_wall[move.gcode_id])
+            if (move.physical_tool_id < 2 && ! rams && move.gcode_id < not_wall.size() && not_wall[move.gcode_id] == 0)
                 audit.wall_widest[move.physical_tool_id] = std::max(audit.wall_widest[move.physical_tool_id], double(move.width));
+            bounds[0].merge(Vec2d(move.position.x(), move.position.y()));
         }
         if (! on_first && z - double(move.height) < 0.02)
             audit.from_bed_late += length;
@@ -208,19 +207,14 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
         // Bed contact: on the first tower layer, or anywhere with nothing under it.
         if ((on_first || bare > 0.5 * length) && move.feedrate > 15.01f)
             (rams ? audit.bed_ramming_fast : audit.bed_contact_fast) += length;
-        if (on_first) {
-            min_x[0] = std::min<double>(min_x[0], move.position.x());
-            max_x[0] = std::max<double>(max_x[0], move.position.x());
-            min_y[0] = std::min<double>(min_y[0], move.position.y());
-            max_y[0] = std::max<double>(max_y[0], move.position.y());
-        }
         for (const auto &point : points) {
             float &cell_top = top[key(point.first, point.second)];
             cell_top = std::max(cell_top, float(z));
         }
     }
-    audit.first_extent = std::min(max_x[0] - min_x[0], max_y[0] - min_y[0]);
-    audit.top_extent   = std::min(max_x[1] - min_x[1], max_y[1] - min_y[1]);
+    for (int i = 0; i < 2; ++i)
+        (i == 0 ? audit.first_extent : audit.top_extent) =
+            bounds[i].defined ? std::min(bounds[i].size().x(), bounds[i].size().y()) : 0.;
     std::ostringstream out;
     for (const auto &[z, level] : levels) {
         out << "Z " << z / 1000. << " h " << level.height << " tools";
@@ -230,46 +224,6 @@ TowerBedAudit audit_tower_bed(const CadenceTest::Facts &facts, double first_laye
     }
     audit.levels = out.str();
     return audit;
-}
-
-// Three blocks side by side on the bed: filament 1 and filament 3 on the fine nozzle (a fine switch
-// on layer 1) and filament 2 on the coarse nozzle, whose first layer ends at the second fine layer.
-CadenceTest::Facts slice_fine_switch_on_layer_one(double coarse_d, double coarse_min, double coarse_max, double fine, double coarse,
-                                                  bool swapped = false, std::vector<int> filaments = {1, 3, 2},
-                                                  double fine_lift = 0., WipeTowerWallType wall_type = wtwRib,
-                                                  double first_layer = 0.)
-{
-    CadenceTest::Scene scene;
-    scene.config = four_filament_body_config(coarse_d, coarse_min, coarse_max, fine, coarse);
-    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wall_type));
-    // Zero keeps the first layer at the fine height.
-    if (first_layer > 0.)
-        scene.config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(first_layer));
-    if (swapped) {
-        scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{coarse_d, 0.2});
-        scene.config.set_key_value("min_layer_height", new ConfigOptionFloats{coarse_min, 0.04});
-        scene.config.set_key_value("max_layer_height", new ConfigOptionFloats{coarse_max, 0.14});
-        scene.config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{coarse_d, 0.2});
-        scene.config.set_key_value("filament_map", new ConfigOptionInts{2, 1, 2, 1});
-    }
-    scene.populate = [fine, coarse, filaments, fine_lift](Model &model, Print &print, const DynamicPrintConfig &config) {
-        ModelObject *object = model.add_object();
-        object->name = "fine-switch-on-layer-one";
-        for (size_t i = 0; i < filaments.size(); ++i) {
-            ModelVolume *volume = object->add_volume(make_cube(10., 12., 3.), ModelVolumeType::MODEL_PART, false);
-            // Fine bodies can start above the bed (on the coarse one's neighbour column they are simply later).
-            volume->set_offset(Vec3d(10. * double(i), 0., filaments[i] % 2 == 0 ? 0. : fine_lift));
-            volume->config.set_key_value("extruder", new ConfigOptionInt(filaments[i]));
-            // Even filaments are on the coarse nozzle.
-            volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(filaments[i] % 2 == 0 ? coarse : fine));
-        }
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
-        object->ensure_on_bed();
-        print.apply(model, config);
-        print.set_status_silent();
-    };
-    return CadenceTest::slice(scene);
 }
 
 // The coarse tool's tower roads on the tower's bed level, with widths measured from E the way the
@@ -287,21 +241,8 @@ struct CoarseBedLevel {
 CoarseBedLevel audit_coarse_bed_level(const CadenceTest::Facts &facts, int coarse_tool)
 {
     CoarseBedLevel audit;
-    const std::vector<bool> ramming = ramming_lines(facts.gcode);
-    // Lines inside a block fill.
-    std::vector<bool> block_fill(1, false);
-    {
-        std::istringstream lines(facts.gcode);
-        std::string line;
-        bool inside = false;
-        while (std::getline(lines, line)) {
-            if (line.rfind("; CP EMPTY GRID START", 0) == 0)
-                inside = true;
-            block_fill.push_back(inside);
-            if (line.rfind("; CP EMPTY GRID END", 0) == 0)
-                inside = false;
-        }
-    }
+    const std::vector<size_t> ramming = ramming_lines(facts.gcode);
+    const std::vector<size_t> block_fill = bracketed_lines(facts.gcode, {"; CP EMPTY GRID START"}, {"; CP EMPTY GRID END"});
     const double filament_area = 0.25 * M_PI * 1.75 * 1.75;
     struct Road { Vec2d a, b; double z, height, width, area; int tool; bool rams, fill; };
     std::vector<Road> roads;
@@ -318,8 +259,7 @@ CoarseBedLevel audit_coarse_bed_level(const CadenceTest::Facts &facts, int coars
             continue;
         const double area = double(move.delta_extruder) * filament_area / length;
         roads.push_back({a, b, double(move.position.z()), double(move.height), area / double(move.height) + double(move.height) * (1. - M_PI / 4.),
-                         area, int(move.physical_tool_id), move.gcode_id < ramming.size() && ramming[move.gcode_id],
-                         move.gcode_id < block_fill.size() && block_fill[move.gcode_id]});
+                         area, int(move.physical_tool_id), on_line(ramming, move), on_line(block_fill, move)});
     }
     if (roads.empty())
         return audit;
@@ -391,168 +331,6 @@ CoarseBedLevel audit_coarse_bed_level(const CadenceTest::Facts &facts, int coars
     audit.fullness = box_area > 0. && height > 0. ? volume / (box_area * height) : 0.;
     return audit;
 }
-} // namespace
-
-// In a mixed mode the tower's travels name the tower travel speed. A road after one that
-// names no feedrate must go back to the print feedrate, not run at the travel speed (which the
-// volumetric ceiling then cuts down to whatever the filament allows, instead of the intended speed).
-TEST_CASE("Feature Split: a tower road that names no feedrate does not run at the tower's travel speed",
-          "[TestRebuild][TowerSpeed]")
-{
-    CadenceTest::Scene scene = feature_tower_scene(.20, .60, 4.);
-    // A limit no tower road reaches, so the volumetric ceiling cannot hide an inherited travel speed.
-    scene.config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloatsNullable{200., 200.});
-    const double travel = scene.config.option<ConfigOptionFloatsNullable>("travel_speed")->get_at(0);
-    const CadenceTest::Facts facts = CadenceTest::slice(scene);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    const std::vector<bool> ramming = ramming_lines(facts.gcode);
-    size_t roads = 0, at_travel_speed = 0;
-    double fastest = 0.;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude || move.extrusion_role != erWipeTower)
-            continue;
-        if (move.gcode_id < ramming.size() && ramming[move.gcode_id])
-            continue;
-        ++ roads;
-        fastest = std::max(fastest, double(move.feedrate));
-        at_travel_speed += std::abs(move.feedrate - travel) < 0.01 ? 1 : 0;
-    }
-    CAPTURE(roads, at_travel_speed, fastest, travel);
-    CHECK(roads > 0);
-    CHECK(at_travel_speed == 0);
-    // The tower's own cap for a road is 90 mm/s (F5400).
-    CHECK(fastest <= 90.01);
-}
-
-// A fine switch on layer 1 under a coarse arrival on layer 2 used to lay only its prime
-// road on the bed. The coarse arrival then laid a step from the bed over mostly bare bed, at full
-// speed, and the next fine level printed at the bed height again.
-TEST_CASE("A fine switch on layer 1 lays the tower's whole bed level; nothing higher goes down over bare bed",
-          "[TestRebuild][TowerFirstLayer]")
-{
-    struct Pair { const char *name; double coarse_d, coarse_min, coarse_max, fine, coarse; bool swapped; };
-    const Pair pair = GENERATE(Pair{"0.2/0.6", 0.6, 0.12, 0.42, 0.10, 0.20, false},
-                               Pair{"0.2/0.8", 0.8, 0.16, 0.56, 0.08, 0.16, false},
-                               Pair{"0.2/0.6, fine on the right", 0.6, 0.12, 0.42, 0.10, 0.20, true});
-    CAPTURE(pair.name);
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(pair.coarse_d, pair.coarse_min, pair.coarse_max,
-                                                                    pair.fine, pair.coarse, pair.swapped);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("bed-level-") + (pair.swapped ? "swapped-" : "") + std::to_string(int(pair.coarse_d * 10)), facts.gcode);
-    const TowerBedAudit audit = audit_tower_bed(facts, pair.fine);
-    INFO(audit.levels);
-    CAPTURE(audit.first_z, audit.near_bed_length, audit.over_bare_bed, audit.from_bed_late, audit.bed_contact_fast,
-            audit.first_extent, audit.top_extent);
-    CHECK(std::abs(audit.first_z - pair.fine) < 1e-3);
-    CHECK(audit.over_bare_bed <= 0.02 * audit.near_bed_length);
-    // No later level is laid as a step from the bed, into or beside the bed level.
-    CHECK(audit.from_bed_late == 0.);
-    CHECK(audit.bed_contact_fast == 0.);
-    // The bed level carries the brim (3 mm a side on a short tower), so it is wider than the tower.
-    CHECK(audit.first_extent > audit.top_extent + 4.);
-}
-
-// When both nozzles lay the tower's bed level (a nozzle change on layer 1), the coarse
-// tool's wall there is at its own width, not the fine nozzle's, and ramming laid on the bed goes
-// no faster than the rest of the first layer.
-TEST_CASE("A nozzle change on layer 1: the coarse tool's bed wall is at its own width and bed ramming is at first-layer speed",
-          "[TestRebuild][TowerFirstLayer]")
-{
-    // 0.12 fine layers: the 0.6 nozzle's first legal layer is the print's first layer.
-    const bool swapped = GENERATE(false, true);
-    CAPTURE(swapped);
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.12, 0.24, swapped, {1, 2});
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("nozzle-change-l1-") + (swapped ? "swapped" : "plain"), facts.gcode);
-    const TowerBedAudit audit = audit_tower_bed(facts, 0.12);
-    const int coarse_tool = swapped ? 0 : 1;
-    INFO(audit.levels);
-    CAPTURE(audit.first_z, audit.bed_ramming_fast, audit.bed_contact_fast, audit.wall_widest[0], audit.wall_widest[1],
-            audit.bed_tools.size(), coarse_tool);
-    // The scene: both nozzles lay tower roads on the first layer.
-    REQUIRE(audit.bed_tools.size() == 2);
-    CHECK(audit.bed_ramming_fast == 0.);
-    CHECK(audit.bed_contact_fast == 0.);
-    // A wall drawn by the coarse tool is at least about its nozzle wide; drawn by the fine tool there is none to check.
-    if (audit.wall_widest[coarse_tool] > 0.)
-        CHECK(audit.wall_widest[coarse_tool] >= 0.9 * 0.6);
-}
-
-// A print that starts on the coarse nozzle has the coarse tool lay the tower's bed level.
-// Its wall there was drawn at the fine nozzle's first-layer width (0.25 mm from a 0.6 mm nozzle).
-TEST_CASE("A tower bed level laid by the coarse tool has its wall at the coarse tool's width", "[TestRebuild][TowerFirstLayer]")
-{
-    const bool swapped = GENERATE(false, true);
-    CAPTURE(swapped);
-    // The coarse body stands on the bed; the fine body starts 1.2 mm up, so layer 1 is coarse only.
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.12, 0.24, swapped, {2, 1}, 1.2);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("coarse-bed-level-") + (swapped ? "swapped" : "plain"), facts.gcode);
-    const TowerBedAudit audit = audit_tower_bed(facts, 0.12);
-    const int coarse_tool = swapped ? 0 : 1;
-    INFO(audit.levels);
-    CAPTURE(audit.first_z, audit.bed_contact_fast, audit.wall_widest[0], audit.wall_widest[1], audit.bed_tools.size(), coarse_tool);
-    // The scene: only the coarse tool lays the first tower layer.
-    REQUIRE(audit.bed_tools.size() == 1);
-    REQUIRE(audit.bed_tools.count(coarse_tool) == 1);
-    CHECK(audit.wall_widest[coarse_tool] >= 0.9 * 0.6);
-    CHECK(audit.bed_contact_fast == 0.);
-}
-
-// A coarse body on the bed whose nozzle cannot lay the 0.10 mm first layer starts with a 0.20 mm
-// first cell, so nothing prints on the first layer. The tower was then left out altogether, and
-// every nozzle change went without a prime.
-TEST_CASE("A coarse body that starts above an empty first layer still gets the prime tower, primed at every nozzle change",
-          "[TestRebuild][TowerFirstLayer]")
-{
-    const bool swapped = GENERATE(false, true);
-    CAPTURE(swapped);
-    // 0.10 fine, 0.30 coarse on a 0.6 nozzle with a 0.12 minimum; the fine body starts 1.2 mm up.
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.10, 0.30, swapped, {2, 1}, 1.2);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("coarse-first-cell-") + (swapped ? "swapped" : "plain"), facts.gcode);
-
-    double first_model_z = 1e9;
-    for (const Move &move : facts.moves)
-        if (CadenceTest::model_road(move))
-            first_model_z = std::min(first_model_z, double(move.position.z()));
-    const TowerBedAudit audit = audit_tower_bed(facts, first_model_z);
-    INFO(audit.levels);
-    CAPTURE(first_model_z, audit.first_z, audit.first_extent, audit.top_extent);
-    // The scene: the first printing layer is the coarse first cell, above the 0.10 mm first layer.
-    REQUIRE(first_model_z > 0.15);
-    REQUIRE(audit.first_z < 1e8);
-    // The tower starts with the part, and its bed level is wider than the tower above (its brim).
-    CHECK(std::abs(audit.first_z - first_model_z) < 1e-3);
-    CHECK(audit.first_extent > audit.top_extent + 1.);
-
-    // Every nozzle change starts on the tower: the new nozzle's first road there is a tower road.
-    size_t changes = 0, primed = 0;
-    int active = -1;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude)
-            continue;
-        const int tool = int(move.physical_tool_id);
-        if (active != -1 && tool != active) {
-            ++changes;
-            primed += move.extrusion_role == erWipeTower ? 1 : 0;
-        }
-        active = tool;
-    }
-    CAPTURE(changes, primed);
-    CHECK(changes > 0);
-    CHECK(primed == changes);
-}
 
 // The first layer of the exported G-code: its height tag and whether anything is extruded on it, and
 // whether the tower's first road is on it.
@@ -563,7 +341,7 @@ struct FirstGcodeLayer {
     bool   tower_before = false; // a tower road before the first layer change
 };
 
-static FirstGcodeLayer first_gcode_layer(const std::string &gcode)
+FirstGcodeLayer first_gcode_layer(const std::string &gcode)
 {
     FirstGcodeLayer out;
     std::istringstream lines(gcode);
@@ -594,113 +372,9 @@ static FirstGcodeLayer first_gcode_layer(const std::string &gcode)
     return out;
 }
 
-// Body Split 0.2/0.8 on the tiny-text plate: text up on the boxes, only the 0.8's boxes on the bed.
-// The 0.8 cannot lay the 0.10 mm first layer, so its boxes start with a 0.18 mm first cell. The
-// G-code's first layer was then empty (a layer change and a timelapse photo at Z 0.10) and the
-// part and the tower started on the second. The print must start with the layer that lays the
-// first cell, the tower and its brim, at a height the coarse nozzle can lay. Pairs whose coarse
-// nozzle lays the first layer itself are unchanged.
-TEST_CASE("Body Split: the first G-code layer prints the coarse body's first cell, the tower and its brim",
-          "[TestRebuild][TowerFirstLayer][FirstGcodeLayer]")
+// Nozzle changes in the move stream, and how many of them start on the tower (the new nozzle's first road there).
+std::pair<size_t, size_t> changes_primed(const CadenceTest::Facts &facts)
 {
-    struct Pair { const char *name; double coarse_d, coarse_min, coarse_max, first, fine, coarse; bool swapped; };
-    const Pair pair = GENERATE(
-        // MN Body 0.2-0.8 Standard 0.08-0.32: first cell 0.18 over an empty 0.10 first layer.
-        Pair{"0.2/0.8 Standard", 0.8, 0.16, 0.56, 0.10, 0.08, 0.32, false},
-        Pair{"0.8/0.2, fine on the right", 0.8, 0.16, 0.56, 0.10, 0.08, 0.32, true},
-        // MN Body 0.2-0.6 Fine 0.10-0.30: the 0.6 cannot lay 0.10 either, first cell 0.20.
-        Pair{"0.2/0.6 Fine", 0.6, 0.12, 0.42, 0.10, 0.10, 0.30, false},
-        // MN Body 0.2-0.6 Standard 0.12-0.36 and 0.2-0.4 Standard 0.10-0.20: the coarse nozzle lays
-        // the first layer itself.
-        Pair{"0.2/0.6 Standard", 0.6, 0.12, 0.42, 0.12, 0.12, 0.36, false},
-        Pair{"0.2/0.4 Standard", 0.4, 0.08, 0.28, 0.10, 0.10, 0.20, false});
-    CAPTURE(pair.name);
-    // The coarse body stands on the bed; the fine body starts 1.2 mm up.
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(pair.coarse_d, pair.coarse_min, pair.coarse_max, pair.fine,
-                                                                    pair.coarse, pair.swapped, {2, 1}, 1.2, wtwRib, pair.first);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("first-gcode-layer-") + (pair.swapped ? "swapped-" : "") + std::to_string(int(pair.coarse_d * 10)) +
-               "-" + std::to_string(int(std::lround(pair.first * 100))), facts.gcode);
-
-    double first_model_z = 1e9;
-    for (const Move &move : facts.moves)
-        if (CadenceTest::model_road(move))
-            first_model_z = std::min(first_model_z, double(move.position.z()));
-    const FirstGcodeLayer first = first_gcode_layer(facts.gcode);
-    const TowerBedAudit audit = audit_tower_bed(facts, first_model_z);
-    INFO(audit.levels);
-    CAPTURE(first.z, first.extrudes, first.tower, first.tower_before, first_model_z, audit.first_z,
-            audit.first_extent, audit.top_extent);
-    // Something prints on the first layer: the part and the tower both start there.
-    CHECK(first.extrudes);
-    CHECK(std::abs(first.z - first_model_z) < 1e-3);
-    CHECK_FALSE(first.tower_before);
-    CHECK(first.tower);
-    CHECK(std::abs(audit.first_z - first.z) < 1e-3);
-    // Its bed level is wider than the tower above: the brim.
-    CHECK(audit.first_extent > audit.top_extent + 1.);
-    // The coarse nozzle lays it at a height within its own limits, and no thinner than the first layer.
-    CHECK(first.z >= pair.first - 1e-3);
-    CHECK(first.z >= pair.coarse_min - 1e-3);
-    CHECK(first.z <= pair.coarse_max + 1e-3);
-}
-
-// Fine skins on a coarse body on the bed: the body's bottom layers print on the fine nozzle at the
-// fine height, then the first coarse layer arrives 0.3 mm above the last tower level. The fine
-// nozzle, which starts that visit and is the tower's usual wall filament, laid the level's wall
-// 0.3 mm tall, over its 0.14 mm limit, and the slice stopped with an internal tower error. The
-// arriving coarse nozzle now lays that level.
-TEST_CASE("Fine skins under a coarse body: the coarse nozzle lays the tower level the fine nozzle cannot",
-          "[TestRebuild][TowerFirstLayer]")
-{
-    CadenceTest::Scene scene;
-    scene.config = four_filament_body_config(0.6, 0.12, 0.42, 0.10, 0.30);
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &config) {
-        ModelObject *object = model.add_object();
-        object->name = "fine-skins-under-coarse";
-        ModelVolume *coarse = object->add_volume(make_cube(20., 12., 3.), ModelVolumeType::MODEL_PART, false);
-        coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
-        coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.30));
-        coarse->config.set_key_value("mixed_nozzle_body_fine_skins", new ConfigOptionBool(true));
-        for (const char *key : {"internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id"})
-            coarse->config.set_key_value(key, new ConfigOptionInt(1));
-        // A fine block on top and a fine strip on the front face from 0.9 mm up (raised text on the
-        // top and the side): with switches on every coarse layer the fine filament is the tower's
-        // usual wall filament.
-        const auto add_fine = [object](const Vec3d &size, const Vec3d &offset) {
-            ModelVolume *fine = object->add_volume(make_cube(size.x(), size.y(), size.z()), ModelVolumeType::MODEL_PART, false);
-            fine->set_offset(offset);
-            fine->config.set_key_value("extruder", new ConfigOptionInt(1));
-            fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
-        };
-        add_fine(Vec3d(8., 6., 1.), Vec3d(6., 3., 3.));
-        add_fine(Vec3d(10., 1., 2.), Vec3d(5., -1., 0.9));
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
-        object->ensure_on_bed();
-        print.apply(model, config);
-        print.set_status_silent();
-    };
-    const CadenceTest::Facts facts = CadenceTest::slice(scene);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode("fine-skins-under-coarse", facts.gcode);
-
-    // The scene: the fine nozzle prints the bottom skins on the bed, then the coarse nozzle arrives.
-    size_t fine_on_bed = 0, tower_roads = 0;
-    for (const Move &move : facts.moves) {
-        if (CadenceTest::model_road(move) && move.physical_tool_id == 0 && move.position.z() < 0.15f)
-            ++fine_on_bed;
-        if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
-            ++tower_roads;
-    }
-    CAPTURE(fine_on_bed, tower_roads);
-    REQUIRE(fine_on_bed > 0);
-    CHECK(tower_roads > 0);
-    // Every nozzle change starts on the tower.
     size_t changes = 0, primed = 0;
     int active = -1;
     for (const Move &move : facts.moves) {
@@ -713,42 +387,364 @@ TEST_CASE("Fine skins under a coarse body: the coarse nozzle lays the tower leve
         }
         active = tool;
     }
-    CAPTURE(changes, primed);
-    CHECK(changes > 0);
-    CHECK(primed == changes);
+    return {changes, primed};
 }
 
-// A coarse tool laying the tower's bed level drew the brim loops, the solid fill and the base at
-// the fine nozzle's 0.25 mm width. The fill, spaced at that width, was only about 83 percent full
-// on a 0.2 mm layer. The brim's first-layer flow boost is capped so the road is no wider than 1.25
-// times its nozzle, and the cap is read for the brim's own width, not the shared one.
-TEST_CASE("A tower bed level laid by the coarse tool is at its own width, full, and its brim boost is capped for that width",
-          "[TestRebuild][TowerFirstLayer]")
+// The tower's roads as the G-code tags them (under "; FEATURE: Prime tower", widths from "; LINE_WIDTH:", which every
+// printer writes): the widest road outside a nozzle change, the widest inside one (the nozzle-change width), and the
+// physical tools that lay them.
+struct TowerWidths { double roads = 0., nozzle_change = 0.; std::set<int> tools; };
+
+TowerWidths tower_widths(const CadenceTest::Facts &facts)
 {
-    const bool swapped = GENERATE(false, true);
-    CAPTURE(swapped);
-    // The coarse body stands on the bed with a 0.20 mm first cell; the fine body starts 1.2 mm up.
-    const CadenceTest::Facts facts = slice_fine_switch_on_layer_one(0.6, 0.12, 0.42, 0.10, 0.30, swapped, {2, 1}, 1.2, wtwRectangle);
+    const std::vector<size_t> nozzle_change = ramming_lines(facts.gcode);
+    std::vector<double> width(1, 0.); // per one-based line: the width of a tower road, 0 elsewhere
+    std::istringstream lines(facts.gcode);
+    std::string line, feature;
+    double tagged = 0.;
+    while (std::getline(lines, line)) {
+        if (line.rfind("; FEATURE: ", 0) == 0)
+            feature = line.substr(11);
+        else if (line.rfind("; LINE_WIDTH: ", 0) == 0)
+            tagged = std::atof(line.c_str() + 14);
+        const std::string code = line.substr(0, line.find(';'));
+        const size_t e = code.find(" E");
+        const bool road = feature == "Prime tower" && code.rfind("G1 ", 0) == 0 && e != std::string::npos &&
+                          std::atof(code.c_str() + e + 2) > 0. &&
+                          (code.find(" X") != std::string::npos || code.find(" Y") != std::string::npos);
+        width.push_back(road ? tagged : 0.);
+    }
+    TowerWidths out;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude || move.gcode_id >= width.size() || width[move.gcode_id] <= 0.)
+            continue;
+        double &widest = on_line(nozzle_change, move) ? out.nozzle_change : out.roads;
+        widest = std::max(widest, width[move.gcode_id]);
+        out.tools.insert(int(move.physical_tool_id));
+    }
+    return out;
+}
+} // namespace
+
+// In a mixed mode the tower's travels name the tower travel speed. A road after one that
+// names no feedrate must go back to the print feedrate, not run at the travel speed (which the
+// volumetric ceiling then cuts down to whatever the filament allows, instead of the intended speed).
+TEST_CASE("Feature Split: a tower road that names no feedrate does not run at the tower's travel speed",
+          "[TestRebuild][TowerSpeed]")
+{
+    CadenceTest::Scene scene;
+    scene.config = feature_split_tower_config(.20, .60, false);
+    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wtwRib));
+    scene.config.set_key_value("mixed_nozzle_auto_pad", new ConfigOptionBool(true));
+    scene.config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
+    scene.config.set_key_value("prime_tower_brim_width", new ConfigOptionFloat(-1.));
+    scene.config.set_key_value("first_layer_flow_ratio", new ConfigOptionFloat(1.));
+    apply_tower_exit_retraction(scene.config);
+    // A limit no tower road reaches, so the volumetric ceiling cannot hide an inherited travel speed.
+    scene.config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloatsNullable{200., 200.});
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &config) {
+        init_feature_flow_fixture(model, print, config, 4., 60.);
+    };
+    const double travel = scene.config.option<ConfigOptionFloatsNullable>("travel_speed")->get_at(0);
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
     INFO(facts.refusal.string);
     REQUIRE(facts.refusal.string.empty());
     REQUIRE_FALSE(facts.gcode.empty());
-    dump_gcode(std::string("coarse-bed-width-") + (swapped ? "swapped" : "plain"), facts.gcode);
-    const int coarse_tool = swapped ? 0 : 1;
-    const CoarseBedLevel audit = audit_coarse_bed_level(facts, coarse_tool);
-    CAPTURE(audit.first_z, audit.narrowest, audit.brim_width, audit.chamfer_width, audit.fullness, audit.fine_widest);
-    // The scene: the coarse tool lays the bed level, and a brim and a chamfer were found.
-    REQUIRE(audit.first_z > 0.15);
-    REQUIRE(audit.brim_width > 0.);
-    REQUIRE(audit.chamfer_width > 0.);
-    // Every coarse road on the bed level is at least 0.75 x its nozzle.
-    CHECK(audit.narrowest >= 0.75 * 0.6);
-    // The brim road is already 1.25 x the 0.6 mm nozzle, so the 1.15 first-layer boost is capped away: the brim
-    // is as wide as the chamfer loops above it, and no wider than the cap.
-    CHECK_THAT(audit.brim_width / audit.chamfer_width, Catch::Matchers::WithinAbs(1.0, 0.035));
-    CHECK(audit.brim_width <= 1.25 * 0.6 + 0.03);
-    // About as full as a single nozzle's solid fill (94 percent at 0.75 mm wide and 0.2 mm high).
-    CHECK(audit.fullness >= 0.88);
-    CHECK(audit.fullness <= 1.02);
-    // The fine nozzle's tower roads stay at its own width.
-    CHECK(audit.fine_widest <= 0.2 * 1.25 + 0.01);
+    const std::vector<size_t> ramming = ramming_lines(facts.gcode);
+    size_t roads = 0, at_travel_speed = 0;
+    double fastest = 0.;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude || move.extrusion_role != erWipeTower || on_line(ramming, move))
+            continue;
+        ++ roads;
+        fastest = std::max(fastest, double(move.feedrate));
+        at_travel_speed += std::abs(move.feedrate - travel) < 0.01 ? 1 : 0;
+    }
+    CAPTURE(roads, at_travel_speed, fastest, travel);
+    CHECK(roads > 0);
+    CHECK(at_travel_speed == 0);
+    // The tower's own cap for a road is 90 mm/s (F5400).
+    CHECK(fastest <= 90.01);
+}
+
+namespace {
+// One bed-level variant: Body Split blocks side by side on the bed (10 x 12 x 3 mm, even filaments on the coarse
+// nozzle), or the fine-skins plate.
+struct BedLevelRow
+{
+    const char *name;
+    double coarse_d, coarse_min, coarse_max, fine, coarse;
+    bool swapped;                // the coarse nozzle on the left
+    std::vector<int> filaments;  // the blocks left to right
+    double fine_lift;            // the fine blocks start this far up
+    double first_layer;          // 0: the fine height
+    WipeTowerWallType wall;
+    bool fine_skins;             // the fine-skins plate in place of the blocks
+    int bed_tools;               // who lays the tower's bed level: 0 not checked, 1 the coarse tool alone, 2 both
+};
+
+CadenceTest::Facts slice_bed_level(const BedLevelRow &row)
+{
+    CadenceTest::Scene scene;
+    scene.config = four_filament_body_config(row.coarse_d, row.coarse_min, row.coarse_max, row.fine, row.coarse);
+    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(row.wall));
+    if (row.first_layer > 0.)
+        scene.config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(row.first_layer));
+    if (row.swapped)
+        put_coarse_left(scene.config, row.coarse_d, row.coarse_min, row.coarse_max);
+    scene.populate = [row](Model &model, Print &print, const DynamicPrintConfig &config) {
+        if (row.fine_skins)
+            return add_fine_skins_plate(model, print, config, row.fine, row.coarse, 0.9);
+        ModelObject *object = model.add_object();
+        object->name = "bed-level";
+        for (size_t i = 0; i < row.filaments.size(); ++i) {
+            const bool coarse = row.filaments[i] % 2 == 0;
+            add_block(object, Vec3d(10., 12., 3.), Vec3d(10. * double(i), 0., coarse ? 0. : row.fine_lift), row.filaments[i],
+                      coarse ? row.coarse : row.fine);
+        }
+        place_and_apply(object, model, print, config);
+    };
+    return CadenceTest::slice(scene);
+}
+} // namespace
+
+// The tower's first layer on every bed-level variant: a fine switch on layer 1 under a coarse arrival on layer 2 (it
+// laid only its prime road on the bed, and the coarse arrival a step from the bed over bare bed); a nozzle change on
+// layer 1; a print that starts on the coarse nozzle; a coarse body whose nozzle cannot lay the first layer, so it
+// starts with a thicker first cell (the tower was left out, and the G-code's first layer was empty); fine skins under
+// a coarse body (the fine nozzle laid a level over its maximum). The print starts with the layer that lays the part's
+// first roads, the tower and its brim start there, nothing later goes down over bare bed, bed contact and bed ramming
+// run at the first-layer speed, a coarse wall is at its own width, and every nozzle change starts on the tower.
+TEST_CASE("The tower's first layer: laid with the part, at each tool's width and the first-layer speed",
+          "[TestRebuild][TowerFirstLayer][FirstGcodeLayer]")
+{
+    const BedLevelRow row = GENERATE(
+        BedLevelRow{"fine switch on layer 1, 0.2/0.6", 0.6, 0.12, 0.42, 0.10, 0.20, false, {1, 3, 2}, 0., 0., wtwRib, false, 0},
+        BedLevelRow{"fine switch on layer 1, 0.2/0.6", 0.6, 0.12, 0.42, 0.10, 0.20, true, {1, 3, 2}, 0., 0., wtwRib, false, 0},
+        BedLevelRow{"fine switch on layer 1, 0.2/0.8", 0.8, 0.16, 0.56, 0.08, 0.16, false, {1, 3, 2}, 0., 0., wtwRib, false, 0},
+        // 0.12 fine layers: the 0.6 nozzle's first legal layer is the print's first layer.
+        BedLevelRow{"nozzle change on layer 1", 0.6, 0.12, 0.42, 0.12, 0.24, false, {1, 2}, 0., 0., wtwRib, false, 2},
+        BedLevelRow{"nozzle change on layer 1", 0.6, 0.12, 0.42, 0.12, 0.24, true, {1, 2}, 0., 0., wtwRib, false, 2},
+        BedLevelRow{"coarse bed level", 0.6, 0.12, 0.42, 0.12, 0.24, false, {2, 1}, 1.2, 0., wtwRib, false, 1},
+        BedLevelRow{"coarse bed level", 0.6, 0.12, 0.42, 0.12, 0.24, true, {2, 1}, 1.2, 0., wtwRib, false, 1},
+        // 0.2/0.6 Fine 0.10-0.30: the 0.6 cannot lay 0.10, so its first cell is 0.20 over an empty first layer. A
+        // rectangle wall, for the coarse bed level audit.
+        BedLevelRow{"coarse first cell, 0.2/0.6 Fine", 0.6, 0.12, 0.42, 0.10, 0.30, false, {2, 1}, 1.2, 0., wtwRectangle, false, 1},
+        BedLevelRow{"coarse first cell, 0.2/0.6 Fine", 0.6, 0.12, 0.42, 0.10, 0.30, true, {2, 1}, 1.2, 0., wtwRectangle, false, 1},
+        // 0.2/0.8 Standard 0.08-0.32 on a 0.10 first layer: first cell 0.18.
+        BedLevelRow{"coarse first cell, 0.2/0.8 Standard", 0.8, 0.16, 0.56, 0.08, 0.32, false, {2, 1}, 1.2, 0.10, wtwRib, false, 1},
+        BedLevelRow{"coarse first cell, 0.2/0.8 Standard", 0.8, 0.16, 0.56, 0.08, 0.32, true, {2, 1}, 1.2, 0.10, wtwRib, false, 1},
+        // The coarse nozzle lays the first layer itself.
+        BedLevelRow{"coarse first layer, 0.2/0.6 Standard", 0.6, 0.12, 0.42, 0.12, 0.36, false, {2, 1}, 1.2, 0.12, wtwRib, false, 1},
+        BedLevelRow{"coarse first layer, 0.2/0.4 Standard", 0.4, 0.08, 0.28, 0.10, 0.20, false, {2, 1}, 1.2, 0.10, wtwRib, false, 1},
+        BedLevelRow{"fine skins under a coarse body", 0.6, 0.12, 0.42, 0.10, 0.30, false, {}, 0., 0., wtwRib, true, 0});
+    CAPTURE(row.name, row.swapped);
+    const int coarse_tool = row.swapped ? 0 : 1;
+    const CadenceTest::Facts facts = slice_bed_level(row);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+    double first_model_z = 1e9;
+    size_t fine_on_bed = 0;
+    for (const Move &move : facts.moves)
+        if (CadenceTest::model_road(move)) {
+            first_model_z = std::min(first_model_z, double(move.position.z()));
+            fine_on_bed += int(move.physical_tool_id) != coarse_tool && move.position.z() < 0.15f ? 1 : 0;
+        }
+    const TowerBedAudit audit = audit_tower_bed(facts, first_model_z);
+    const FirstGcodeLayer first = first_gcode_layer(facts.gcode);
+    const std::pair<size_t, size_t> changes = changes_primed(facts);
+    INFO(audit.levels);
+    CAPTURE(first_model_z, first.z, first.extrudes, first.tower, first.tower_before, audit.first_z, audit.near_bed_length,
+            audit.over_bare_bed, audit.from_bed_late, audit.bed_contact_fast, audit.bed_ramming_fast, audit.first_extent,
+            audit.top_extent, audit.wall_widest[0], audit.wall_widest[1], audit.bed_tools.size(), changes.first, changes.second);
+    // The scene.
+    if (row.bed_tools == 1)
+        REQUIRE(audit.bed_tools == std::set<int>{coarse_tool});
+    if (row.bed_tools == 2)
+        REQUIRE(audit.bed_tools.size() == 2);
+    if (row.fine_skins)
+        REQUIRE(fine_on_bed > 0);
+    // The print starts with the layer that lays the part's first roads; the tower starts there too, with its brim.
+    CHECK(first.extrudes);
+    CHECK(std::abs(first.z - first_model_z) < 1e-3);
+    CHECK_FALSE(first.tower_before);
+    CHECK(first.tower);
+    CHECK(std::abs(audit.first_z - first_model_z) < 1e-3);
+    CHECK(audit.first_extent > audit.top_extent + 1.);
+    // No later level goes down over bare bed or as a step from the bed, into or beside the bed level.
+    CHECK(audit.over_bare_bed <= 0.02 * audit.near_bed_length);
+    CHECK(audit.from_bed_late == 0.);
+    // Bed contact and ramming laid on the bed go no faster than the rest of the first layer.
+    CHECK(audit.bed_contact_fast == 0.);
+    CHECK(audit.bed_ramming_fast == 0.);
+    // A wall drawn by the coarse tool is at its own width, not the fine nozzle's first-layer width.
+    if (audit.wall_widest[coarse_tool] > 0.)
+        CHECK(audit.wall_widest[coarse_tool] >= 0.75 * row.coarse_d);
+    // Every nozzle change starts on the tower.
+    CHECK(changes.first > 0);
+    CHECK(changes.second == changes.first);
+    if (row.bed_tools == 1) {
+        CHECK(audit.wall_widest[coarse_tool] > 0.);
+        // The coarse nozzle lays the first layer at a height within its own limits, no thinner than the first layer.
+        CHECK(first.z >= std::max(row.first_layer, row.coarse_min) - 1e-3);
+        CHECK(first.z <= row.coarse_max + 1e-3);
+    }
+    if (row.wall == wtwRectangle) {
+        // The coarse tool's bed level (brim loops, solid fill, base) at its own width and full, and the brim's
+        // first-layer flow boost capped so the road is no wider than 1.25 times its nozzle.
+        const CoarseBedLevel level = audit_coarse_bed_level(facts, coarse_tool);
+        CAPTURE(level.first_z, level.narrowest, level.brim_width, level.chamfer_width, level.fullness, level.fine_widest);
+        REQUIRE(level.brim_width > 0.);
+        REQUIRE(level.chamfer_width > 0.);
+        CHECK(level.narrowest >= 0.75 * row.coarse_d);
+        // The brim road is already 1.25 x the nozzle, so the 1.15 first-layer boost is capped away: the brim is as wide
+        // as the chamfer loops above it, and no wider than the cap.
+        CHECK_THAT(level.brim_width / level.chamfer_width, Catch::Matchers::WithinAbs(1.0, 0.035));
+        CHECK(level.brim_width <= 1.25 * row.coarse_d + 0.03);
+        // About as full as a single nozzle's solid fill (94 percent at 0.75 mm wide and 0.2 mm high).
+        CHECK(level.fullness >= 0.88);
+        CHECK(level.fullness <= 1.02);
+        // The fine nozzle's tower roads stay at its own width.
+        CHECK(level.fine_widest <= 0.2 * 1.25 + 0.01);
+    }
+}
+
+namespace {
+// A printer for the tower width scene: the H2D-like 0.2/0.6 pair (filaments 1 and 3 on the 0.2) with the coarse
+// nozzle on either side, or a U1 fitted 0.2, 0.2, 0.2, 0.8 (filaments 1 and 2 on their own 0.2 tools, the coarse tool
+// last). off_nozzle: the nozzle whose width Off draws the tower at.
+struct WidthPrinter { const char *name; bool u1; bool swapped; int coarse_tool; double off_nozzle; };
+
+// Two fine colors side by side and nothing for the coarse nozzle (no sparse infill, so Feature Split has no coarse
+// band to lay; small parts and raised text print this way).
+CadenceTest::Facts slice_two_fine_colors(const WidthPrinter &printer, MixedNozzleSlicingMode mode)
+{
+    CadenceTest::Scene scene;
+    if (printer.u1) {
+        scene.bambu = false;
+        scene.config = CadenceTest::u1_config({.2, .2, .2, .8});
+        // Every role on the volume's own filament.
+        CadenceTest::feature_split_heights(scene.config, .08, .32, 4, 0, 0, {.2, .8});
+        scene.config.set_key_value("wipe_tower_x", new ConfigOptionFloats{120.});
+        scene.config.set_key_value("wipe_tower_y", new ConfigOptionFloats{140.});
+    } else {
+        scene.config = four_filament_body_config(0.6, 0.12, 0.42, 0.10, 0.20);
+        if (printer.swapped)
+            put_coarse_left(scene.config, 0.6, 0.12, 0.42);
+    }
+    scene.config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(mode));
+    scene.config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0.));
+    if (mode == MixedNozzleSlicingMode::Off)
+        scene.config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(false));
+    scene.populate = [second = printer.u1 ? 2 : 3](Model &model, Print &print, const DynamicPrintConfig &config) {
+        ModelObject *object = model.add_object();
+        object->name = "two-fine-colors";
+        for (int filament : {1, second}) {
+            ModelVolume *volume = object->add_volume(make_cube(10., 12., 3.), ModelVolumeType::MODEL_PART, false);
+            volume->set_offset(Vec3d(filament == 1 ? 0. : 10., 0., 0.));
+            volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
+        }
+        place_and_apply(object, model, print, config);
+    };
+    return CadenceTest::slice(scene);
+}
+} // namespace
+
+// A Feature Split plate that never uses the coarse nozzle gets Off's tower. Off draws the tower at one shared width,
+// the last filament's nozzle (an index past the nozzles takes the first), so the fine nozzle laid roads as wide as the
+// coarse one's (0.75 mm on the H2D with the coarse nozzle first, 1.0 mm on the U1). The plate's tower now follows the
+// smallest nozzle, as in the mixed-nozzle modes; Off keeps the stock width, where every tool may thicken the tower.
+TEST_CASE("A Feature Split plate planned as Off draws its tower at the fine nozzle's width", "[TestRebuild][TowerWidth][ToolChanger]")
+{
+    const WidthPrinter printer = GENERATE(WidthPrinter{"H2D", false, false, 1, .2}, WidthPrinter{"H2D, coarse on the left", false, true, 0, .6},
+                                          WidthPrinter{"U1 0.2, 0.2, 0.2, 0.8", true, false, 3, .8});
+    CAPTURE(printer.name);
+    const CadenceTest::Facts split = slice_two_fine_colors(printer, MixedNozzleSlicingMode::FeatureSplit);
+    INFO(split.refusal.string);
+    REQUIRE(split.refusal.string.empty());
+    REQUIRE_FALSE(split.gcode.empty());
+    const TowerWidths fine = tower_widths(split);
+    CAPTURE(fine.roads, fine.nozzle_change, fine.tools.size());
+    // The scene: a tower, laid only by the fine tools (the plate is planned as Off).
+    REQUIRE_FALSE(fine.tools.empty());
+    REQUIRE(fine.tools.count(printer.coarse_tool) == 0);
+    CHECK(fine.roads <= 0.2 * 1.25 + 0.01);
+    // The 0.2 nozzle's nozzle-change width (a 0.8's is 1.4 mm).
+    CHECK(fine.nozzle_change <= 0.5 + 0.01);
+
+    const CadenceTest::Facts off = slice_two_fine_colors(printer, MixedNozzleSlicingMode::Off);
+    INFO(off.refusal.string);
+    REQUIRE(off.refusal.string.empty());
+    REQUIRE_FALSE(off.gcode.empty());
+    const TowerWidths stock = tower_widths(off);
+    CAPTURE(stock.roads);
+    REQUIRE_FALSE(stock.tools.empty());
+    CHECK_THAT(stock.roads, Catch::Matchers::WithinAbs(printer.off_nozzle * 1.25, 0.01));
+}
+
+// Fine skins put the fine filament on the tower only where the skins and the fine bodies are. With a fine body starting
+// a gap above the bottom skins, the fine filament can arrive a coarse step above the last tower level it laid, taller
+// than the fine nozzle can lay, and the slice stopped with an internal tower error (SRL-TOWER-STRUCTURE). It is now
+// refused as a Fine skins setting (SRL-A60). Whether it happens depends on where the fine bodies start against the
+// coarse cells, so it is found when the tower is planned. Sweep: every pair, every coarse height the pair qualifies
+// for (whole multiples of half the fine nozzle, up to 0.7 times the coarse nozzle), the fine strip starting at 0.5,
+// 0.9 or 1.3 mm. Only the cells that stopped with the internal error are refused, and every other one slices.
+TEST_CASE("Fine skins that would leave the fine nozzle a tower level over its maximum are refused, on every pair and height",
+          "[TestRebuild][TowerFirstLayer][Pairs]")
+{
+    struct SweepPair { const char *name; double fine_d, coarse_d; bool swapped; };
+    const std::vector<SweepPair> pairs{{"0.2/0.4", 0.2, 0.4, false}, {"0.2/0.6", 0.2, 0.6, false},
+                                       {"0.2/0.6 fine right", 0.2, 0.6, true}, {"0.2/0.8", 0.2, 0.8, false},
+                                       {"0.4/0.6", 0.4, 0.6, false}, {"0.4/0.8", 0.4, 0.8, false}};
+    // The cells that stopped with the internal tower error.
+    const std::set<std::string> refused_cells{"0.2/0.6 0.20 0.9", "0.2/0.6 fine right 0.20 0.9", "0.2/0.8 0.20 0.9",
+                                              "0.2/0.8 0.50 0.9"};
+    std::vector<std::string> failures;
+    size_t refused = 0, sliced_cells = 0;
+    for (const SweepPair &pair : pairs) {
+        const double fine_h = 0.5 * pair.fine_d;
+        const int    ratio  = int(std::floor(0.7 * pair.coarse_d / fine_h + 1e-9));
+        for (int r = 2; r <= ratio; ++r)
+            for (double strip_z : {0.5, 0.9, 1.3}) {
+                const double coarse_h = fine_h * r;
+                std::ostringstream cell;
+                cell << pair.name << " " << std::fixed << std::setprecision(2) << coarse_h << " " << std::setprecision(1) << strip_z;
+                CadenceTest::Scene scene;
+                scene.config = four_filament_body_config(pair.coarse_d, 0.2 * pair.coarse_d, 0.7 * pair.coarse_d, fine_h, coarse_h);
+                const std::vector<double> nozzles = pair.swapped ? std::vector<double>{pair.coarse_d, pair.fine_d} :
+                                                                   std::vector<double>{pair.fine_d, pair.coarse_d};
+                scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzles));
+                scene.config.set_key_value("min_layer_height", new ConfigOptionFloats{0.2 * nozzles[0], 0.2 * nozzles[1]});
+                scene.config.set_key_value("max_layer_height", new ConfigOptionFloats{0.7 * nozzles[0], 0.7 * nozzles[1]});
+                scene.config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats(nozzles));
+                if (pair.swapped)
+                    scene.config.set_key_value("filament_map", new ConfigOptionInts{2, 1, 2, 1});
+                scene.populate = [coarse_h, fine_h, strip_z](Model &model, Print &print, const DynamicPrintConfig &config) {
+                    add_fine_skins_plate(model, print, config, fine_h, coarse_h, strip_z);
+                };
+                std::string message;
+                bool sliced = false;
+                try {
+                    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+                    message = facts.refusal.string;
+                    sliced  = message.empty() && !facts.gcode.empty();
+                } catch (const std::exception &error) {
+                    message = error.what();
+                }
+                const bool expect_refusal = refused_cells.count(cell.str()) != 0;
+                const bool is_a60 = message.find("SRL-A60") != std::string::npos;
+                if (expect_refusal ? !is_a60 : !sliced)
+                    failures.push_back(cell.str() + ": " + (message.empty() ? std::string("sliced") : message));
+                refused += is_a60 ? 1 : 0;
+                sliced_cells += sliced ? 1 : 0;
+            }
+    }
+    std::ostringstream report;
+    for (const std::string &failure : failures)
+        report << failure << '\n';
+    INFO(report.str());
+    CAPTURE(sliced_cells);
+    CHECK(failures.empty());
+    CHECK(refused == refused_cells.size());
 }

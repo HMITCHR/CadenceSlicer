@@ -347,19 +347,6 @@ PhysicalToolEventSummary summarize_physical_tool_event(
 
 } // namespace
 
-PhysicalToolEventSummary build_physical_tool_event_summary(
-    const PhysicalToolPreviewSnapshot& snapshot,
-    const std::vector<PhysicalToolVertexFact>& final_converted_facts,
-    uint32_t selected_layer_id, std::optional<float> selected_event_z, bool depositing_only)
-{
-    const auto rows = depositing_only ? depositing_legend_rows(snapshot) : build_physical_tool_legend_rows(snapshot);
-    return summarize_physical_tool_event(rows, [&](const auto& consume) {
-        for (const auto& fact : final_converted_facts)
-            if (fact.layer_id == selected_layer_id)
-                consume(fact);
-    }, selected_event_z);
-}
-
 PhysicalToolClassification classify_physical_tool_events(
     const std::vector<PhysicalToolVertexFact>& final_converted_facts)
 {
@@ -648,27 +635,6 @@ std::vector<PhysicalToolTransitionPresentationRow> transition_presentation(const
 }
 } // namespace
 
-// Mixed-Nozzle Preview presentation projection, free of wx/ImGui/OpenGL. Copies only the frozen
-// snapshot outputs into plain structs; the renderer is a thin formatter over them.
-PhysicalToolPresentation build_physical_tool_presentation(
-    const PhysicalToolPreviewSnapshot& snapshot,
-    const PhysicalToolPalette& palette,
-    const PhysicalToolEventSummary& event_summary,
-    const PhysicalToolClassification& classification)
-{
-    PhysicalToolPresentation presentation;
-
-    presentation.legend_rows = legend_presentation(build_physical_tool_legend_rows(snapshot), palette);
-    presentation.cadence = cadence_presentation(event_summary);
-    presentation.transition_rows = transition_presentation(classification);
-
-    // Diagnostics from the owned snapshot, copied verbatim.
-    for (const PhysicalToolSnapshotDiagnostic& diagnostic : snapshot.diagnostics())
-        presentation.diagnostics.push_back(diagnostic.diagnostic);
-
-    return presentation;
-}
-
 void PhysicalToolPresentationCache::capture(const PhysicalToolPreviewSnapshot& snapshot,
     const PhysicalToolClassification& classification, const PhysicalToolPalette& palette)
 {
@@ -727,12 +693,6 @@ void PhysicalToolPresentationCache::set_palette(const PhysicalToolPalette& palet
     for (auto& row : m_presentation.legend_rows)
         row.swatch = row.physical_tool ? physical_tool_color(palette, *row.physical_tool) : palette.unknown;
     ++m_metrics.palette_updates;
-}
-
-void PhysicalToolPresentationCache::set_classification(const PhysicalToolClassification& classification)
-{
-    m_presentation.transition_rows = transition_presentation(classification);
-    ++m_metrics.classification_updates;
 }
 
 void PhysicalToolPresentationCache::set_view_type(libvgcode::EViewType view_type)

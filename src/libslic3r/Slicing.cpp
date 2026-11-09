@@ -1,13 +1,21 @@
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <optional>
+#include <vector>
+#include <utility>
+#include <math.h>
 
+#include "Point.hpp"
 #include "libslic3r.h"
 #include "Slicing.hpp"
 #include "SlicingAdaptive.hpp"
 #include "PrintConfig.hpp"
 #include "Model.hpp"
 #include "MixedNozzleConfig.hpp"
+#include "Config.hpp"
 
 // #define SLIC3R_DEBUG
 
@@ -149,12 +157,27 @@ std::optional<unsigned int> mixed_nozzle_interface_nozzle_body_filament(const Pr
         return base_filament > 0 && size_t(base_filament - 1) < categories.size() && filament < categories.size() &&
                categories[filament] == categories[size_t(base_filament - 1)];
     };
+    // The body is generated for the interface nozzle (its width, its layer heights), so any tool with a nozzle of that
+    // size that lays every height the interface nozzle lays prints it the same. On a two-nozzle printer that is the
+    // interface nozzle itself; on a tool changer it can be another tool of the same size, such as a PLA color tool
+    // beside a PETG interface tool.
+    const size_t nozzles = print_config.nozzle_diameter.values.size();
+    const auto lays_interface_body = [&](int idx) {
+        if (idx == interface_idx)
+            return true;
+        if (idx <= 0 || size_t(idx) > nozzles || size_t(interface_idx) > nozzles)
+            return false;
+        const size_t tool = size_t(idx - 1), interface_tool = size_t(interface_idx - 1);
+        return std::abs(print_config.nozzle_diameter.get_at(tool) - print_config.nozzle_diameter.get_at(interface_tool)) < EPSILON &&
+               resolved_min_layer_height(print_config, tool) < resolved_min_layer_height(print_config, interface_tool) + EPSILON &&
+               resolved_max_layer_height(print_config, tool) > resolved_max_layer_height(print_config, interface_tool) - EPSILON;
+    };
     std::optional<unsigned int> best;
     std::pair<bool, bool> best_rank;
     for (unsigned int filament = 0; filament < print_config.filament_type.values.size(); ++ filament) {
         if (filament == interface_slot || filament >= print_config.filament_soluble.values.size() ||
             print_config.filament_soluble.get_at(filament) || print_config.filament_is_support.get_at(filament) ||
-            resolved_support_filament_nozzle_idx(print_config, int(filament) + 1) != interface_idx ||
+            ! lays_interface_body(resolved_support_filament_nozzle_idx(print_config, int(filament) + 1)) ||
             ! sticks_to_base(filament))
             continue;
         const std::pair<bool, bool> rank { type_of(int(filament) + 1) == base_type,
@@ -312,15 +335,18 @@ SlicingParameters SlicingParameters::create_from_config(
         params.min_layer_height = std::max(params.min_layer_height, min_layer_height_from_nozzle(print_config, 0));
         params.max_layer_height = std::min(params.max_layer_height, max_layer_height_from_nozzle(print_config, 0));
     } else {
+        // Orca: object_extruders are 0-based, the extruder the limits are read from is 1-based like support_filament.
         for (unsigned int extruder_id : object_extruders) {
             // object_extruders holds zero-based logical filament ids, while the limit vectors are indexed by
-            // physical nozzle. Where filament_map is a static user assignment, resolve through it so the
-            // object is bounded by the limits of the nozzle that prints the filament.
-            // min_/max_layer_height_from_nozzle() subtract one, so the resolved zero-based extruder is handed
-            // back one-based. An unresolved mapping keeps the per-id lookup and is reported by
+            // physical nozzle. In a mode, where filament_map is a static user assignment, resolve through it so
+            // the object is bounded by the limits of the nozzle that prints the filament. Off reads the
+            // filament's own column, as upstream does (and as the support filament above does).
+            // min_/max_layer_height_from_nozzle() subtract one, so the zero-based extruder is handed over
+            // one-based either way. An unresolved mapping keeps the per-id lookup and is reported by
             // Print::validate().
-            const std::optional<size_t> physical_extruder = physical_extruder_for_filament(print_config, extruder_id);
-            const int idx_nozzle = physical_extruder ? int(*physical_extruder) + 1 : int(extruder_id);
+            const std::optional<size_t> physical_extruder = is_mixed_nozzle_slicing_enabled(print_config) ?
+                physical_extruder_for_filament(print_config, extruder_id) : std::nullopt;
+            const int idx_nozzle = physical_extruder ? int(*physical_extruder) + 1 : int(extruder_id) + 1;
             params.min_layer_height = std::max(params.min_layer_height, min_layer_height_from_nozzle(print_config, idx_nozzle));
             params.max_layer_height = std::min(params.max_layer_height, max_layer_height_from_nozzle(print_config, idx_nozzle));
         }
@@ -914,6 +940,9 @@ void adjust_layer_height_profile(
 
 bool adjust_layer_series_to_align_object_height(const SlicingParameters &slicing_params, std::vector<coordf_t>& layer_series)
 {
+    if (layer_series.empty())
+        return false;
+
     coordf_t object_height = slicing_params.object_print_z_height();
     if (is_approx(layer_series.back(), object_height))
         return true;

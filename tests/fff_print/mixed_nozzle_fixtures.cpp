@@ -24,39 +24,55 @@ using namespace Slic3r;
 
 namespace mixed_nozzle_fixtures {
 
+namespace {
+
+// One part of a Body Split object on `filament` at its own layer height (0 leaves it unset).
+ModelVolume *add_body(ModelObject *object, TriangleMesh mesh, int filament, double height,
+                      const Vec3d &offset = Vec3d::Zero())
+{
+    ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+    volume->set_offset(offset);
+    volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
+    if (height > 0.)
+        volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
+    return volume;
+}
+
+// Places the object once on the bed and applies the print.
+void place(Model &model, ModelObject *object, Print &print, const DynamicPrintConfig &config)
+{
+    object->add_instance();
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+} // namespace
+
 DynamicPrintConfig coupon_config(bool enabled)
 {
+    // Starts from the defaults; only keys that differ from them are set.
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
-    // Print::apply derives the logical filament count from filament_diameter, which decides
-    // whether the coupon's two volumes stay two regions. DynamicPrintConfig::set_num_filaments()
-    // cannot supply it: PrintConfigDef never calls init_filament_option_keys(), so the key list
-    // is empty and that call is inert. Size the per-filament arrays here instead, exactly as
-    // tests/fff_print/test_helpers.cpp::multifilament_config() does for the same reason.
+    // Print::apply counts filaments from filament_diameter (set_num_filaments() is inert here).
     config.set_key_value("filament_diameter", new ConfigOptionFloats{1.75, 1.75});
     config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(
         enabled ? MixedNozzleSlicingMode::BodySplit : MixedNozzleSlicingMode::Off));
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.4});
     config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.08});
-    // Use the minimum installed-tool maximum as the event-stream bound, so both tools need a
-    // stock-like 0.20 mm machine limit even though the fine region remains at 0.10 mm.
+    // Both tools allow 0.20 mm layers; the fine body still prints at 0.10 mm.
     config.set_key_value("max_layer_height", new ConfigOptionFloats{0.20, 0.20});
     config.set_key_value("printer_extruder_id", new ConfigOptionInts{1, 2});
     config.set_key_value("printer_extruder_variant", new ConfigOptionStrings{"Direct Drive Standard", "Direct Drive Standard"});
     config.set_key_value("extruder_printable_height", new ConfigOptionFloatsNullable{0., 0.});
     config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
     config.set_key_value("filament_map", new ConfigOptionInts{1, 2});
-    // One variant column per logical filament, as the preset machinery would emit them;
-    // Print::apply resolves each filament's slot through these during the variant rebuild.
+    // One variant column per filament, as the presets give them.
     config.set_key_value("filament_self_index", new ConfigOptionInts{1, 2});
     config.set_key_value("filament_extruder_variant", new ConfigOptionStrings{"Direct Drive Standard", "Direct Drive Standard"});
     config.set_key_value("filament_volume_map", new ConfigOptionInts{0, 0});
-    config.set_key_value("enable_filament_dynamic_map", new ConfigOptionBool(false));
     config.set_key_value("filament_colour", new ConfigOptionStrings{"#FF0000", "#0000FF"});
-    // filament_count^2 entries per physical nozzle, matching the shape selected by
-    // get_flush_volumes_matrix(values, nozzle_id, nozzle_diameter.size()). Two filaments on two
-    // nozzles need eight entries. flush_multiplier has one value per physical head, and export
-    // expands it to the matrix shape.
+    // filament_count^2 entries per nozzle; flush_multiplier has one value per nozzle.
     config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats{0., 0., 0., 0., 0., 0., 0., 0.});
     config.set_key_value("flush_multiplier", new ConfigOptionFloats{1., 1.});
     for (const char *role_filament_id : {"outer_wall_filament_id", "inner_wall_filament_id",
@@ -67,47 +83,18 @@ DynamicPrintConfig coupon_config(bool enabled)
     config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.10));
     config.set_key_value("layer_height", new ConfigOptionFloat(0.10));
     config.set_key_value("use_relative_e_distances", new ConfigOptionBool(false));
-    config.set_key_value("precise_z_height", new ConfigOptionBool(false));
-    config.set_key_value("slicing_mode", new ConfigOptionEnum<SlicingMode>(SlicingMode::Regular));
-    config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
     config.set_key_value("wall_generator", new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Classic));
     config.set_key_value("sparse_infill_pattern", new ConfigOptionEnum<InfillPattern>(ipGrid));
     config.set_key_value("sparse_infill_density", new ConfigOptionPercent(15.));
     config.set_key_value("top_shell_layers", new ConfigOptionInt(3));
-    config.set_key_value("bottom_shell_layers", new ConfigOptionInt(3));
     config.set_key_value("top_shell_thickness", new ConfigOptionFloat(0.));
-    config.set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0.));
     config.set_key_value("ensure_vertical_shell_thickness", new ConfigOptionEnum<EnsureVerticalShellThickness>(evstNone));
-    config.set_key_value("interface_shells", new ConfigOptionBool(false));
-    config.set_key_value("infill_combination", new ConfigOptionBool(false));
-    config.set_key_value("extra_solid_infills", new ConfigOptionString(""));
-    config.set_key_value("fill_multiline", new ConfigOptionInt(1));
     // Admission pin: a nonzero threshold re-types small sparse islands to stInternalSolid, which
     // the band preflight refuses. Every synchronized case therefore carries it.
     config.set_key_value("minimum_sparse_infill_area", new ConfigOptionFloat(0.));
-    config.set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     config.set_key_value("detect_overhang_wall", new ConfigOptionBool(false));
-    config.set_key_value("gap_fill_target", new ConfigOptionEnum<GapFillTarget>(gftNowhere));
-    config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
-    config.set_key_value("extra_perimeters_on_overhangs", new ConfigOptionBool(false));
-    config.set_key_value("fuzzy_skin", new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::Disabled_fuzzy));
-    config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
-    config.set_key_value("ironing_type", new ConfigOptionEnum<IroningType>(IroningType::NoIroning));
-    config.set_key_value("enable_extra_bridge_layer", new ConfigOptionEnum<EnableExtraBridgeLayer>(eblDisabled));
-    config.set_key_value("counterbore_hole_bridging", new ConfigOptionEnum<CounterboreHoleBridgingOption>(chbNone));
-    config.set_key_value("thick_bridges", new ConfigOptionBool(false));
     config.set_key_value("thick_internal_bridges", new ConfigOptionBool(false));
-    config.set_key_value("zaa_enabled", new ConfigOptionBool(false));
-    config.set_key_value("interlocking_beam", new ConfigOptionBool(false));
-    config.set_key_value("spiral_mode", new ConfigOptionBool(false));
-    config.set_key_value("enable_support", new ConfigOptionBool(false));
-    config.set_key_value("enforce_support_layers", new ConfigOptionInt(0));
-    config.set_key_value("raft_layers", new ConfigOptionInt(0));
-    config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
-    config.set_key_value("flush_into_infill", new ConfigOptionBool(false));
-    config.set_key_value("flush_into_objects", new ConfigOptionBool(false));
     config.set_key_value("flush_into_support", new ConfigOptionBool(false));
-    config.set_key_value("resonance_avoidance", new ConfigOptionBool(false));
     config.set_key_value("filament_adaptive_volumetric_speed", new ConfigOptionBoolsNullable{false, false});
     config.set_key_value("skirt_loops", new ConfigOptionInt(0));
     config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btNoBrim));
@@ -127,34 +114,13 @@ TriangleMesh box_with_internal_cavity(const Vec3d &outer, const Vec3d &cavity_mi
     return TriangleMesh(mesh.its);
 }
 
-// The two registered bodies of one coupon, tool 1 on the fine body and tool 2 on the coarse one.
-void init_registered_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
-                            TriangleMesh fine_mesh, const Vec3d &fine_offset,
-                            TriangleMesh coarse_mesh, const Vec3d &coarse_offset)
+void init_coupon(Model &model, Print &print, const DynamicPrintConfig &config, TriangleMesh coarse_mesh)
 {
     ModelObject *object = model.add_object();
     object->name = "synchronized-regional-layer-coupon";
-
-    ModelVolume *fine = object->add_volume(std::move(fine_mesh), ModelVolumeType::MODEL_PART, false);
-    fine->set_offset(fine_offset);
-    fine->config.set_key_value("extruder", new ConfigOptionInt(1));
-    fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
-
-    ModelVolume *coarse = object->add_volume(std::move(coarse_mesh), ModelVolumeType::MODEL_PART, false);
-    coarse->set_offset(coarse_offset);
-    coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
-    coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.20));
-
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
-}
-
-void init_coupon(Model &model, Print &print, const DynamicPrintConfig &config, TriangleMesh coarse_mesh)
-{
-    init_registered_coupon(model, print, config, make_cube(10., 20., 4.), Vec3d::Zero(),
-                           std::move(coarse_mesh), Vec3d(10., 0., 0.));
+    add_body(object, make_cube(10., 20., 4.), 1, 0.10);
+    add_body(object, std::move(coarse_mesh), 2, 0.20, Vec3d(10., 0., 0.));
+    place(model, object, print, config);
 }
 
 void init_feature_flow_fixture(Model &model, Print &print, const DynamicPrintConfig &config, double height,
@@ -163,17 +129,11 @@ void init_feature_flow_fixture(Model &model, Print &print, const DynamicPrintCon
     ModelObject *object = model.add_object();
     object->name = "feature-flow-fixture";
     object->add_volume(make_cube(footprint, footprint, height), ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    place(model, object, print, config);
 }
 
-// Native cadence is stored per volume. These legacy coupons declare only `extruder`, so fixtures
-// that need native grids add cadence by logical filament and re-apply the print. Changing
-// regional_layer_height invalidates posSlice, which makes re-apply derive the grids again. The
-// wider nozzle receives 0.20 mm cadence and the narrower nozzle 0.10 mm regardless of filament
-// order, including when different objects use different coarse-body filaments.
+// Gives each part the layer height of the nozzle its filament resolves to (the widest nozzle gets
+// coarse_cadence, the others fine_cadence) and applies the print again.
 void declare_native_cadences(Model &model, Print &print, const DynamicPrintConfig &config,
                              double fine_cadence, double coarse_cadence)
 {
@@ -197,30 +157,19 @@ void declare_native_cadences(Model &model, Print &print, const DynamicPrintConfi
     print.set_status_silent();
 }
 
-// The standard prism pair, but with each body's logical filament named explicitly, so a test can
-// use a mapping whose filament indices are not 1 and 2 in that order.
+// The standard pair with each body's filament named, and no layer heights set.
 void init_mapped_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
                         int fine_filament_1based, int coarse_filament_1based,
                         double height)
 {
     ModelObject *object = model.add_object();
     object->name = "resolved-mapping-coupon";
-
-    ModelVolume *fine = object->add_volume(make_cube(10., 20., height), ModelVolumeType::MODEL_PART, false);
-    fine->config.set_key_value("extruder", new ConfigOptionInt(fine_filament_1based));
-
-    ModelVolume *coarse = object->add_volume(make_cube(20., 20., height), ModelVolumeType::MODEL_PART, false);
-    coarse->set_offset(Vec3d(10., 0., 0.));
-    coarse->config.set_key_value("extruder", new ConfigOptionInt(coarse_filament_1based));
-
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    add_body(object, make_cube(10., 20., height), fine_filament_1based, 0.);
+    add_body(object, make_cube(20., 20., height), coarse_filament_1based, 0., Vec3d(10., 0., 0.));
+    place(model, object, print, config);
 }
 
-// Widen every per-filament vector coupon_config() sized for two filaments out to `count`, so a
-// mapping can leave filament index 0 unused and still be a legal print.
+// coupon_config(true) with its per-filament vectors widened to `count` filaments.
 DynamicPrintConfig coupon_config_with_filaments(size_t count)
 {
     DynamicPrintConfig config = coupon_config(true);
@@ -238,8 +187,7 @@ DynamicPrintConfig coupon_config_with_filaments(size_t count)
     return config;
 }
 
-// is_BBL_printer() makes Print::wipe_tower_type() resolve to Type 1. A fixture that omits it
-// exercises the Type 2 generator instead of the Type 1 path used by BBL export.
+// A Bambu printer, so the tower is Type 1.
 void init_tower_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
                        TriangleMesh coarse_mesh)
 {
@@ -247,28 +195,20 @@ void init_tower_coupon(Model &model, Print &print, const DynamicPrintConfig &con
     init_coupon(model, print, config, std::move(coarse_mesh));
 }
 
-DynamicPrintConfig tower_config()
+// coupon_config(true) plus a Type 1 prime tower at (140, 140), 60 mm wide.
+static DynamicPrintConfig tower_config()
 {
     DynamicPrintConfig config = coupon_config(true);
     config.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
-    config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
     config.set_key_value("wipe_tower_x", new ConfigOptionFloats{140.});
     config.set_key_value("wipe_tower_y", new ConfigOptionFloats{140.});
-    config.set_key_value("wipe_tower_filament", new ConfigOptionInt(0));
-    config.set_key_value("wipe_tower_rotation_angle", new ConfigOptionFloat(0.));
-    config.set_key_value("prime_tower_flat_ironing", new ConfigOptionBool(false));
-    config.set_key_value("enable_tower_interface_features", new ConfigOptionBool(false));
-    config.set_key_value("ooze_prevention", new ConfigOptionBool(false));
     config.set_key_value("purge_in_prime_tower", new ConfigOptionBool(false));
-    config.set_key_value("single_extruder_multi_material_priming", new ConfigOptionBool(false));
     config.set_key_value("enable_filament_ramming", new ConfigOptionBool(false));
     // The tower requires relative E; the base coupon config runs absolute.
     config.set_key_value("use_relative_e_distances", new ConfigOptionBool(true));
     // Stock per-tool caps, so the volumetric assertion has something real to bind against.
     config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloatsNullable{1., 4.});
-    // Per-filament ramming parameters. WipeTower indexes filament_change_length by tool id, and
-    // its one-element default would read out of bounds for tool 1 and silently disable ramming.
-    // That would leave the outgoing-tool bounds below bounding nothing.
+    // Per-filament ramming lengths: a one-element default would turn ramming off for tool 1.
     config.set_key_value("filament_change_length", new ConfigOptionFloats{10., 12.});
     config.set_key_value("filament_change_length_nc", new ConfigOptionFloats{10., 12.});
     config.set_key_value("filament_ramming_travel_time", new ConfigOptionFloatsNullable{1., 1.});
@@ -286,30 +226,17 @@ DynamicPrintConfig fine_skin_ratio3_config()
     return config;
 }
 
-// The coarse body opts into fine skins with the per-region boolean
-// `mixed_nozzle_body_fine_skins`. Its six per-role filament ids stay on body filament 2; the cell,
-// not region role routing, decides which tool prints a layer.
+// Fine body and, 20 mm on, a coarse body with fine skins on.
 void init_native_skin_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
                              TriangleMesh fine_mesh, TriangleMesh coarse_mesh,
                              double fine_cadence, double coarse_cadence)
 {
     ModelObject *object = model.add_object();
     object->name = "native-regional-layer-skin-coupon";
-
-    ModelVolume *fine = object->add_volume(std::move(fine_mesh), ModelVolumeType::MODEL_PART, false);
-    fine->config.set_key_value("extruder", new ConfigOptionInt(1));
-    fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(fine_cadence));
-
-    ModelVolume *coarse = object->add_volume(std::move(coarse_mesh), ModelVolumeType::MODEL_PART, false);
-    coarse->set_offset(Vec3d(20., 0., 0.));
-    coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
-    coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(coarse_cadence));
-    coarse->config.set_key_value("mixed_nozzle_body_fine_skins", new ConfigOptionBool(true));
-
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    add_body(object, std::move(fine_mesh), 1, fine_cadence);
+    add_body(object, std::move(coarse_mesh), 2, coarse_cadence, Vec3d(20., 0., 0.))
+        ->config.set_key_value("mixed_nozzle_body_fine_skins", new ConfigOptionBool(true));
+    place(model, object, print, config);
 }
 
 DynamicPrintConfig feature_split_tower_config(double fine_d, double coarse_d, bool swapped)
@@ -323,33 +250,24 @@ DynamicPrintConfig feature_split_tower_config(double fine_d, double coarse_d, bo
     config.set_key_value("mixed_nozzle_slicing_mode",
                          new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::FeatureSplit));
     config.set_key_value("mixed_nozzle_coarse_layer_height", new ConfigOptionFloat(.20));
-    // Feature Split uses one region whose shell stays on the fine logical filament while sparse
-    // infill is handed to the coarse one.  The two-volume tower coupon otherwise lets each
-    // volume's `extruder` fallback overwrite these role owners, so both owners collapse to the
-    // same physical tool before combine_infill() reaches the arriving-prime path.
+    // Walls and skins on filament 1, sparse infill on filament 2, whatever each volume's extruder.
     for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id",
                             "internal_solid_filament_id", "top_surface_filament_id",
                             "bottom_surface_filament_id"})
         config.set_key_value(key, new ConfigOptionInt(1));
     config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(2));
-    // Keep both per-nozzle envelopes inside the shipped 0.2d..0.7d bounds. The event-stream
-    // cadence remains .10/.20 for both legal pairs (.20/.40 and .20/.60), while the resolver's
-    // expected floor follows each physical nozzle's own configured maximum.
+    // Each nozzle's layer height range is 0.2 to 0.7 of its diameter.
     config.set_key_value("min_layer_height", new ConfigOptionFloats{
         .20 * nozzle_diameters[0], .20 * nozzle_diameters[1]});
     config.set_key_value("max_layer_height", new ConfigOptionFloats{
         .70 * nozzle_diameters[0], .70 * nozzle_diameters[1]});
-    // Keep one-row quantization below the vendor 15 mm3 dose even when a coarse cadence emits
-    // at its larger tower layer height; the expected resolver floors remain independently tied
-    // to each nozzle's configured maximum height below.
+    // Narrow enough that one purge row stays under the vendor prime at the coarse tower height.
     config.set_key_value("prime_tower_width", new ConfigOptionFloat(40.));
     config.set_key_value("layer_height", new ConfigOptionFloat(.10));
     config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(.10));
-    config.set_key_value("first_layer_flow_ratio", new ConfigOptionFloat(1.));
     config.set_key_value("prime_volume_mode",
                          new ConfigOptionEnum<PrimeVolumeMode>(PrimeVolumeMode::pvmDefault));
-    // Keep the gap wall and its lead-in/ironing moves out of the measured section. The parser
-    // still stops at the explicit WIPE_TOWER_END marker, so ramming and structure remain excluded.
+    // No gap wall lead-in moves inside the measured purge.
     config.set_key_value("prime_tower_skip_points", new ConfigOptionBool(false));
     config.set_key_value("mixed_nozzle_filament_provenance", new ConfigOptionStrings{"bound", "bound"});
     config.set_key_value("mixed_nozzle_filament_explicit_keys", new ConfigOptionStrings{"", ""});
@@ -388,14 +306,13 @@ void init_body_split_pad_coupon(Model &model, Print &print,
                                     const DynamicPrintConfig &config, bool swapped,
                                     double height, double fine_cadence, double coarse_cadence)
 {
-    const int fine_filament   = 1;
-    const int coarse_filament = 2;
     print.is_BBL_printer() = true;
-    init_mapped_coupon(model, print, config, fine_filament, coarse_filament, height);
+    init_mapped_coupon(model, print, config, 1, 2, height);
     declare_native_cadences(model, print, config, fine_cadence, coarse_cadence);
 }
 
-std::string h2d_change_filament_gcode()
+// The H2D change_filament_gcode from the shipped profile (SKIPs if the profile is missing).
+static std::string h2d_change_filament_gcode()
 {
     const std::filesystem::path path = std::filesystem::path(PROFILES_DIR) / "BBL" / "machine" /
                                        "Bambu Lab H2D 0.4 nozzle.json";
@@ -407,21 +324,32 @@ std::string h2d_change_filament_gcode()
     std::string                        reason;
     profile.load_from_json(path.string(), ForwardCompatibilitySubstitutionRule::Enable, key_values, reason);
     INFO("profile: " << path.string() << (reason.empty() ? "" : ("  load reason: " + reason)));
-    REQUIRE(profile.has("change_filament_gcode"));
+    if (!profile.has("change_filament_gcode")) {
+        // OrcaSlicer 2.5 profiles keep the G-code in a template the machine profile names in its
+        // `include` list (the loader layers it under the preset); read it from there.
+        const std::filesystem::path included = path.parent_path() / "Bambu Lab H2D 0.4 nozzle template change_filament_gcode.json";
+        INFO("included template: " << included.string());
+        REQUIRE(std::filesystem::exists(included));
+        DynamicPrintConfig template_config;
+        key_values.clear();
+        reason.clear();
+        template_config.load_from_json(included.string(), ForwardCompatibilitySubstitutionRule::Enable, key_values, reason);
+        REQUIRE(template_config.has("change_filament_gcode"));
+        return template_config.opt_string("change_filament_gcode");
+    }
     return profile.opt_string("change_filament_gcode");
 }
 
-DynamicPrintConfig h2d_sparse_slot_config()
+// Eight filament slots on an H2D-like 0.2/0.6 pair (slot 7 on the 0.6, the rest on the 0.2), Feature Split with
+// sparse infill on slot 7.
+DynamicPrintConfig feature_economics_baseline_config()
 {
     DynamicPrintConfig config = coupon_config_with_filaments(8);
 
-    // Logical filament ids 2 (template T2) and 6 (T6) use physical nozzle 0 (.2) and 1 (.6).
-    // The other six logical slots intentionally make raw indexing fail.
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
     config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
     config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
-    // The .6 mm nozzle's minimum layer height is .12 mm. Keep the base and initial cadences legal
-    // for that tool, then assign the fine/coarse regional cadences explicitly below.
+    // The 0.6 mm nozzle's minimum layer height.
     config.set_key_value("layer_height", new ConfigOptionFloat(0.12));
     config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.12));
     config.set_key_value("filament_map", new ConfigOptionInts{1, 1, 1, 1, 1, 1, 2, 1});
@@ -456,13 +384,6 @@ DynamicPrintConfig h2d_sparse_slot_config()
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     config.set_key_value("change_filament_gcode",
                          new ConfigOptionString(h2d_change_filament_gcode()));
-
-    return config;
-}
-
-DynamicPrintConfig feature_economics_baseline_config()
-{
-    DynamicPrintConfig config = h2d_sparse_slot_config();
     config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::FeatureSplit));
     config.set_key_value("outer_wall_filament_id", new ConfigOptionInt(1));
     config.set_key_value("inner_wall_filament_id", new ConfigOptionInt(1));
@@ -471,7 +392,6 @@ DynamicPrintConfig feature_economics_baseline_config()
     config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(7));
     config.set_key_value("mixed_nozzle_coarse_layer_height", new ConfigOptionFloat(.36));
     config.set_key_value("mixed_nozzle_allowed_cadence_ratios", new ConfigOptionInts{2, 3});
-    config.set_key_value("mixed_nozzle_handoff_cost_s", new ConfigOptionFloat(0.));
     const auto tower = tower_config();
     for (const char *key : {"enable_prime_tower", "prime_tower_width", "wipe_tower_x", "wipe_tower_y",
                            "wipe_tower_filament", "wipe_tower_rotation_angle", "prime_tower_flat_ironing",
@@ -487,6 +407,23 @@ DynamicPrintConfig feature_economics_baseline_config()
     config.set_key_value("sparse_infill_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
     return config;
 }
+
+namespace {
+
+// One G-code line with the modal position before and after it, and tower/model classification.
+struct TowerExitLine
+{
+    std::string raw;
+    bool   motion   { false };
+    bool   has_xy   { false };
+    bool   has_z    { false };
+    bool   in_tower { false };
+    bool   model    { false };
+    double x0 { 0. }, y0 { 0. }, z0 { 0. };
+    double x  { 0. }, y  { 0. }, z  { 0. };
+    double e  { 0. };
+    double f  { 0. };
+};
 
 std::vector<TowerExitLine> tower_exit_lines(const std::string &gcode)
 {
@@ -562,6 +499,8 @@ bool tower_exit_segment_enters(double ax, double ay, double bx, double by, const
     return t1 - t0 > 1e-9;
 }
 
+} // namespace
+
 void apply_tower_exit_retraction(DynamicPrintConfig &config)
 {
     config.set_key_value("retraction_distances_when_cut", new ConfigOptionFloats{10., 10.});
@@ -593,27 +532,15 @@ void init_paint_cadence_coupon(Model &model, Print &print, const DynamicPrintCon
     print.is_BBL_printer() = bbl_printer;
     ModelObject *object = model.add_object();
     object->name = "paint-cadence-coupon";
-    ModelVolume *fine = object->add_volume(make_cube(10., 20., 4.), ModelVolumeType::MODEL_PART, false);
-    fine->config.set_key_value("extruder", new ConfigOptionInt(1));
-    fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.10));
+    ModelVolume *fine = add_body(object, make_cube(10., 20., 4.), 1, 0.10);
     if (fine_paint)
         paint_cadence_facets(*fine, facets, *fine_paint);
-    ModelVolume *coarse = object->add_volume(make_cube(10., 20., 4.), ModelVolumeType::MODEL_PART, false);
-    coarse->set_offset(Vec3d(12., 0., 0.));
-    coarse->config.set_key_value("extruder", new ConfigOptionInt(coarse_extruder));
-    coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.20));
+    ModelVolume *coarse = add_body(object, make_cube(10., 20., 4.), coarse_extruder, 0.20, Vec3d(12., 0., 0.));
     if (coarse_paint)
         paint_cadence_facets(*coarse, facets, *coarse_paint);
-    if (second_coarse_extruder > 0) {
-        ModelVolume *second = object->add_volume(make_cube(10., 20., 4.), ModelVolumeType::MODEL_PART, false);
-        second->set_offset(Vec3d(24., 0., 0.));
-        second->config.set_key_value("extruder", new ConfigOptionInt(second_coarse_extruder));
-        second->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.20));
-    }
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    if (second_coarse_extruder > 0)
+        add_body(object, make_cube(10., 20., 4.), second_coarse_extruder, 0.20, Vec3d(24., 0., 0.));
+    place(model, object, print, config);
 }
 
 // The shared tower fixture widened to three filaments: filament 1 on the 0.2 mm nozzle, filaments
@@ -762,7 +689,6 @@ TowerGridSpeedAudit audit_tower_grid_speed(const std::string &gcode)
         if (line.raw.rfind("; CP EMPTY GRID START", 0) == 0) {
             in_grid = true;
             first_feed = 0.;
-            ++audit.grids;
             continue;
         }
         if (line.raw.rfind("; CP EMPTY GRID END", 0) == 0) {
@@ -776,10 +702,8 @@ TowerGridSpeedAudit audit_tower_grid_speed(const std::string &gcode)
             first_feed = line.f;
             continue;
         }
-        if (line.f > first_feed + 1.) {
+        if (line.f > first_feed + 1.)
             ++audit.faster_roads;
-            audit.worst_ratio = std::max(audit.worst_ratio, line.f / first_feed);
-        }
     }
     return audit;
 }
@@ -908,18 +832,18 @@ TowerFootprintAudit audit_tower_footprint(const std::string &gcode, const Print 
 {
     TowerFootprintAudit audit;
     const WipeTowerData &tower = print.wipe_tower_data();
-    audit.planned = tower.bbx;
-    REQUIRE(audit.planned.defined);
+    BoundingBoxf planned = tower.bbx;
+    REQUIRE(planned.defined);
     // The planned box is the first layer's outer loop in tower coordinates; place it on the plate
-    // Place the planned box on the plate with half a road width of clearance.
-    audit.planned.translate(Vec2d(print.config().wipe_tower_x.get_at(0), print.config().wipe_tower_y.get_at(0)) +
-                            tower.rib_offset.cast<double>());
-    audit.planned.min -= Vec2d(.5, .5);
-    audit.planned.max += Vec2d(.5, .5);
+    // with half a road width of clearance.
+    planned.translate(Vec2d(print.config().wipe_tower_x.get_at(0), print.config().wipe_tower_y.get_at(0)) +
+                      tower.rib_offset.cast<double>());
+    planned.min -= Vec2d(.5, .5);
+    planned.max += Vec2d(.5, .5);
     for (const TowerExitLine &line : tower_exit_lines(gcode))
         if (line.in_tower && line.motion && line.has_xy && line.e > 0.) {
             ++audit.tower_roads;
-            if (! audit.planned.contains(Vec2d(line.x, line.y)))
+            if (! planned.contains(Vec2d(line.x, line.y)))
                 ++audit.outside;
         }
     return audit;
@@ -978,20 +902,9 @@ void init_native_coupon(Model &model, Print &print, const DynamicPrintConfig &co
 {
     ModelObject *object = model.add_object();
     object->name = "native-regional-layer-coupon";
-
-    ModelVolume *fine = object->add_volume(std::move(fine_mesh), ModelVolumeType::MODEL_PART, false);
-    fine->config.set_key_value("extruder", new ConfigOptionInt(1));
-    fine->config.set_key_value("regional_layer_height", new ConfigOptionFloat(fine_cadence));
-
-    ModelVolume *coarse = object->add_volume(std::move(coarse_mesh), ModelVolumeType::MODEL_PART, false);
-    coarse->set_offset(Vec3d(20., 0., 0.));
-    coarse->config.set_key_value("extruder", new ConfigOptionInt(2));
-    coarse->config.set_key_value("regional_layer_height", new ConfigOptionFloat(coarse_cadence));
-
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    add_body(object, std::move(fine_mesh), 1, fine_cadence);
+    add_body(object, std::move(coarse_mesh), 2, coarse_cadence, Vec3d(20., 0., 0.));
+    place(model, object, print, config);
 }
 
 void init_feature_overhang_fixture(Model &model, Print &print, const DynamicPrintConfig &config)
@@ -1000,20 +913,17 @@ void init_feature_overhang_fixture(Model &model, Print &print, const DynamicPrin
     object->name = "feature-overhang-fixture";
     // The upper shelf projects 8 mm beyond the lower support, giving the perimeter detector a
     // generous, unambiguous overhang while keeping one watertight model volume.
-    object->add_volume(extruded_xz_outline(
-        {{0., 0.}, {12., 0.}, {12., 2.}, {20., 2.}, {20., 4.}, {0., 4.}}, 20.),
-        ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
+    object->add_volume(overhang_shelf_mesh(12., 20., 2., 4.), ModelVolumeType::MODEL_PART, false);
+    place(model, object, print, config);
 }
 
 std::vector<ArrivingPurge> scan_arriving_purges(const std::string &gcode,
                                                      const std::vector<double> &filament_diameters)
 {
     std::vector<ArrivingPurge> result;
-    std::array<int, 2> held_filament { -1, -1 };
+    // One entry per physical nozzle; a tool changer has more than two.
+    std::array<int, 16> held_filament;
+    held_filament.fill(-1);
     std::optional<ArrivingPurge> pending;
     bool   in_arriving_purge = false;
     double filament_length   = 0.;
@@ -1032,9 +942,7 @@ std::vector<ArrivingPurge> scan_arriving_purges(const std::string &gcode,
             emitted_height = std::stod(raw.substr(15));
         std::smatch marker;
         if (std::regex_search(raw, marker, start_marker)) {
-            // A two-nozzle coupon starts with one occupied physical nozzle. Seeding that state
-            // from the first marker avoids assuming which logical filament the scheduler chose
-            // first, and remains correct when filament_map is swapped.
+            // The first marker tells which filament each nozzle starts with.
             const int old_filament = std::stoi(marker[1].str());
             const int new_filament = std::stoi(marker[2].str());
             const int old_nozzle   = std::stoi(marker[3].str());
@@ -1043,7 +951,7 @@ std::vector<ArrivingPurge> scan_arriving_purges(const std::string &gcode,
                 held_filament[old_nozzle] = old_filament;
             const bool warm_return = new_nozzle >= 0 && new_nozzle < int(held_filament.size()) &&
                                      held_filament[new_nozzle] == new_filament;
-            pending = ArrivingPurge{old_filament, new_filament, old_nozzle, new_nozzle, warm_return, 0., 0};
+            pending = ArrivingPurge{new_filament, new_nozzle, warm_return};
             pending->print_z = current_z;
             if (new_nozzle >= 0 && new_nozzle < int(held_filament.size()))
                 held_filament[new_nozzle] = new_filament;
@@ -1062,10 +970,7 @@ std::vector<ArrivingPurge> scan_arriving_purges(const std::string &gcode,
             continue;
         }
 
-        // Type 1 normally closes this class with WIPE_TOWER_END. Some emitted tower layouts put
-        // an empty-grid block before that tag, and a malformed/truncated block can reach the
-        // toolchange trailer without either; stop at the first boundary so later tower rows never
-        // get charged to the incoming-tool purge.
+        // The purge ends at the first grid, tower end or tool change end.
         const bool purge_boundary = raw.rfind("; CP EMPTY GRID START", 0) == 0 ||
                                      raw.rfind("; WIPE_TOWER_END", 0) == 0 ||
                                      raw.rfind("; CP TOOLCHANGE END", 0) == 0;
@@ -1119,15 +1024,58 @@ double prime_row_allowance_mm3(const PrintConfig &config, int physical_nozzle, d
 {
     const double d = config.nozzle_diameter.get_at(size_t(physical_nozzle));
     const double min_d = *std::min_element(config.nozzle_diameter.values.begin(), config.nozzle_diameter.values.end());
-    // This is one complete purge row at the actual tower layer height recorded on the generated
-    // ToolChangeResult (the fixture's base value comes from config.layer_height). The row's
-    // cross-section is the same oval correction WipeTower::volume_to_length() uses; the length
-    // is the cleaning box width (tower width minus the two shared perimeter lines).
+    // One purge row across the tower (less its two wall lines), with the oval cross-section the tower uses.
     const double h = layer_height;
     const double purge_width = 1.25 * d;
     const double row_cross_section = h * (purge_width - h * (1. - M_PI / 4.));
     const double row_length = config.prime_tower_width.value - 2. * (1.25 * min_d);
     return std::max(0., row_cross_section * row_length);
+}
+
+WarmReturns check_warm_returns(const std::string &gcode, const PrintConfig &resolved, double tower_width, bool upper_bound)
+{
+    constexpr double rounding_mm3 = .02;
+    WarmReturns out;
+    for (const ArrivingPurge &purge : scan_arriving_purges(gcode, resolved.filament_diameter.values)) {
+        if (!purge.warm_return)
+            continue;
+        ++out.count;
+        REQUIRE(purge.new_filament >= 0);
+        REQUIRE(purge.new_nozzle >= 0);
+        const auto floor = mixed_nozzle_handoff_deposits(resolved, size_t(purge.new_filament), size_t(purge.new_nozzle), tower_width);
+        REQUIRE(floor.has_value());
+        const double vendor = double(mixed_nozzle_vendor_prime_volumes(resolved, size_t(purge.new_filament)).extruder_change);
+        CAPTURE(purge.print_z, purge.new_filament, purge.new_nozzle, purge.volume_mm3, floor->prime_volume_mm3, vendor);
+        CHECK(purge.volume_mm3 + rounding_mm3 >= floor->prime_volume_mm3);
+        if (upper_bound) {
+            // The tower lays whole purge rows, so a prime can run up to one row past its volume.
+            const double row = prime_row_allowance_mm3(resolved, purge.new_nozzle,
+                                                       resolved.max_layer_height.get_at(size_t(purge.new_nozzle)));
+            CHECK(purge.volume_mm3 <= std::max(vendor, double(floor->prime_volume_mm3)) + row + rounding_mm3);
+        }
+        out.below_vendor += purge.volume_mm3 + 1. < vendor ? 1 : 0;
+    }
+    return out;
+}
+
+std::vector<size_t> bracketed_lines(const std::string &gcode, const std::vector<std::string> &starts,
+                                    const std::vector<std::string> &ends)
+{
+    const auto starts_with_any = [](const std::string &line, const std::vector<std::string> &prefixes) {
+        return std::any_of(prefixes.begin(), prefixes.end(), [&line](const std::string &prefix) { return line.rfind(prefix, 0) == 0; });
+    };
+    std::vector<size_t> out(1, 0);
+    std::istringstream lines(gcode);
+    std::string line;
+    size_t count = 0, current = 0;
+    while (std::getline(lines, line)) {
+        if (current == 0 && starts_with_any(line, starts))
+            current = ++count;
+        out.push_back(current);
+        if (current != 0 && starts_with_any(line, ends))
+            current = 0;
+    }
+    return out;
 }
 
 DynamicPrintConfig coarse_base_support_config(MixedNozzleSlicingMode mode)
@@ -1158,9 +1106,6 @@ DynamicPrintConfig coarse_base_support_config(MixedNozzleSlicingMode mode)
     config.set_key_value("enable_support", new ConfigOptionBool(true));
     config.set_key_value("support_filament", new ConfigOptionInt(2));            // -> physical 1, .6 mm
     config.set_key_value("support_interface_filament", new ConfigOptionInt(1));  // -> physical 0, .2 mm
-    config.set_key_value("support_type", new ConfigOptionEnum<SupportType>(stNormalAuto));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0., false));
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0., false));
     config.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
     return config;
 }

@@ -1,12 +1,18 @@
 #include "Flow.hpp"
-#include "I18N.hpp"
 #include "MixedNozzleConfig.hpp"
+#include "Exception.hpp"
+#include "Config.hpp"
 #include "Print.hpp"
+#include "libslic3r.h"
 #include "Slicing.hpp"
 #include <cmath>
 #include <assert.h>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <string>
+#include <math.h>
+#include "PrintConfig.hpp"
+#include "I18N.hpp"
 
 // Mark string for localization and translate.
 #define L(s) Slic3r::I18N::translate(s)
@@ -14,10 +20,10 @@
 namespace Slic3r {
 
 FlowErrorNegativeSpacing::FlowErrorNegativeSpacing() : 
-	FlowError("Flow::spacing() produced negative spacing. Did you set some extrusion width too small?") {}
+	FlowError(L("Flow::spacing() produced negative spacing. Did you set some extrusion width too small?")) {}
 
 FlowErrorNegativeFlow::FlowErrorNegativeFlow() :
-    FlowError("Flow::mm3_per_mm() produced negative flow. Did you set some extrusion width too small?") {}
+    FlowError(L("Flow::mm3_per_mm() produced negative flow. Did you set some extrusion width too small?")) {}
 
 // This static method returns a sane extrusion width default.
 float Flow::auto_extrusion_width(FlowRole role, float nozzle_diameter)
@@ -63,7 +69,8 @@ static inline FlowRole opt_key_to_flow_role(const std::string &opt_key)
 
 static inline void throw_on_missing_variable(const std::string &opt_key, const char *dependent_opt_key) 
 {
-	throw FlowErrorMissingVariable((boost::format("Failed to calculate line width of %1%. Cannot get value of \u201c%2%\u201d.") % opt_key % dependent_opt_key).str());
+	// TRN %1% and %2% are names of settings.
+	throw FlowErrorMissingVariable((boost::format(L("Failed to calculate line width of %1%. Cannot get value of \"%2%\".")) % opt_key % dependent_opt_key).str());
 }
 
 // Used to provide hints to the user on default extrusion width values, and to provide reasonable values to the PlaceholderParser.
@@ -159,7 +166,7 @@ Flow Flow::with_spacing(float new_spacing) const
         assert(m_width >= m_height);
         out.m_width += new_spacing - m_spacing;
         if (out.m_width < out.m_height)
-            throw Slic3r::InvalidArgument("Invalid spacing supplied to Flow::with_spacing(), check your layer height and extrusion width.");
+            throw Slic3r::InvalidArgument(L("Invalid spacing supplied to Flow::with_spacing(), check your layer height and extrusion width."));
     }
     out.m_spacing = new_spacing;
     return out;
@@ -268,11 +275,22 @@ static ConfigOptionFloatOrPercent mixed_nozzle_support_width(const PrintObject *
     return effective ? *effective : width;
 }
 
-Flow support_material_flow(const PrintObject *object, float layer_height)
+// The nozzle a support road is laid with. A mixed-nozzle mode resolves the one-based support filament
+// through filament_map with resolved_support_filament_nozzle_idx. Off mode reads it as upstream does,
+// with nozzle_diameter_for_filament. Zero ("keep the current filament") reads the first
+// nozzle on both paths, through get_at's out-of-range fallback.
+static float support_nozzle_diameter(const PrintObject *object, int support_filament)
 {
     const PrintConfig &print_config = object->print()->config();
-    const int nozzle_idx = resolved_support_filament_nozzle_idx(print_config, object->config().support_filament.value);
-    const float nozzle_diameter = float(print_config.nozzle_diameter.get_at(nozzle_idx - 1));
+    if (!is_mixed_nozzle_slicing_enabled(print_config))
+        return float(nozzle_diameter_for_filament(print_config, support_filament, object->print()->is_BBL_printer()));
+    const int nozzle_idx = resolved_support_filament_nozzle_idx(print_config, support_filament);
+    return float(print_config.nozzle_diameter.get_at(nozzle_idx - 1));
+}
+
+Flow support_material_flow(const PrintObject *object, float layer_height)
+{
+    const float nozzle_diameter = support_nozzle_diameter(object, object->config().support_filament.value);
     return Flow::new_from_config_width(
         frSupportMaterial,
         // The width parameter accepted by new_from_config_width is of type ConfigOptionFloatOrPercent, the Flow class takes care of the percent to value substitution.
@@ -287,17 +305,14 @@ Flow support_material_flow(const PrintObject *object, float layer_height)
 Flow support_transition_flow(const PrintObject* object)
 {
     //BBS: support transition of tree support is bridge flow
-    const PrintConfig &print_config = object->print()->config();
-    const int nozzle_idx = resolved_support_filament_nozzle_idx(print_config, object->config().support_filament.value);
-    float dmr = float(print_config.nozzle_diameter.get_at(nozzle_idx - 1));
+    float dmr = support_nozzle_diameter(object, object->config().support_filament.value);
     return Flow::bridging_flow(dmr, dmr);
 }
 
 Flow support_material_1st_layer_flow(const PrintObject *object, float layer_height, int filament)
 {
     const PrintConfig &print_config = object->print()->config();
-    const int nozzle_idx = resolved_support_filament_nozzle_idx(print_config, filament < 0 ? object->config().support_filament.value : filament);
-    const float nozzle_diameter = float(print_config.nozzle_diameter.get_at(nozzle_idx - 1));
+    const float nozzle_diameter = support_nozzle_diameter(object, filament < 0 ? object->config().support_filament.value : filament);
     const auto &width = (print_config.initial_layer_line_width.value > 0) ? print_config.initial_layer_line_width : object->config().support_line_width;
     return Flow::new_from_config_width(
         frSupportMaterial,
@@ -309,9 +324,7 @@ Flow support_material_1st_layer_flow(const PrintObject *object, float layer_heig
 
 Flow support_material_interface_flow(const PrintObject *object, float layer_height)
 {
-    const PrintConfig &print_config = object->print()->config();
-    const int nozzle_idx = resolved_support_filament_nozzle_idx(print_config, object->config().support_interface_filament.value);
-    const float nozzle_diameter = float(print_config.nozzle_diameter.get_at(nozzle_idx - 1));
+    const float nozzle_diameter = support_nozzle_diameter(object, object->config().support_interface_filament.value);
     return Flow::new_from_config_width(
         frSupportMaterialInterface,
         // The width parameter accepted by new_from_config_width is of type ConfigOptionFloatOrPercent, the Flow class takes care of the percent to value substitution.

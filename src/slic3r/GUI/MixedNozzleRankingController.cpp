@@ -219,7 +219,7 @@ WizardEstimate wizard_ranking_estimate(const MixedNozzleSliceTime &time)
 
 MixedNozzleRankingSlice wizard_baseline_ranking_slice(MixedNozzleRankingSlice row,
                                                       std::optional<std::size_t> fine_logical_filament,
-                                                      double fine_height)
+                                                      double fine_height, bool keep_colors)
 {
     // Setup refused the row, so there is no staged model to print on one nozzle.
     if (!row.model)
@@ -231,9 +231,12 @@ MixedNozzleRankingSlice wizard_baseline_ranking_slice(MixedNozzleRankingSlice ro
     }
     // A row the engine would refuse at Slice still has its staged model. The one-nozzle print is
     // mode Off, which those checks (Body Split's density and pattern) do not apply to, so it gets a
-    // time all the same. It used to share the row's "Slice would refuse this row.".
+    // time all the same.
     row.diagnostic.clear();
-    mixed_nozzle_single_nozzle_baseline(*row.model, row.config, *fine_logical_filament, fine_height);
+    if (keep_colors)
+        mixed_nozzle_color_baseline(*row.model, row.config, *fine_logical_filament, fine_height);
+    else
+        mixed_nozzle_single_nozzle_baseline(*row.model, row.config, *fine_logical_filament, fine_height);
     row.key = mixed_nozzle_ranking_key(row.plate_id, *row.model, row.config);
     return row;
 }

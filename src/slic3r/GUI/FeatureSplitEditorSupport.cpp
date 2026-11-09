@@ -21,7 +21,7 @@ constexpr const char* coarse_role_key = "sparse_infill_filament_id";
 // Process-owned (s_Preset_print_options), never a project or plate key.
 constexpr const char* coarse_cadence_key = "mixed_nozzle_coarse_layer_height";
 
-// Plain millimetre text for a limit sentence, without trailing zeros: "0.42 mm", not
+// Plain millimeter text for a limit sentence, without trailing zeros: "0.42 mm", not
 // "0.420000 mm".
 std::string limit_height_text(double value)
 {

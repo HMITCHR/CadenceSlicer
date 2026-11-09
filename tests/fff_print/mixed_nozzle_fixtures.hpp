@@ -37,8 +37,6 @@ using Slic3r::WipeTowerWallType;
 DynamicPrintConfig coupon_config(bool enabled);
 // coupon_config(true) with every per-filament vector widened to `count` filaments.
 DynamicPrintConfig coupon_config_with_filaments(size_t count);
-// coupon_config(true) plus a Type 1 prime tower at (140, 140), 60 mm wide.
-DynamicPrintConfig tower_config();
 // Feature Split tower config on a fine_d/coarse_d pair (walls fine, sparse infill coarse).
 DynamicPrintConfig feature_split_tower_config(double fine_d, double coarse_d, bool swapped);
 // feature_split_tower_config switched to Body Split, with the given cadences, pad and wall type.
@@ -51,15 +49,11 @@ DynamicPrintConfig body_split_pad_config(double fine_d, double coarse_d,
 void apply_tower_exit_retraction(DynamicPrintConfig &config);
 // coupon_config(true) on a 0.2/0.6 pair that admits a ratio-3 (0.30/0.10) coarse cadence.
 DynamicPrintConfig fine_skin_ratio3_config();
-// The H2D change_filament_gcode from the shipped profile (SKIPs if the profile is missing).
-std::string h2d_change_filament_gcode();
-// Eight filament slots on an H2D-like 0.2/0.6 pair: slot 7 on the 0.6, the rest on the 0.2.
-DynamicPrintConfig h2d_sparse_slot_config();
-// Feature Split economics fixture config (sparse infill on slot 7, 10000 s tool changes).
+// Feature Split on eight H2D-like slots, 0.2/0.6 with slot 7 (sparse infill) on the 0.6, 10000 s tool changes.
 DynamicPrintConfig feature_economics_baseline_config();
 // feature_economics_baseline_config() with free tool changes and loads.
 DynamicPrintConfig free_switch_economics_config();
-// tower_config() widened to three filaments: 1 on the 0.2 nozzle, 2 and 3 on the 0.4 nozzle.
+// The tower coupon config widened to three filaments: 1 on the 0.2 nozzle, 2 and 3 on the 0.4 nozzle.
 DynamicPrintConfig paint_cadence_tower_config();
 
 // coupon_config() and the configs built on it size only a few per-filament vectors. Print::apply
@@ -72,11 +66,7 @@ void fill_per_filament_values(DynamicPrintConfig &config);
 
 // A box with an oppositely wound internal shell: an internal pocket.
 TriangleMesh box_with_internal_cavity(const Vec3d &outer, const Vec3d &cavity_min, const Vec3d &cavity);
-// Fine body on filament 1 (0.10), coarse body on filament 2 (0.20), each at its offset.
-void init_registered_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
-                            TriangleMesh fine_mesh, const Vec3d &fine_offset,
-                            TriangleMesh coarse_mesh, const Vec3d &coarse_offset);
-// init_registered_coupon with a 10x20x4 fine body touching the coarse body at x = 10.
+// A 10x20x4 fine body on filament 1 (0.10) touching the coarse body on filament 2 (0.20) at x = 10.
 void init_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
                  TriangleMesh coarse_mesh = Slic3r::make_cube(20., 20., 4.));
 // One plain cube, no per-volume settings (Feature Split fixtures).
@@ -111,25 +101,6 @@ void init_paint_cadence_coupon(Model &model, Print &print, const DynamicPrintCon
 
 // ---- Tower G-code audits ----------------------------------------------------------------------
 
-// One G-code line with the modal position before and after it, and tower/model classification.
-struct TowerExitLine
-{
-    std::string raw;
-    bool   motion   { false };
-    bool   has_xy   { false };
-    bool   has_z    { false };
-    bool   in_tower { false };
-    bool   model    { false };
-    double x0 { 0. }, y0 { 0. }, z0 { 0. };
-    double x  { 0. }, y  { 0. }, z  { 0. };
-    double e  { 0. };
-    double f  { 0. };
-};
-
-std::vector<TowerExitLine> tower_exit_lines(const std::string &gcode);
-// True when any part of segment a-b lies strictly inside the box.
-bool tower_exit_segment_enters(double ax, double ay, double bx, double by, const BoundingBoxf &box);
-
 // How the fine nozzle leaves the tower after each "; FINE_TOWER_RETURN_RELIEF".
 struct TowerExitAudit
 {
@@ -146,10 +117,8 @@ TowerExitAudit audit_tower_exit(const std::string &gcode, double expected_pull);
 // Feedrates of the tower's sparse-grid roads.
 struct TowerGridSpeedAudit
 {
-    size_t grids { 0 };
     size_t grid_roads { 0 };
     size_t faster_roads { 0 };          // roads faster than the grid's first road
-    double worst_ratio { 0. };
 };
 TowerGridSpeedAudit audit_tower_grid_speed(const std::string &gcode);
 
@@ -170,37 +139,30 @@ struct TowerFootprintAudit
 {
     size_t tower_roads { 0 };
     size_t outside { 0 };
-    BoundingBoxf planned;
 };
 TowerFootprintAudit audit_tower_footprint(const std::string &gcode, const Print &print);
 
 // ---- Prism and overhang fixtures ---------------------------------------------------------------
 
-// A watertight prism whose X/Z outline is extruded across y = 0..depth. The outline is given
-// counter-clockwise in (x, z); side quads and both Y caps are wound so every face normal points
-// out of the solid, which is what makes the result a single closed part rather than two stacked
-// boxes sharing an interior face.
+// A watertight prism: the counter-clockwise X/Z outline extruded across y = 0..depth, one closed part.
 TriangleMesh extruded_xz_outline(const std::vector<Vec2d> &outline, double depth);
 
-// A narrow base pillar widens into a
-// full shelf partway up, the same shape family init_feature_overhang_fixture already inlines
-// (base_width=12, shelf_width=20, base_height=2, total_height=4) but parameterized so a Body
-// Split coarse-region volume can reuse it at whatever height its own coarse cadence needs. The
-// region from x=base_width..shelf_width at z>=base_height has nothing beneath it -- a genuine
-// overhang that real support material (not just enforce_support_layers) must bridge.
+// A base base_width wide that widens to shelf_width at base_height: the shelf beyond base_width is a real
+// overhang that needs support.
 TriangleMesh overhang_shelf_mesh(double base_width, double shelf_width, double base_height, double total_height);
 
+// Fine body on filament 1 and coarse body on filament 2, 20 mm on, at their own layer heights.
 void init_native_coupon(Model &model, Print &print, const DynamicPrintConfig &config,
                         TriangleMesh fine_mesh, TriangleMesh coarse_mesh,
                         double fine_cadence = 0.10, double coarse_cadence = 0.20);
 
+// One overhang_shelf_mesh(12, 20, 2, 4) part.
 void init_feature_overhang_fixture(Model &model, Print &print, const DynamicPrintConfig &config);
 
+// The purge each nozzle change lays for the arriving filament.
 struct ArrivingPurge
 {
-    int    old_filament { -1 };
     int    new_filament { -1 };
-    int    old_nozzle   { -1 };
     int    new_nozzle   { -1 };
     bool   warm_return  { false };
     double volume_mm3   { 0. };
@@ -216,10 +178,25 @@ std::vector<ArrivingPurge> scan_arriving_purges(const std::string &gcode,
 
 double prime_row_allowance_mm3(const PrintConfig &config, int physical_nozzle, double layer_height);
 
-// A real support schedule on the shipped mixed-nozzle pair: the coarse .6 tool lays the
-// support body, the fine .2 tool lays the interface. Every number a support or interface road is
-// built from has to come from the tool that actually lays it, and has to sit inside that tool's
-// own envelope.
+// Every warm return (a nozzle arriving back at the filament it left) checked against its bounds: at least the
+// hand-off prime for a tower `tower_width` wide (negative: the config's width), and with `upper_bound` at most the
+// larger of that and the vendor prime plus one purge row. Returns how many there were and how many laid clearly
+// less than the vendor prime.
+struct WarmReturns
+{
+    size_t count { 0 };
+    size_t below_vendor { 0 };
+};
+WarmReturns check_warm_returns(const std::string &gcode, const PrintConfig &resolved, double tower_width = -1.,
+                               bool upper_bound = true);
+
+// Per one-based G-code line (GCodeProcessor's gcode_id; index 0 is unused): the number, counted from 1, of the
+// bracket the line sits in, from a line starting with one of `starts` through the next line starting with one of
+// `ends`, or 0 outside every bracket.
+std::vector<size_t> bracketed_lines(const std::string &gcode, const std::vector<std::string> &starts,
+                                    const std::vector<std::string> &ends);
+
+// Support on a 0.2/0.6 pair with a tower: the 0.6 lays the support body, the 0.2 the interface.
 DynamicPrintConfig coarse_base_support_config(MixedNozzleSlicingMode mode);
 
 } // namespace mixed_nozzle_fixtures

@@ -467,7 +467,7 @@ std::vector<BodySplitBoundedText> body_split_row_identities(const std::vector<Bo
     full.reserve(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
         const std::string leaf = rows[i].volume_name.empty() ? body_split_row_ordinal(i) : rows[i].volume_name;
-        full.push_back(rows[i].object_name.empty() ? leaf : leaf + " \xE2\x80\x94 " + rows[i].object_name);
+        full.push_back(rows[i].object_name.empty() ? leaf : leaf + " - " + rows[i].object_name);
     }
 
     std::map<std::string, size_t> occurrences;
@@ -772,7 +772,7 @@ BodySplitApplyResult apply_body_split_editor_request(Model& model,
     }
 
     // A cadence change moves the beam rows: interlocking beams need one beam layer per fine layer in
-    // a coarse layer, and Slice refuses any other count (SRL-A28). Setup sizes them from the same
+    // a coarse layer, and Slice refuses any other count. Setup sizes them from the same
     // rows, so an edited cadence carries the count with it, on the object, as setup writes it.
     struct PendingBeamLayers {
         ModelObject* object;

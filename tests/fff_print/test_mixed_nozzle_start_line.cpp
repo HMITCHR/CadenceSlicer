@@ -95,23 +95,16 @@ TEST_CASE("The first travel after the start G-code does not drag the load line",
 {
     SECTION("Feature Split retracts and stays at the start height until it reaches the tower")
     {
-        const Transition t = slice_transition(MixedNozzleSlicingMode::FeatureSplit);
+        // With and without retraction on layer change.
+        const bool retract_on_layer_change = GENERATE(true, false);
+        const Transition t = slice_transition(MixedNozzleSlicingMode::FeatureSplit, retract_on_layer_change);
         INFO(t.text);
         REQUIRE(t.travelled);
         CHECK(t.retracted_before_travel);
-        CHECK_FALSE(t.first_z_before_retract);
+        if (retract_on_layer_change)
+            CHECK_FALSE(t.first_z_before_retract);
         CHECK(t.lowest_z_before_travel >= k_start_z - 1e-6);
         // The descent happens at the tower, after the travel.
-        CHECK(t.first_z_after_travel > 0.);
-        CHECK(t.first_z_after_travel < k_start_z);
-    }
-    SECTION("Feature Split without layer-change retraction still travels before it descends")
-    {
-        const Transition t = slice_transition(MixedNozzleSlicingMode::FeatureSplit, false);
-        INFO(t.text);
-        REQUIRE(t.travelled);
-        CHECK(t.retracted_before_travel);
-        CHECK(t.lowest_z_before_travel >= k_start_z - 1e-6);
         CHECK(t.first_z_after_travel > 0.);
         CHECK(t.first_z_after_travel < k_start_z);
     }

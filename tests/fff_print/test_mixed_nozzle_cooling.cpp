@@ -13,13 +13,8 @@ using namespace mixed_nozzle_fixtures;
 
 namespace {
 
-struct Bracket {
-    bool named_feedrate = false;
-    double incoming_feedrate = 0.;
-    bool first_xy_seen = false;
-    bool has_solid_grid = false;
-};
-
+// Tower blocks (WIPE_TOWER and NOZZLE_CHANGE brackets): the XY moves made before the block names a
+// feedrate, and how many blocks hold a solid grid or open on the feedrate already in force.
 struct BracketAudit {
     size_t brackets = 0;
     size_t xy_moves = 0;
@@ -30,67 +25,55 @@ struct BracketAudit {
 
 BracketAudit audit_tower_brackets(const std::string &gcode)
 {
+    struct Bracket {
+        double incoming = 0.;
+        bool   named = false, first_xy_seen = false, solid_grid = false;
+    };
     BracketAudit audit;
     std::vector<Bracket> stack;
     double modal_feedrate = 0.;
     std::istringstream input(gcode);
     std::string raw;
     while (std::getline(input, raw)) {
-        if (raw.rfind("; WIPE_TOWER_START", 0) == 0 ||
-            raw.rfind("; NOZZLE_CHANGE_START", 0) == 0) {
-            stack.push_back({false, modal_feedrate, false, false});
+        if (raw.rfind("; WIPE_TOWER_START", 0) == 0 || raw.rfind("; NOZZLE_CHANGE_START", 0) == 0) {
+            stack.push_back({modal_feedrate});
             ++audit.brackets;
             continue;
         }
-        if (raw.rfind("; WIPE_TOWER_END", 0) == 0 ||
-            raw.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
+        if (raw.rfind("; WIPE_TOWER_END", 0) == 0 || raw.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
             if (!stack.empty()) {
-                if (stack.back().has_solid_grid)
-                    ++audit.solid_grids;
+                audit.solid_grids += stack.back().solid_grid ? 1 : 0;
                 stack.pop_back();
             }
             continue;
         }
         if (raw.find("; CP EMPTY GRID START") != std::string::npos && !stack.empty())
-            stack.back().has_solid_grid = true;
+            stack.back().solid_grid = true;
 
         const std::string code = raw.substr(0, raw.find(';'));
-        if (code.size() < 2 || code[0] != 'G' ||
-            (code[1] != '0' && code[1] != '1' && code[1] != '2' && code[1] != '3') ||
-            (code.size() > 2 && code[2] != ' '))
+        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
             continue;
-
-        bool xy = false;
-        bool has_f = false;
+        bool xy = false, has_f = false;
         double feedrate = 0.;
         std::istringstream words(code.substr(2));
-        std::string word;
-        while (words >> word) {
-            if (word.empty())
-                continue;
-            if (word.front() == 'X' || word.front() == 'Y')
-                xy = true;
-            if (word.front() == 'F') {
-                try {
-                    feedrate = std::stod(word.substr(1));
-                    has_f = true;
-                } catch (...) { }
+        for (std::string word; words >> word;) {
+            xy = xy || word.front() == 'X' || word.front() == 'Y';
+            if (word.front() == 'F' && word.size() > 1) {
+                feedrate = std::stod(word.substr(1));
+                has_f = true;
             }
         }
-
         if (!stack.empty()) {
             Bracket &bracket = stack.back();
             if (xy) {
                 ++audit.xy_moves;
-                if (!bracket.named_feedrate && !has_f)
+                if (!bracket.named && !has_f)
                     audit.moves_before_feedrate.push_back(raw);
-                if (!bracket.first_xy_seen && has_f &&
-                    std::abs(feedrate - bracket.incoming_feedrate) < .01)
+                if (!bracket.first_xy_seen && has_f && std::abs(feedrate - bracket.incoming) < .01)
                     ++audit.equal_first_feedrates;
                 bracket.first_xy_seen = true;
             }
-            if (has_f)
-                bracket.named_feedrate = true;
+            bracket.named = bracket.named || has_f;
         }
         if (has_f)
             modal_feedrate = feedrate;
@@ -115,14 +98,11 @@ TEST_CASE("Mixed tower blocks name a feedrate before moving the nozzle",
     const CadenceTest::Facts facts = CadenceTest::slice(scene);
     INFO(facts.refusal.string);
     REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
     REQUIRE_FALSE(facts.emitted.tool_changes.empty());
 
     const BracketAudit audit = audit_tower_brackets(facts.gcode);
-    CAPTURE(audit.brackets, audit.xy_moves, audit.solid_grids,
-            audit.equal_first_feedrates, audit.moves_before_feedrate.size());
-    for (size_t i = 0; i < audit.moves_before_feedrate.size() && i < 3; ++i)
-        INFO(audit.moves_before_feedrate[i]);
+    CAPTURE(audit.brackets, audit.xy_moves, audit.solid_grids, audit.equal_first_feedrates);
+    INFO((audit.moves_before_feedrate.empty() ? std::string() : audit.moves_before_feedrate.front()));
     REQUIRE(audit.brackets > 4);
     REQUIRE(audit.xy_moves > 20);
     REQUIRE(audit.solid_grids > 0);

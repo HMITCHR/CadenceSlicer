@@ -2,12 +2,19 @@
 
 #include "slic3r/GUI/CadencePalette.hpp"
 #include <algorithm>
+#include <wx/colour.h>
+#include <wx/chartype.h>
+#include <vector>
+#include <cmath>
+#include <utility>
 #include <wx/dcbuffer.h>
+#include <wx/event.h>
+#include <wx/string.h>
+#include <wx/gdicmn.h>
 
 #include "RammingChart.hpp"
-#include "GUI.hpp"
-#include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "Widgets/StateColor.hpp"
 
 wxDEFINE_EVENT(EVT_WIPE_TOWER_CHART_CHANGED, wxCommandEvent);
 

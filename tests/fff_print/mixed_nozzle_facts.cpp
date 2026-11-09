@@ -50,7 +50,7 @@ void validate_region_list(const std::string &value, bool &malformed)
     size_t count = 0;
     while (std::getline(stream, item, ',')) {
         try {
-            std::stoul(item);
+            (void)std::stoul(item);
             ++count;
         } catch (...) {
             malformed = true;
@@ -98,10 +98,8 @@ void parse_plan_records(const std::string &gcode, EmittedFacts &facts)
                     facts.plan_malformed = true;
                     continue;
                 }
-                facts.plan_grids.push_back({size_t(std::stoul(fields["region"])), unsigned(std::stoul(fields["tool"])),
-                                            std::stod(fields["nozzle"]), std::stod(fields["cadence"]),
-                                            size_t(std::stoul(fields["cells"])), std::stod(fields["top_z"]),
-                                            fields.count("phase") ? fields["phase"] : std::string()});
+                facts.plan_grids.push_back({unsigned(std::stoul(fields["tool"])), std::stod(fields["cadence"]),
+                                            size_t(std::stoul(fields["cells"])), std::stod(fields["top_z"])});
             } else if (line.rfind(cell_prefix, 0) == 0) {
                 std::map<std::string, std::string> fields = plan_fields(line.substr(cell_prefix.size()), facts.plan_malformed);
                 if (! plan_fields_match(fields, {"region", "tool", "z_lo", "z_hi", "height"}, {}))
@@ -123,8 +121,7 @@ void parse_plan_records(const std::string &gcode, EmittedFacts &facts)
                     facts.plan_malformed = true;
                     continue;
                 }
-                facts.plan_toolchanges_total    = std::stoi(fields["total"]);
-                facts.plan_toolchanges_per_band = std::stoi(fields["per_band"]);
+                facts.plan_toolchanges_total = std::stoi(fields["total"]);
             } else if (line.rfind(support_prefix, 0) == 0) {
                 // A Body plan block carries at most one support record, emitted only when the
                 // project has support.
@@ -133,8 +130,8 @@ void parse_plan_records(const std::string &gcode, EmittedFacts &facts)
                     facts.plan_malformed = true;
                     continue;
                 }
-                facts.support = EmittedPlanSupport{unsigned(std::stoul(fields["base_tool"])), std::stod(fields["base_height"]),
-                                                   unsigned(std::stoul(fields["interface_tool"])), std::stod(fields["interface_height"])};
+                facts.support = EmittedPlanSupport{unsigned(std::stoul(fields["base_tool"])),
+                                                   unsigned(std::stoul(fields["interface_tool"]))};
             } else if (line.rfind(band_prefix, 0) == 0) {
                 // The Feature plan block carries a band record with optional vertical bounds.
                 std::map<std::string, std::string> fields = plan_fields(line.substr(band_prefix.size()), facts.plan_malformed);
@@ -208,7 +205,6 @@ EmittedFacts extract_emitted_facts(const std::string &gcode)
             fact.move_count = 1;
             fact.z = move.position.z();
             fact.min_x = fact.max_x = move.position.x();
-            fact.min_y = fact.max_y = move.position.y();
             facts.role_facts.push_back(fact);
             bucket_index.emplace(key, facts.role_facts.size() - 1);
         } else {
@@ -216,8 +212,6 @@ EmittedFacts extract_emitted_facts(const std::string &gcode)
             ++fact.move_count;
             fact.min_x = std::min(fact.min_x, move.position.x());
             fact.max_x = std::max(fact.max_x, move.position.x());
-            fact.min_y = std::min(fact.min_y, move.position.y());
-            fact.max_y = std::max(fact.max_y, move.position.y());
         }
 
         if (have_prev_extrude && move.physical_tool_id != prev_physical_tool)

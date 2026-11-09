@@ -1,8 +1,14 @@
 #include <unistd.h>
 #include <sys/sysctl.h>
+#import <Cocoa/Cocoa.h>
 #import <wx/osx/cocoa/dataview.h>
 #import <QuartzCore/QuartzCore.h>
 #import "GUI_Utils.hpp"
+#include "libslic3r/Color.hpp"
+#include <dispatch/dispatch.h>
+#include <functional>
+#include <optional>
+#include <utility>
 
 namespace Slic3r {
 namespace GUI {
@@ -22,66 +28,41 @@ void staticbox_remove_margin(wxStaticBox* sb) {
     [nativeBox setBorderWidth:0];
 }
 
-std::string staticbox_content_state(wxStaticBox* sb) {
-    NSBox* nativeBox = (NSBox*)sb->GetHandle();
-    NSView* content = nativeBox == nil ? nil : [nativeBox contentView];
-    if (content == nil)
-        return "content=none";
-    const NSRect frame = [content frame];
-    const NSRect bounds = [nativeBox bounds];
-    // Native state wx does not see: alpha and layer flags of the box and its content view, whether
-    // the content view is still the box's subview, and how many row views are hidden natively, faded
-    // out, or outside the content view's bounds.
-    const NSRect content_bounds = [content bounds];
-    unsigned long hidden_rows = 0, outside_rows = 0, faded_rows = 0;
-    for (NSView* row in [content subviews]) {
-        if ([row isHidden]) ++hidden_rows;
-        if ([row alphaValue] < 0.01) ++faded_rows;
-        if (!NSIntersectsRect([row frame], content_bounds)) ++outside_rows;
-    }
-    CALayer* box_layer = [nativeBox layer];
-    CALayer* content_layer = [content layer];
-    char text[400];
-    snprintf(text, sizeof(text),
-             "content=hidden:%d@%.0f,%.0f,%.0f,%.0f box_bounds=%.0f,%.0f subviews=%lu"
-             " native_rows=hidden:%lu,outside:%lu,faded:%lu content_parent=%d box_hidden=%d/%d"
-             " alpha=%.2f/%.2f layers=%d:%d:%.2f/%d:%d:%.2f in_window=%d",
-             int([content isHidden]), frame.origin.x, frame.origin.y, frame.size.width, frame.size.height,
-             bounds.size.width, bounds.size.height, (unsigned long)[[content subviews] count],
-             hidden_rows, outside_rows, faded_rows, int([content superview] == nativeBox),
-             int([nativeBox isHidden]), int([nativeBox isHiddenOrHasHiddenAncestor]),
-             double([nativeBox alphaValue]), double([content alphaValue]),
-             int(box_layer != nil), int(box_layer != nil && [box_layer isHidden]),
-             box_layer != nil ? double([box_layer opacity]) : -1.,
-             int(content_layer != nil), int(content_layer != nil && [content_layer isHidden]),
-             content_layer != nil ? double([content_layer opacity]) : -1.,
-             int([nativeBox window] != nil));
-    return text;
+// wxOSX SetShape only clears the window background; it cannot clip to a region. Clipping the
+// window's view layer to a rounded rect is what actually rounds the opaque webview inside.
+void set_window_corner_radius(wxWindow* win, int radius) {
+    if (!win)
+        return;
+    NSView* view = (NSView*)win->GetHandle();
+    if (!view)
+        return;
+    NSWindow* window = [view window];
+    [window setOpaque:NO];
+    [window setBackgroundColor:[NSColor clearColor]];
+    [view setWantsLayer:YES];
+    [[view layer] setCornerRadius:radius];
+    [[view layer] setMasksToBounds:YES];
 }
 
-bool staticbox_repair_content(wxStaticBox* sb) {
-    NSBox* nativeBox = (NSBox*)sb->GetHandle();
-    NSView* content = nativeBox == nil ? nil : [nativeBox contentView];
-    if (content == nil)
-        return false;
-    bool repaired = false;
-    if ([content isHidden]) {
-        [content setHidden:NO];
-        repaired = true;
-    }
-    const NSRect bounds = [nativeBox bounds];
-    const NSRect frame = [content frame];
-    // Only a collapsed content view is touched; a normal one is left exactly where AppKit tiled it.
-    if (bounds.size.width >= 1. && bounds.size.height >= 1. &&
-        (frame.size.width < 1. || frame.size.height < 1.)) {
-        [content setFrame:bounds];
-        repaired = true;
-    }
-    if (repaired) {
-        [content setNeedsDisplay:YES];
-        [nativeBox setNeedsDisplay:YES];
-    }
-    return repaired;
+void sample_screen_color(std::function<void(std::optional<ColorRGBA>)> done)
+{
+    // Owned until handler runs; handler is always called, with nil on cancel.
+    __block NSColorSampler* sampler = [[NSColorSampler alloc] init];
+    __block auto callback = std::move(done);
+    [sampler showSamplerWithSelectionHandler:^(NSColor* picked) {
+        NSColor* srgb = picked ? [picked colorUsingColorSpace:[NSColorSpace sRGBColorSpace]] : nil;
+        std::optional<ColorRGBA> color;
+        if (srgb)
+            color = ColorRGBA(static_cast<float>([srgb redComponent]), static_cast<float>([srgb greenComponent]),
+                              static_cast<float>([srgb blueComponent]), 1.f);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [sampler release];
+            sampler = nil;
+            auto finished = std::move(callback);
+            callback = nullptr;
+            finished(color);
+        });
+    }];
 }
 
 bool is_debugger_present()

@@ -4,8 +4,10 @@
 #include "wizard_apply_support.hpp"
 #include "libslic3r/MixedNozzleBinding.hpp"
 #include "libslic3r/MixedNozzleRanking.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "slic3r/GUI/MixedNozzleRankingController.hpp"
 
+#include <clocale>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -29,6 +31,24 @@ void add_rank_object(WizardProject &project, MixedNozzleSlicingMode mode)
                            Vec2d(55., 55.));
 }
 
+SetupChoice rank_choice(MixedNozzleSlicingMode mode, int ratio)
+{
+    SetupChoice choice;
+    choice.mode = mode;
+    choice.fine_height = 0.10;
+    choice.ratio = ratio;
+    if (mode == MixedNozzleSlicingMode::BodySplit)
+        choice.joining = JoiningChoice::Off;
+    return choice;
+}
+
+MixedNozzleSliceTime time_of(const MixedNozzleRankingSlice &slice)
+{
+    MixedNozzleRankingCancel cancel;
+    return mixed_nozzle_slice_time(*slice.model, slice.config, slice.is_bbl_printer, slice.plate_origin, {}, cancel,
+                                   slice.plate_index);
+}
+
 struct RankedPrint {
     std::shared_ptr<Model> model;
     DynamicPrintConfig config;
@@ -39,13 +59,7 @@ RankedPrint ranked_print(MixedNozzleSlicingMode mode, int ratio, double coarse_c
 {
     WizardProject project(h2d_02_06_spec());
     add_rank_object(project, mode);
-    SetupChoice choice;
-    choice.mode = mode;
-    choice.fine_height = 0.10;
-    choice.ratio = ratio;
-    if (mode == MixedNozzleSlicingMode::BodySplit)
-        choice.joining = JoiningChoice::Off;
-    const WizardApplyResult applied = run_wizard_setup(project, choice);
+    const WizardApplyResult applied = run_wizard_setup(project, rank_choice(mode, ratio));
     REQUIRE(applied.applied);
     RankedPrint result;
     result.model = std::make_shared<Model>(project.model);
@@ -116,6 +130,14 @@ TEST_CASE("Real Feature and Body ranking slices order eligible wizard choices by
         REQUIRE_FALSE(exported.gcode.empty());
         CAPTURE(long_cadence.time.seconds, exported.seconds);
         CHECK(long_cadence.time.seconds == Catch::Approx(exported.seconds).epsilon(0.001));
+
+        // A binding coarse material speed cap slows the estimate and gives the slice another ranking key.
+        const RankedPrint capped = ranked_print(mode, 3, 0.8);
+        CHECK(capped.time.seconds > long_cadence.time.seconds);
+        CHECK(capped.time.switches == long_cadence.time.switches);
+        CHECK(capped.time.tower_mm3 > 0.);
+        CHECK(mixed_nozzle_ranking_key(0, *capped.model, capped.config) !=
+              mixed_nozzle_ranking_key(0, *long_cadence.model, long_cadence.config));
     }
 
     FullPrintConfig effective;
@@ -136,20 +158,47 @@ TEST_CASE("Real Feature and Body ranking slices order eligible wizard choices by
         CHECK(wizard_seconds_tie(page.rows.front().estimate->seconds,
                                  page.rows.back().estimate->seconds));
     }
-}
 
-TEST_CASE("A binding coarse material speed cap changes the full-slice ranking estimate",
-          "[TestRebuild][Ranking]")
-{
-    const RankedPrint normal = ranked_print(MixedNozzleSlicingMode::BodySplit, 3, 30.);
-    const RankedPrint capped = ranked_print(MixedNozzleSlicingMode::BodySplit, 3, 0.8);
-    REQUIRE(normal.time.switches > 0);
-    REQUIRE(normal.time.tower_mm3 > 0.);
-    CHECK(capped.time.seconds > normal.time.seconds);
-    CHECK(capped.time.switches == normal.time.switches);
-    CHECK(capped.time.tower_mm3 > 0.);
-    CHECK(mixed_nozzle_ranking_key(0, *capped.model, capped.config) !=
-          mixed_nozzle_ranking_key(0, *normal.model, normal.config));
+    // An empty plate is refused before the export reads its first object, for the row and the one-nozzle baseline.
+    for (const bool baseline : {false, true}) {
+        CAPTURE(baseline);
+        Model empty(*short_cadence.model);
+        empty.clear_objects();
+        DynamicPrintConfig config = short_cadence.config;
+        if (baseline)
+            mixed_nozzle_single_nozzle_baseline(empty, config, 1, 0.10);
+        MixedNozzleRankingCancel cancel;
+        CHECK(mixed_nozzle_slice_time(empty, config, true, Vec3d::Zero(), {}, cancel).status ==
+              MixedNozzleSliceTimeStatus::Refused);
+    }
+
+    // The same object at 100% density: Feature Split leaves the coarse nozzle nothing (no change, all solid), Body
+    // Split refuses the row, and one nozzle only still gets a time.
+    WizardProject solid(h2d_02_06_spec());
+    add_rank_object(solid, mode);
+    solid.model.objects.back()->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(100));
+    const WizardSetupStage stage = build_wizard_setup_stage(solid, rank_choice(mode, 2));
+    const MixedNozzleRankingSlice solid_row = wizard_candidate_staged_slice(stage.draft, stage.candidate, stage.body,
+                                                                            solid.owners);
+    if (mode == MixedNozzleSlicingMode::FeatureSplit) {
+        INFO(solid_row.diagnostic);
+        REQUIRE(solid_row.diagnostic.empty());
+        REQUIRE(solid_row.model);
+        const MixedNozzleSliceTime solid_time = time_of(solid_row);
+        INFO(solid_time.diagnostic);
+        REQUIRE(solid_time.status == MixedNozzleSliceTimeStatus::Estimated);
+        CHECK(solid_time.switches == 0);
+        CHECK(solid_time.all_solid);
+    } else
+        CHECK_FALSE(solid_row.diagnostic.empty());
+    const MixedNozzleRankingSlice one =
+        wizard_baseline_ranking_slice(solid_row, stage.draft.fine_logical_filament, 0.10);
+    INFO(one.diagnostic);
+    REQUIRE(one.diagnostic.empty());
+    REQUIRE(one.model);
+    const MixedNozzleSliceTime one_time = time_of(one);
+    CHECK(one_time.status == MixedNozzleSliceTimeStatus::Estimated);
+    CHECK(one_time.switches == 0);
 }
 
 TEST_CASE("A changed configuration and Turn off clear an old visible ranking decision",
@@ -212,44 +261,44 @@ TEST_CASE("A changed configuration and Turn off clear an old visible ranking dec
     CHECK(mixed_nozzle_ranking_key(0, *first.model, live_config) != launched.front().slice.key);
 }
 
-TEST_CASE("A ranking slice of an empty plate is refused before it reaches the G-code export", "[TestRebuild][Ranking][EmptyPlate]")
+namespace {
+
+// The C locale a Turkish regional format gives the app, for the life of the object. Stays "C" when
+// this machine has no Turkish locale.
+struct TurkishLocale
 {
-    const MixedNozzleSlicingMode mode = GENERATE(MixedNozzleSlicingMode::FeatureSplit,
-                                                 MixedNozzleSlicingMode::BodySplit);
-    WizardProject project(h2d_02_06_spec());
-    add_rank_object(project, mode);
-    SetupChoice choice;
-    choice.mode = mode;
-    choice.fine_height = 0.10;
-    choice.ratio = 2;
-    if (mode == MixedNozzleSlicingMode::BodySplit)
-        choice.joining = JoiningChoice::Off;
-    REQUIRE(run_wizard_setup(project, choice).applied);
-    DynamicPrintConfig config = wizard_plate_effective_config(project.bundle, project.plate);
-    config.apply(*project.plate.config());
-    for (int fine_filament : {0, 1}) {
-        auto empty = std::make_shared<Model>(project.model);
-        empty->clear_objects();
-        DynamicPrintConfig row = config;
-        if (fine_filament == 1)
-            mixed_nozzle_single_nozzle_baseline(*empty, row, 1, 0.10);
-        MixedNozzleRankingCancel cancel;
-        const MixedNozzleSliceTime time = mixed_nozzle_slice_time(*empty, row, true, Vec3d::Zero(), {}, cancel);
-        CAPTURE(fine_filament, time.diagnostic, int(time.status));
-        // Stopped before the export, which reads the first object (address 0 on Windows, a crash).
-        CHECK(time.status == MixedNozzleSliceTimeStatus::Refused);
-        CHECK(time.diagnostic == "Add a model to the plate to see print times.");
+    std::string previous = std::setlocale(LC_ALL, nullptr);
+    TurkishLocale()
+    {
+        for (const char *name : {"tr_TR.UTF-8", "tr_TR", "Turkish_Turkey.1254", "tr-TR"})
+            if (std::setlocale(LC_ALL, name) != nullptr)
+                return;
     }
-}
+    ~TurkishLocale() { std::setlocale(LC_ALL, previous.c_str()); }
+};
+
+} // namespace
 
 TEST_CASE("Feature Split setup on 0.4 / 0.8 applies when the project's layer limits do not fit an MN preset",
           "[TestRebuild][BugGuard][ProcessBasis]")
 {
-    // A Windows user's 0.4 / 0.8 project: step 3 named an MN preset that its compatibility check
-    // rejects (the 0.4 nozzle carried the 0.8 profile's 0.16 minimum), so setup staging refused
-    // every row and Apply. Setup now keeps the current process for such a preset.
-    const std::string start = GENERATE(std::string("0.4"), std::string("0.8"));
-    const bool stale = GENERATE(false, true);
+    // A 0.4 / 0.8 project whose 0.4 nozzle carries the 0.8 profile's 0.16 minimum (stale) does not fit any
+    // MN preset, so setup keeps the current process. The plate is locked, which only keeps it out of
+    // Arrange, and the process has 5 wall loops.
+    struct Variant {
+        const char *start;
+        bool stale;
+        bool turkish;
+        bool keep_process;
+    };
+    const Variant variant = GENERATE(Variant{"0.4", false, false, false}, Variant{"0.8", false, true, false},
+                                     Variant{"0.4", true, false, false}, Variant{"0.8", true, true, false},
+                                     Variant{"0.4", false, false, true});
+    const std::string start = variant.start;
+    CAPTURE(start, variant.stale, variant.turkish, variant.keep_process);
+    std::optional<TurkishLocale> locale;
+    if (variant.turkish)
+        locale.emplace();
     ProfileSpec spec;
     spec.vendor = "BBL";
     spec.printer = start == "0.4" ? "Bambu Lab H2D 0.4 nozzle" : "Bambu Lab H2D 0.8 nozzle";
@@ -258,21 +307,110 @@ TEST_CASE("Feature Split setup on 0.4 / 0.8 applies when the project's layer lim
     spec.materials = start == "0.4" ? std::vector<std::string>{m4, m4} : std::vector<std::string>{m8, m8};
     spec.also_visible_materials = {start == "0.4" ? m8 : m4};
     spec.nozzles = {0.4, 0.8};
-    spec.min_heights = stale ? std::vector<double>{0.16, 0.16} : std::vector<double>{0.08, 0.16};
+    spec.min_heights = variant.stale ? std::vector<double>{0.16, 0.16} : std::vector<double>{0.08, 0.16};
     spec.max_heights = {0.28, 0.56};
     spec.tower = Vec2d(260., 120.);
     WizardProject project(spec);
     add_rank_object(project, MixedNozzleSlicingMode::FeatureSplit);
+    project.plate.lock(true);
+    project.bundle.prints.get_edited_preset().config.set_key_value("wall_loops", new ConfigOptionInt(5));
     SetupChoice choice;
     choice.mode = MixedNozzleSlicingMode::FeatureSplit;
+    choice.fine_slot = 1;
+    choice.coarse_slot = 0;
     choice.fine_height = 0.20;
     choice.ratio = 2;
-    CAPTURE(start, stale);
-    CHECK(run_wizard_setup(project, choice).applied);
-    const std::string process = project.bundle.prints.get_edited_preset().name;
-    CAPTURE(process);
-    if (stale)
-        CHECK(process == spec.process);
-    else
-        CHECK(process.rfind("MN Feature 0.4-0.8 ", 0) == 0);
+    choice.scope = WizardScopeKind::ProjectDefault;
+    choice.keep_current_process = variant.keep_process;
+
+    // Step 3's row slices, and Apply goes through.
+    const WizardSetupStage stage = build_wizard_setup_stage(project, choice);
+    const MixedNozzleRankingSlice row = wizard_candidate_staged_slice(stage.draft, stage.candidate, stage.body,
+                                                                      project.owners);
+    CHECK(row.diagnostic.empty());
+    CHECK(row.model != nullptr);
+    REQUIRE(run_wizard_setup(project, choice).applied);
+    CHECK(project.plate.is_locked());
+    const auto pair = project.plate.get_effective_feature_split_filaments(project.bundle.project_config, 2);
+    REQUIRE(pair);
+    CHECK(pair->first == 2);
+    CHECK(pair->second == 1);
+    const Preset &process = project.bundle.prints.get_edited_preset();
+    CAPTURE(process.name);
+    if (variant.keep_process)
+        CHECK(process.config.opt_int("wall_loops") == 5);
+    else if (variant.stale)
+        CHECK(process.name == spec.process);
+    else {
+        // Setup's MN preset replaces the project's wall loops with its own.
+        CHECK(process.name.rfind("MN Feature 0.4-0.8 ", 0) == 0);
+        CHECK(process.config.opt_int("wall_loops") < 5);
+    }
+}
+
+namespace {
+
+// A two-color plate on a printer with two fine tools and one coarse tool (filament i on tool i), Feature Split
+// with the sparse infill on the coarse tool's filament, as a ranking row hands it to the baseline.
+MixedNozzleRankingSlice two_color_tool_changer_row(const std::vector<double> &pair)
+{
+    MixedNozzleRankingSlice row;
+    row.model = std::make_shared<Model>();
+    ModelObject *object = row.model->add_object();
+    for (int filament : {1, 2}) {
+        ModelVolume *volume = object->add_volume(make_cube(10., 10., 5.), ModelVolumeType::MODEL_PART, false);
+        volume->set_offset(Vec3d(12. * filament, 0., 0.));
+        volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
+    }
+    object->add_instance();
+    row.config = DynamicPrintConfig::full_print_config();
+    row.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{pair[0], pair[0], pair[1]});
+    row.config.set_key_value("filament_map", new ConfigOptionInts{1, 2, 3});
+    row.config.set_key_value("filament_colour", new ConfigOptionStrings{"#C0C0C0", "#20A040", "#C0C0C0"});
+    row.config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(3));
+    row.config.set_key_value("mixed_nozzle_slicing_mode",
+                             new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::FeatureSplit));
+    return row;
+}
+
+} // namespace
+
+// Colors are the parts' slots and the painted colors; the coarse tool's infill slot is not a model color. More
+// colors than tools on a printer that prints each material on its own tool asks first, and the comparison
+// keeps each color on its own tool unless that setting is off.
+TEST_CASE("Setup counts the plate's colors, asks when there are more than tools, and compares with them kept",
+          "[TestRebuild][Ranking][ColorsTools]")
+{
+    const auto pair = GENERATE(std::vector<double>{.2, .4}, std::vector<double>{.2, .6}, std::vector<double>{.4, .8});
+    CAPTURE(pair);
+    MixedNozzleRankingSlice row = two_color_tool_changer_row(pair);
+    std::vector<ModelObject *> objects(row.model->objects.begin(), row.model->objects.end());
+    const std::size_t tools = row.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+    CHECK(mixed_nozzle_model_color_slots(objects) == std::vector<std::size_t>{0, 1});
+    CHECK(wizard_colors_tools_notice(2, tools, true).empty());
+
+    // The one-nozzle comparison: each color on its own tool by default, everything on the fine one when off.
+    const double fine = pair[0] < .3 ? .08 : .12;
+    const MixedNozzleRankingSlice kept =
+        wizard_baseline_ranking_slice(two_color_tool_changer_row(pair), std::size_t(0), fine);
+    REQUIRE(kept.model);
+    CHECK(kept.config.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 2, 3});
+    CHECK(kept.model->objects.front()->volumes[1]->config.opt_int("extruder") == 2);
+    const MixedNozzleRankingSlice plain =
+        wizard_baseline_ranking_slice(two_color_tool_changer_row(pair), std::size_t(0), fine, false);
+    REQUIRE(plain.model);
+    CHECK(plain.config.option<ConfigOptionInts>("filament_map")->values == std::vector<int>{1, 1, 1});
+    CHECK(plain.model->objects.front()->volumes[1]->config.opt_int("extruder") == 1);
+
+    // Paint colors 4 and 5 on the first part: four colors on three tools.
+    ModelVolume *part = objects.front()->volumes.front();
+    TriangleSelector selector(part->mesh());
+    selector.set_facet(0, EnforcerBlockerType(4));
+    selector.set_facet(1, EnforcerBlockerType(5));
+    REQUIRE(part->mmu_segmentation_facets.set(selector));
+    const std::vector<std::size_t> colors = mixed_nozzle_model_color_slots(objects);
+    CHECK(colors == std::vector<std::size_t>{0, 1, 3, 4});
+    CHECK_FALSE(wizard_colors_tools_notice(colors.size(), tools, true).empty());
+    // A printer whose nozzles each take several materials (two-nozzle Bambu printers) has nothing to ask.
+    CHECK(wizard_colors_tools_notice(colors.size(), 2, false).empty());
 }

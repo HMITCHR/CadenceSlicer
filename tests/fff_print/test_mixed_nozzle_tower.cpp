@@ -16,28 +16,10 @@ using namespace mixed_nozzle_fixtures;
 
 namespace {
 
-struct TowerBounds {
-    double min_x = std::numeric_limits<double>::max();
-    double min_y = std::numeric_limits<double>::max();
-    double max_x = std::numeric_limits<double>::lowest();
-    double max_y = std::numeric_limits<double>::lowest();
-    size_t roads = 0;
-
-    void add(const GCodeProcessorResult::MoveVertex &move) {
-        min_x = std::min(min_x, double(move.position.x()));
-        min_y = std::min(min_y, double(move.position.y()));
-        max_x = std::max(max_x, double(move.position.x()));
-        max_y = std::max(max_y, double(move.position.y()));
-        ++roads;
-    }
-    double width() const { return max_x - min_x; }
-    double depth() const { return max_y - min_y; }
-};
-
 struct TowerObservation {
     double top = 0.;
-    TowerBounds first;
-    TowerBounds next;
+    BoundingBoxf first; // the first tower layer
+    BoundingBoxf next;  // the next one
 };
 
 TowerObservation print_tower(double height, bool auto_brim)
@@ -50,7 +32,7 @@ TowerObservation print_tower(double height, bool auto_brim)
     scene.config.set_key_value("prime_tower_brim_width", new ConfigOptionFloat(auto_brim ? -1. : 0.));
     scene.config.set_key_value("initial_layer_speed", new ConfigOptionFloats{40., 50.});
     scene.config.set_key_value("first_layer_flow_ratio", new ConfigOptionFloat(1.));
-    scene.config.set_key_value("enable_arc_fitting", new ConfigOptionBool(true));
+    scene.config.set_key_value("enable_arc_fitting", new ConfigOptionEnum<ArcFittingMode>(ArcFittingMode::Enabled));
     scene.config.set_key_value("sparse_infill_pattern", new ConfigOptionEnum<InfillPattern>(ipGyroid));
     scene.config.set_key_value("change_filament_gcode", new ConfigOptionString(
         scene.config.opt_string("change_filament_gcode") + "\n;VG1 E4 F748\n;VG1 E4 F748\n;VG1 E4 F748\n"));
@@ -75,24 +57,8 @@ TowerObservation print_tower(double height, bool auto_brim)
     // GCodeProcessor's gcode_id is the exported one-based line number. The
     // nozzle-change bracket contains outgoing ramming, whose physical width
     // is deliberately wider than a regular tower road (0.2 -> 0.5 mm here).
-    std::vector<bool> ramming_line(1, false);
-    std::vector<size_t> ramming_block(1, 0);
-    size_t block_count = 0;
-    {
-        std::istringstream lines(facts.gcode);
-        std::string line;
-        bool ramming = false;
-        while (std::getline(lines, line)) {
-            if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0) {
-                ramming = true;
-                ++block_count;
-            }
-            ramming_line.push_back(ramming);
-            ramming_block.push_back(ramming ? block_count : 0);
-            if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0)
-                ramming = false;
-        }
-    }
+    const std::vector<size_t> ramming_block = bracketed_lines(facts.gcode, {"; NOZZLE_CHANGE_START"}, {"; NOZZLE_CHANGE_END"});
+    const size_t block_count = *std::max_element(ramming_block.begin(), ramming_block.end());
 
     struct RamDose { double volume = 0., largest_road = 0.; unsigned tool = 0; };
     std::vector<RamDose> doses(block_count + 1);
@@ -126,8 +92,8 @@ TowerObservation print_tower(double height, bool auto_brim)
         ++tool_roads[tool];
         const double nozzle = tool == 0 ? .20 : .60;
         const double max_h = tool == 0 ? .14 : .40;
-        REQUIRE(move.gcode_id < ramming_line.size());
-        const bool ramming = ramming_line[move.gcode_id];
+        REQUIRE(move.gcode_id < ramming_block.size());
+        const bool ramming = ramming_block[move.gcode_id] != 0;
         ramming_roads += ramming;
         ordinary_roads += !ramming;
         if (ramming) {
@@ -151,16 +117,16 @@ TowerObservation print_tower(double height, bool auto_brim)
             first_bad = diagnostic.str();
         }
         if (std::abs(z - first_z) < 1e-4) {
-            out.first.add(move);
+            out.first.merge(Vec2d(move.position.x(), move.position.y()));
             first_at_adhesion_speed += std::abs(move.feedrate - 15.f) < .1f ? 1 : 0;
         } else if (std::abs(z - next_z) < 1e-4)
-            out.next.add(move);
+            out.next.merge(Vec2d(move.position.x(), move.position.y()));
     }
     CAPTURE(height, first_z, next_z, out.top, tool_roads[0], tool_roads[1],
             first_at_adhesion_speed, ramming_roads, ordinary_roads, bad_flow, bad_envelope);
     INFO(first_bad);
-    REQUIRE(out.first.roads > 0);
-    REQUIRE(out.next.roads > 0);
+    REQUIRE(out.first.defined);
+    REQUIRE(out.next.defined);
     CHECK(tool_roads[0] > 0);
     CHECK(tool_roads[1] > 0);
     CHECK(first_at_adhesion_speed > 0);
@@ -222,14 +188,14 @@ TEST_CASE("Mixed-nozzle tower exports adhesion, tiered brim, and a tall pad floo
     const TowerObservation middle_without_brim = print_tower(34., false);
     const TowerObservation tall_tower = print_tower(60.4, false);
     const double short_extension = .5 * std::min(
-        short_tower.first.width() - short_without_brim.first.width(),
-        short_tower.first.depth() - short_without_brim.first.depth());
+        short_tower.first.size().x() - short_without_brim.first.size().x(),
+        short_tower.first.size().y() - short_without_brim.first.size().y());
     const double middle_extension = .5 * std::min(
-        middle_tower.first.width() - middle_without_brim.first.width(),
-        middle_tower.first.depth() - middle_without_brim.first.depth());
+        middle_tower.first.size().x() - middle_without_brim.first.size().x(),
+        middle_tower.first.size().y() - middle_without_brim.first.size().y());
     CAPTURE(short_tower.top, middle_tower.top, tall_tower.top,
             short_extension, middle_extension,
-            tall_tower.first.width(), tall_tower.first.depth());
+            tall_tower.first.size().x(), tall_tower.first.size().y());
     CHECK(short_tower.top < 20.);
     CHECK(middle_tower.top >= 20.);
     CHECK(middle_tower.top < 60.);
@@ -240,6 +206,68 @@ TEST_CASE("Mixed-nozzle tower exports adhesion, tiered brim, and a tall pad floo
     CHECK(std::abs(short_extension - 3.) < .8);
     CHECK(std::abs(middle_extension - 5.) < .8);
     CHECK(middle_extension > short_extension + 1.2);
-    CHECK(tall_tower.first.width() > 29.);
-    CHECK(tall_tower.first.depth() > 29.);
+    CHECK(tall_tower.first.size().x() > 29.);
+    CHECK(tall_tower.first.size().y() > 29.);
+}
+
+// The pre-slice estimate (Print::wipe_tower_data(n) before psWipeTower, the same
+// estimate_wipe_tower_footprint() the GUI and CLI placement use) is never smaller than the tower the
+// generator lays, so a placement the clamp accepts is not refused after slicing by #15532's
+// footprint check. P6 keeps Cadence's tall-tower floor in the estimate and takes its height at or
+// above the generator's: model height plus the raft levels, the raft contact gap and one layer.
+// AutoPad is off here: an AutoPad winner can be wider than the estimate by design (P8 E4).
+TEST_CASE("The tower footprint estimate is never below the generated tower, with and without a raft",
+          "[TestRebuild][TowerDurability][Rebase25]")
+{
+    const int raft_layers = GENERATE(0, 3);
+    CadenceTest::Scene scene;
+    scene.config = feature_split_tower_config(.20, .60, false);
+    scene.config.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(wtwRib));
+    scene.config.set_key_value("mixed_nozzle_auto_pad", new ConfigOptionBool(false));
+    scene.config.set_key_value("prime_tower_brim_width", new ConfigOptionFloat(0.));
+    scene.config.set_key_value("raft_layers", new ConfigOptionInt(raft_layers));
+    if (raft_layers > 0) {
+        // The raft on the fine nozzle's filament, so Feature Split admits it (SRL-F14/F16 concern a
+        // base on the coarse nozzle).
+        // Unsure (P14): if admission still refuses this raft, the refusal below says which rule.
+        scene.config.set_key_value("support_filament", new ConfigOptionInt(1));
+        scene.config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
+    }
+    apply_tower_exit_retraction(scene.config);
+    fill_per_filament_values(scene.config);
+    if (scene.config.opt_string("machine_start_gcode").find("M1020") == std::string::npos)
+        scene.config.set_key_value("machine_start_gcode",
+                                   new ConfigOptionString(scene.config.opt_string("machine_start_gcode") + "\nM1020 S[initial_extruder]\n"));
+
+    // Tall enough that the floor, not the purge rows, sizes the tower (the 60.4 mm tower of the
+    // test above is over 29 mm square).
+    const double height = 60.4;
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    init_feature_flow_fixture(model, print, scene.config, height, 60.);
+    print.set_status_silent();
+    const StringObjectException refusal = print.validate();
+    CAPTURE(raft_layers);
+    INFO(refusal.string);
+    REQUIRE(refusal.string.empty());
+
+    const WipeTowerData &estimated = print.wipe_tower_data(print.extruders(true).size());
+    const double estimated_width = estimated.width, estimated_depth = estimated.depth;
+    REQUIRE(estimated_depth > 0.);
+
+    print.process();
+    REQUIRE(print.has_wipe_tower());
+    const WipeTowerData &generated = print.wipe_tower_data();
+    const double generated_width = generated.width, generated_depth = generated.depth;
+    CAPTURE(estimated_width, estimated_depth, generated_width, generated_depth);
+    REQUIRE(generated_depth > 0.);
+    // The floor itself: a 60 mm tower is held to more than 29 mm on both sides.
+    // Unsure (P14): the test above measures this with AutoPad on; the floor is taken to be
+    // independent of AutoPad (WipeTower::plan_tower_new(), tower_footprint_floor()).
+    CHECK(generated_width > 29.);
+    CHECK(generated_depth > 29.);
+    // Never below the generator, to within float rounding of the two paths.
+    CHECK(estimated_width + 1e-3 >= generated_width);
+    CHECK(estimated_depth + 1e-3 >= generated_depth);
 }

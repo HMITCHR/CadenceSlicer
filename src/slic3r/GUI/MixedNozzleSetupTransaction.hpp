@@ -136,6 +136,30 @@ inline MixedNozzleTowerPolicyRequest resolve_mixed_nozzle_setup_tower_usage(
     return policy;
 }
 
+// The prime tower switches setup turns off because the modes refuse them, with the value it writes
+// (MixedNozzleWizardModel.cpp wizard_process_fixes, applied in MixedNozzleWizardTransaction.cpp).
+// Each one still at that value goes back to the stored preset's value; a switch the user set since,
+// or one the preset already has at that value, is left alone.
+inline void restore_mixed_nozzle_tower_switches(DynamicPrintConfig &process, DynamicPrintConfig &printer,
+                                                const Preset *stored_process, const Preset *stored_printer)
+{
+    const auto restore = [](DynamicPrintConfig &target, const Preset *stored, const char *key, const ConfigOption &written) {
+        const ConfigOption *current = target.option(key);
+        const ConfigOption *original = stored != nullptr ? stored->config.option(key) : nullptr;
+        if (current != nullptr && original != nullptr && current->type() == written.type() && *current == written &&
+            !(*original == *current))
+            target.set_key_value(key, original->clone());
+    };
+    for (const char *key : {"enable_tower_interface_features", "prime_tower_flat_ironing", "ooze_prevention",
+                            "single_extruder_multi_material_priming"})
+        restore(process, stored_process, key, ConfigOptionBool(false));
+    restore(process, stored_process, "wipe_tower_rotation_angle", ConfigOptionFloat(0.));
+    restore(process, stored_process, "wipe_tower_filament", ConfigOptionInt(0));
+    for (const char *key : {"purge_in_prime_tower", "enable_filament_ramming"})
+        restore(printer, stored_printer, key, ConfigOptionBool(false));
+    restore(printer, stored_printer, "wipe_tower_type", ConfigOptionEnum<WipeTowerType>(WipeTowerType::Type1));
+}
+
 inline MixedNozzleSetupPlan stage_mixed_nozzle_setup(
     const PresetBundle &live_bundle, const std::vector<PartPlate *> &plates,
     const MixedNozzleSetupRequest &request, PartPlate* current_plate = nullptr)
@@ -295,6 +319,14 @@ inline MixedNozzleSetupPlan stage_mixed_nozzle_setup(
             policy.consuming_plate_ids.empty() && !stock_offers_no_sparse &&
             plan.after.process_config.opt_bool(MIXED_NOZZLE_TOWER_NO_SPARSE_KEY))
             plan.after.process_config.set_key_value(MIXED_NOZZLE_TOWER_NO_SPARSE_KEY, new ConfigOptionBool(false));
+        // Setup also turns off the tower switches the modes refuse (wizard_process_fixes), outside the
+        // ledger. Once no plate uses Cadence, each one still at the value setup wrote goes back to the
+        // selected preset's own value, so Off prints the preset's stock tower.
+        if (request.mode == MixedNozzleSlicingMode::Off && !evaluation.tower_required &&
+            policy.consuming_plate_ids.empty())
+            restore_mixed_nozzle_tower_switches(plan.after.process_config, plan.after.printer_config,
+                                                staged.prints.find_preset(plan.after.process_name, false, true),
+                                                staged.printers.find_preset(plan.after.printer_name, false, true));
     }
     if (request.resolved_process_name || request.resolve_default_process)
         plan.proposed_project_config.erase("mixed_nozzle_coarse_layer_height");

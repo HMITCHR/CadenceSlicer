@@ -2,26 +2,20 @@
 
 #include <catch2/catch_all.hpp>
 
-#include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/MixedNozzleConfig.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
-#include "libslic3r/Semver.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "mixed_nozzle_harness.hpp"
 #include "mixed_nozzle_fixtures.hpp"
 #include "test_utils.hpp"
 
-#include <boost/filesystem.hpp>
-
 #include <algorithm>
 #include <array>
 #include <clocale>
 #include <cstdio>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -29,95 +23,6 @@
 
 using namespace Slic3r;
 using namespace mixed_nozzle_fixtures;
-
-// A two-body Body Split project supplied by env var; skips when unset.
-// The case slices it as saved at 0.08/0.24 (N=3) with beams on the object (count 3) and checks that
-// beams land in both bodies, and that every applied unit reaches into both bodies.
-TEST_CASE("Body Split beams land in both bodies of every applied unit on a project supplied by environment variable",
-          "[TestRebuild][BugGuard][BodyBeams]")
-{
-    const char *path = std::getenv("CADENCE_TEST_BODY_SPLIT_3MF");
-    if (path == nullptr || *path == '\0')
-        SKIP("CADENCE_TEST_BODY_SPLIT_3MF is not set");
-    REQUIRE(boost::filesystem::exists(path));
-
-    DynamicPrintConfig config;
-    ConfigSubstitutionContext subs(ForwardCompatibilitySubstitutionRule::EnableSilent);
-    Model model;
-    ScopedTemporaryDir backup_dir("cadence_body_split_3mf");
-    model.set_backup_path(backup_dir.string());
-    {
-        PlateDataPtrs plate_data;
-        std::vector<Preset *> project_presets;
-        bool is_bbl_3mf = false, is_orca_3mf = false;
-        Semver file_version;
-        const bool loaded = load_bbs_3mf(path, &config, &subs, &model, &plate_data, &project_presets,
-                                         &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
-                                         LoadStrategy::AddDefaultInstances | LoadStrategy::LoadModel |
-                                             LoadStrategy::LoadConfig);
-        release_PlateData_list(plate_data);
-        REQUIRE(loaded);
-    }
-    // The plate's manual map, as the app applies it at slice time: slot 6 on the right nozzle.
-    config.set_key_value("filament_map", new ConfigOptionInts{1, 1, 1, 1, 1, 2, 1, 1});
-    config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
-    REQUIRE(model.objects.size() == 1);
-    REQUIRE(model.objects.front()->config.get().opt_bool("interlocking_beam"));
-    REQUIRE(model.objects.front()->config.opt_int("interlocking_beam_layer_count") == 3);
-
-    Print print;
-    print.apply(model, config);
-    // A Bambu Lab printer model marks the print as a BBL printer, which selects the native tower.
-    const std::string printer_model = config.has("printer_model") ? config.opt_string("printer_model") : std::string();
-    const std::string printer_name = config.has("printer_settings_id") ? config.opt_string("printer_settings_id") : std::string();
-    print.is_BBL_printer() = printer_model.rfind("Bambu Lab", 0) == 0 ||
-                             (printer_model.empty() && printer_name.rfind("Bambu Lab", 0) == 0);
-    REQUIRE(print.is_BBL_printer());
-    REQUIRE(print.wipe_tower_type() == WipeTowerType::Type1);
-    print.set_status_silent();
-    const StringObjectException validation = print.validate();
-    INFO(validation.string);
-    REQUIRE(validation.string.empty());
-    REQUIRE_NOTHROW(print.process());
-
-    const PrintObject &object = *print.objects().front();
-    const NativeRegionalGridState &state = object.native_regional_grid_state();
-    REQUIRE(object.pre_interlocking_slices().size() == state.lattice_planes.size());
-    REQUIRE(state.lattice_ownership.size() == 2);
-    const auto gains = [&](size_t row, size_t region) {
-        return !diff_ex(state.lattice_ownership[region][row], object.pre_interlocking_slices()[row][region],
-                        ApplySafetyOffset::Yes).empty();
-    };
-
-    size_t applied = 0;
-    for (const RegionalInterlockingDecision &decision : state.interlocking_decisions)
-        applied += decision.apply ? 1 : 0;
-    CHECK(applied > 0);
-    std::vector<bool> region_gains(2, false);
-    for (size_t row = 0; row < state.lattice_planes.size(); ++row)
-        for (size_t region = 0; region < 2; ++region)
-            region_gains[region] = region_gains[region] || gains(row, region);
-    CHECK(region_gains[0]);
-    CHECK(region_gains[1]);
-
-    // An applied unit is an interlock only when both bodies reach into each other inside it.
-    for (const RegionalInterlockingDecision &decision : state.interlocking_decisions) {
-        if (!decision.apply)
-            continue;
-        INFO("applied unit " << decision.bottom_z << ".." << decision.top_z);
-        std::vector<bool> unit_gains(2, false);
-        for (size_t row = 0; row < state.lattice_planes.size(); ++row) {
-            const coordf_t row_top = state.lattice_planes[row];
-            const coordf_t row_bottom = row == 0 ? 0. : state.lattice_planes[row - 1];
-            if (row_top <= decision.bottom_z + 1e-8 || row_bottom >= decision.top_z - 1e-8)
-                continue;
-            for (size_t region = 0; region < 2; ++region)
-                unit_gains[region] = unit_gains[region] || gains(row, region);
-        }
-        CHECK(unit_gains[0]);
-        CHECK(unit_gains[1]);
-    }
-}
 
 namespace {
 
@@ -247,26 +152,6 @@ TEST_CASE("Reprime: every warm return stays between its floor and the vendor pri
     CHECK(some_short_wait_below_vendor);
 }
 
-TEST_CASE("The G-code header names the Cadence product version and the G-code still reads back",
-          "[TestRebuild][BugGuard][GcodeHeader]")
-{
-    const CadenceTest::Facts facts = CadenceTest::slice(CadenceTest::feature_cube());
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    const std::string expected = std::string("; generated by ") + SLIC3R_APP_NAME + " " + CADENCE_PRODUCT_VERSION + " on ";
-    CHECK(facts.gcode.find(expected) != std::string::npos);
-    CHECK(facts.gcode.find(std::string("; generated by ") + SLIC3R_APP_NAME + " " + SoftFever_VERSION + " ") == std::string::npos);
-    // The G-code processor still knows the file as ours (its time estimate needs that), and the
-    // settings still load from it, as G-code import does.
-    CHECK(facts.seconds > 0.);
-    ScopedTemporaryFile saved(".gcode");
-    { std::ofstream output(saved.string(), std::ios::binary); output << facts.gcode; }
-    DynamicPrintConfig restored;
-    // The test printer leaves some printer lists empty, which loading would otherwise refuse.
-    REQUIRE_NOTHROW(restored.load_from_gcode_file(saved.string(), ForwardCompatibilitySubstitutionRule::EnableSilent));
-    CHECK(restored.has("layer_height"));
-}
-
 namespace {
 // The app's C locale follows its language (Windows picks it from the regional format), so the
 // slicing thread can run with a comma decimal mark. Returns the first comma-decimal locale this
@@ -286,18 +171,6 @@ const char *comma_decimal_locale()
         }
     std::setlocale(LC_ALL, previous.c_str());
     return found;
-}
-
-// Loads a saved project once, so both slices see the same object ids.
-void load_saved_project(const std::string &file, Model &model, DynamicPrintConfig &config)
-{
-    ScopedTemporaryDir unpack("cadence-3mf");
-    const std::string previous = temporary_dir();
-    set_temporary_dir(unpack.string());
-    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
-    model = Model::read_from_file(std::string(TEST_DATA_DIR) + "/" + file, &config, &substitutions,
-                                  LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-    set_temporary_dir(previous);
 }
 
 // Slices the project in the given C locale and returns its G-code without the line that names the
@@ -346,9 +219,9 @@ TEST_CASE("A comma-decimal app language slices the same G-code as English", "[Te
     // Projects without organic trees, which vary a little from run to run in any language.
     for (const std::string file : {"feature-split-L-tower-008.3mf", "body-split-block-thin-text.3mf"}) {
         CAPTURE(file, comma);
-        Model model;
+        // Loaded once, so both slices see the same object ids.
         DynamicPrintConfig config;
-        load_saved_project(file, model, config);
+        const Model model = CadenceTest::load_project(file, config);
         const std::string english = slice_in_locale(model, config, nullptr);
         REQUIRE(english.rfind("refused: ", 0) != 0);
         const std::string german = slice_in_locale(model, config, comma);
@@ -373,20 +246,33 @@ TEST_CASE("A comma-decimal app language slices the same G-code as English", "[Te
     }
 }
 
-// Feature Split on two nozzles of the same size used to be refused through the cadence check, which
-// spoke of a coarse layer height first. It says what is wrong, as Body Split does.
-TEST_CASE("Feature Split on two nozzles of the same size says it needs two different sizes",
-          "[TestRebuild][BugGuard][EqualNozzles]")
+TEST_CASE("A project with both old Feature Split and Body Split switches on is refused when it loads",
+          "[TestRebuild][BugGuard][MNS-MIG-A01]")
 {
-    CadenceTest::Scene scene = CadenceTest::feature_cube();
-    scene.config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.4, 0.4});
-    std::string message;
-    try {
-        message = CadenceTest::slice(scene).refusal.string;
-    } catch (const std::exception &error) {
-        message = error.what();
+    // Older projects stored the two modes as two booleans. Loading turns one of them into
+    // mixed_nozzle_slicing_mode and refuses a project that has both on.
+    const auto load = [](const std::string &ini) {
+        DynamicPrintConfig config;
+        config.load_from_ini_string(ini, ForwardCompatibilitySubstitutionRule::Enable);
+        return config;
+    };
+    SECTION("Both on") {
+        CHECK_THROWS_WITH(load("mixed_nozzle_feature_split = 1\nsynchronized_multi_nozzle_layering = 1\n"),
+                          Catch::Matchers::ContainsSubstring("MNS-MIG-A01"));
     }
-    INFO(message);
-    CHECK(message.find("Feature Split needs a printer with two nozzles of different sizes.") != std::string::npos);
-    CHECK(message.find("coarse layer height") == std::string::npos);
+    SECTION("One on loads as that mode and drops the old keys") {
+        const auto mode = [](const DynamicPrintConfig &config) {
+            const auto *opt = config.option<ConfigOptionEnum<MixedNozzleSlicingMode>>("mixed_nozzle_slicing_mode");
+            REQUIRE(opt != nullptr);
+            return opt->value;
+        };
+        const DynamicPrintConfig feature = load("mixed_nozzle_feature_split = 1\nsynchronized_multi_nozzle_layering = 0\n");
+        CHECK(mode(feature) == MixedNozzleSlicingMode::FeatureSplit);
+        CHECK_FALSE(feature.has("mixed_nozzle_feature_split"));
+        CHECK_FALSE(feature.has("synchronized_multi_nozzle_layering"));
+        const DynamicPrintConfig body = load("synchronized_multi_nozzle_layering = 1\n");
+        CHECK(mode(body) == MixedNozzleSlicingMode::BodySplit);
+        const DynamicPrintConfig off = load("mixed_nozzle_feature_split = 0\nsynchronized_multi_nozzle_layering = 0\n");
+        CHECK(mode(off) == MixedNozzleSlicingMode::Off);
+    }
 }

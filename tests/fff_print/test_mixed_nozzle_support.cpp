@@ -2,32 +2,23 @@
 
 #include "mixed_nozzle_harness.hpp"
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/Format/bbs_3mf.hpp"
-#include "libslic3r/GCode/ConflictChecker.hpp"
-#include "libslic3r/GCode/WipeTower.hpp"
-#include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Slicing.hpp"
-#include "libslic3r/Support/SupportCommon.hpp"
 #include "libslic3r/Support/SupportLayer.hpp"
-#include "libslic3r/Utils.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
-#include <cstdio>
-#include <cstring>
 #include <cstdlib>
-#include <fstream>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <map>
-#include <memory>
-#include <new>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace Slic3r;
@@ -59,12 +50,138 @@ struct FilamentCase {
 
 const std::vector<int> k_filament_map{1, 2, 1, 2};
 
+const SupportCase k_organic{"tree organic", stTreeAuto, smsTreeOrganic};
+const SupportCase k_hybrid{"tree hybrid", stTreeAuto, smsTreeHybrid};
+const SupportCase k_slim{"tree slim", stTreeAuto, smsTreeSlim};
+const SupportCase k_strong{"tree strong", stTreeAuto, smsTreeStrong};
+const SupportCase k_normal{"normal auto", stNormalAuto, smsDefault};
+
+struct CoarseNozzle { double coarse, coarse_min, coarse_max; };
+
+bool is_support(const Move &move)
+{
+    return move.type == EMoveType::Extrude &&
+        (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface);
+}
+
+double point_to_segment(const Vec2d &p, const Vec2d &a, const Vec2d &b)
+{
+    const Vec2d d = b - a;
+    const double t = d.squaredNorm() > 0. ? std::clamp((p - a).dot(d) / d.squaredNorm(), 0., 1.) : 0.;
+    return (p - (a + t * d)).norm();
+}
+
+// Checks that every case of a scene passed, listing the failures one per line.
+void check_no_failures(const std::vector<std::string> &failures)
+{
+    std::ostringstream out;
+    for (const std::string &failure : failures)
+        if (!failure.empty())
+            out << failure << '\n';
+    INFO(out.str());
+    CHECK(out.str().empty());
+}
+
+// The first refusal code ([SRL-...] or [MNS-...]) in a message, without the brackets.
+std::string code_of(const std::string &message)
+{
+    size_t at = std::string::npos;
+    for (const char *prefix : {"[SRL-", "[MNS-"})
+        at = std::min(at, message.find(prefix));
+    const size_t end = at == std::string::npos ? at : message.find(']', at);
+    return end == std::string::npos ? std::string() : message.substr(at + 1, end - at - 1);
+}
+
+void set_nozzles(DynamicPrintConfig &config, double fine_d, double coarse_d, double fine_min, double fine_max,
+                 double coarse_min, double coarse_max)
+{
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{fine_d, coarse_d});
+    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{fine_d, coarse_d});
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{fine_min, coarse_min});
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{fine_max, coarse_max});
+}
+
+// Line widths for the 0.2: 0.22 roads, a 0.25 first layer.
+void set_fine_widths(DynamicPrintConfig &config)
+{
+    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
+    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
+}
+
+// Every model role on the object's own filament.
+void single_filament_roles(DynamicPrintConfig &config)
+{
+    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
+                            "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
+        config.set_key_value(key, new ConfigOptionInt(0));
+}
+
+// What CadenceTest::slice(Scene) does to a config, for scenes sliced on a Print the test keeps.
+void bambu_config(DynamicPrintConfig &config)
+{
+    fill_per_filament_values(config);
+    if (config.opt_string("machine_start_gcode").find("M1020") == std::string::npos)
+        config.set_key_value("machine_start_gcode", new ConfigOptionString(config.opt_string("machine_start_gcode") + "\nM1020 S[initial_extruder]\n"));
+}
+
+ModelObject *add_object(Model &model, const char *name, TriangleMesh mesh, const Vec3d &offset)
+{
+    ModelObject *object = model.add_object();
+    object->name = name;
+    object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->instances.front()->set_offset(offset);
+    object->ensure_on_bed();
+    return object;
+}
+
+void add_part(ModelObject &object, TriangleMesh mesh, int filament, double height)
+{
+    ModelVolume *volume = object.add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
+    volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
+    volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
+}
+
+// A populate step that puts one object on the plate.
+std::function<void(Model &, Print &, const DynamicPrintConfig &)> one_object(const char *name, const TriangleMesh &mesh, const Vec3d &offset)
+{
+    return [name, mesh, offset](Model &model, Print &print, const DynamicPrintConfig &config) {
+        add_object(model, name, mesh, offset);
+        print.apply(model, config);
+        print.set_status_silent();
+    };
+}
+
+// Slices a Print or a Scene; returns `what` and the refusal or the throw, or an empty string with the facts filled in.
+template<class Source> std::string slice_into(Source &source, const std::string &what, CadenceTest::Facts &facts)
+{
+    try {
+        facts = CadenceTest::slice(source);
+    } catch (const std::exception &error) {
+        return what + "threw " + error.what();
+    }
+    if (!facts.refusal.string.empty())
+        return what + "refused: " + facts.refusal.string;
+    return facts.gcode.empty() ? what + "no G-code" : std::string();
+}
+
 // A column with a low arm on the right and a high arm on the left. The left arm's support
 // rises past the right arm's contact, so its body bands span another island's top contact.
 TriangleMesh two_arm_mesh()
 {
     return extruded_xz_outline({{0., 0.}, {8., 0.}, {8., 3.}, {16., 3.}, {16., 4.2}, {8., 4.2},
                                 {8., 8.}, {-8., 8.}, {-8., 6.6}, {0., 6.6}},
+                               12.);
+}
+
+// A column with a shelf on the right whose top is 0.1 mm above the underside of an arm on the left,
+// and a second arm over the shelf. The left arm's support top and the bottom of the support standing
+// on the shelf are closer together than the coarse nozzle's thinnest layer.
+TriangleMesh shelf_and_arms_mesh()
+{
+    return extruded_xz_outline({{0., 0.}, {20., 0.}, {20., 10.1}, {8., 10.1}, {8., 13.}, {20., 13.}, {20., 14.},
+                                {0., 14.}, {0., 11.}, {-12., 11.}, {-12., 10.}, {0., 10.}},
                                12.);
 }
 
@@ -144,434 +261,6 @@ void load_two_arm_model(Model &model, Print &print, const DynamicPrintConfig &co
     print.set_status_silent();
 }
 
-// Top of the support under the model inside [x_lo, x_hi], the model's underside there, and the
-// role of the topmost support road.
-struct Gap {
-    double       support_top   = 0.;
-    double       object_bottom = std::numeric_limits<double>::max();
-    ExtrusionRole top_role     = erNone;
-};
-
-Gap support_gap(const std::vector<Move> &moves, double x_lo, double x_hi)
-{
-    Gap gap;
-    for (const Move &move : moves)
-        if (CadenceTest::model_road(move) && move.position.x() > x_lo && move.position.x() < x_hi)
-            gap.object_bottom = std::min(gap.object_bottom, double(move.position.z()) - double(move.height));
-    for (const Move &move : moves)
-        if (move.type == EMoveType::Extrude &&
-            (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface) &&
-            move.position.x() > x_lo && move.position.x() < x_hi &&
-            double(move.position.z()) < gap.object_bottom + 1e-4 &&
-            double(move.position.z()) > gap.support_top + 1e-4) {
-            gap.support_top = double(move.position.z());
-            gap.top_role    = move.extrusion_role;
-        }
-    return gap;
-}
-
-// Slices one case to G-code and returns what is wrong with it, or an empty string.
-std::string run_case(Mode mode, double fine, double coarse, int ratio, double top_z,
-                     const SupportCase &support, const FilamentCase &filaments)
-{
-    std::ostringstream what;
-    what << mode_name(mode) << " / " << support.name << " / " << filaments.name << ": ";
-    DynamicPrintConfig config = h2d_support_config(mode, fine, coarse, ratio, top_z, support, filaments);
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    double left    = 0.;
-    scene.populate = [mode, fine, coarse, &left](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        load_two_arm_model(model, print, cfg, mode, fine, coarse);
-        left = model.objects.front()->instance_bounding_box(0).min.x();
-    };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    if (facts.gcode.empty())
-        return what.str() + "no G-code";
-
-    // Under a mode a Default interface prints with the base filament.
-    const int interface_filament = filaments.interface_filament > 0 ? filaments.interface_filament :
-                                   mode != Mode::Off ? filaments.base : 0;
-    // Each nozzle's layer height range, as h2d_support_config sets it.
-    const double nozzle_min[2] = {0.04, 0.16};
-    const double nozzle_max[2] = {0.14, 0.56};
-    size_t base = 0, interface_roads = 0, base_wrong = 0, interface_wrong = 0, out_of_range = 0;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude)
-            continue;
-        if (move.extrusion_role == erSupportMaterial) {
-            ++base;
-            // Under a mode, body the coarse base nozzle cannot lay is laid by the interface nozzle in a
-            // filament of the base's material there, never an interface filament of another material.
-            const bool fine_body = mode != Mode::Off && filaments.interface_filament > 0 &&
-                k_filament_map[filaments.base - 1] != k_filament_map[filaments.interface_filament - 1] &&
-                int(move.physical_tool_id) == k_filament_map[filaments.interface_filament - 1] - 1 &&
-                (int(move.extruder_id) != filaments.interface_filament - 1 || std::string(filaments.interface_type) == "PLA");
-            base_wrong += ! fine_body && (int(move.extruder_id) != filaments.base - 1 ||
-                          int(move.physical_tool_id) != k_filament_map[filaments.base - 1] - 1);
-        } else if (move.extrusion_role == erSupportMaterialInterface) {
-            ++interface_roads;
-            if (interface_filament > 0)
-                interface_wrong += int(move.extruder_id) != interface_filament - 1 ||
-                                   int(move.physical_tool_id) != k_filament_map[interface_filament - 1] - 1;
-        } else
-            continue;
-        // Under a mode every support road above the first layer is a height its nozzle can lay.
-        const int nozzle = int(move.physical_tool_id);
-        if (mode != Mode::Off && nozzle >= 0 && nozzle < 2 && double(move.position.z()) > fine + 1e-3 &&
-            (double(move.height) < nozzle_min[nozzle] - 1e-3 || double(move.height) > nozzle_max[nozzle] + 1e-3)) {
-            if (out_of_range < 3)
-                what << "[Z " << move.position.z() << ", height " << move.height << ", role " << int(move.extrusion_role)
-                     << ", nozzle " << nozzle + 1 << "] ";
-            ++out_of_range;
-        }
-    }
-    bool ok = true;
-    if (base == 0 || interface_roads == 0 || base_wrong != 0 || interface_wrong != 0) {
-        what << "base " << base << " (" << base_wrong << " on the wrong filament), interface " << interface_roads
-             << " (" << interface_wrong << " on the wrong filament); ";
-        ok = false;
-    }
-    if (out_of_range != 0) {
-        what << out_of_range << " support roads outside their nozzle's layer height range; ";
-        ok = false;
-    }
-    // Under each arm the topmost support road is interface and sits the top Z distance below the
-    // model, rounded up to at most one fine layer.
-    for (const auto &[name, lo, hi] : {std::tuple<const char *, double, double>{"left arm", left + 1., left + 7.},
-                                        {"right arm", left + 18., left + 23.}}) {
-        const Gap gap = support_gap(facts.moves, lo, hi);
-        const double distance = gap.object_bottom - gap.support_top;
-        if (gap.support_top <= 0. || gap.top_role != erSupportMaterialInterface ||
-            distance < top_z - 1e-3 || distance > top_z + fine + 1e-3) {
-            what << name << " support top " << gap.support_top << " role " << int(gap.top_role) << " under model at "
-                 << gap.object_bottom << "; ";
-            ok = false;
-        }
-    }
-    return ok ? std::string() : what.str();
-}
-
-std::string label_of(Mode mode, const SupportCase &support, const FilamentCase &filaments)
-{
-    return std::string(mode_name(mode)) + " / " + support.name + " / " + filaments.name;
-}
-
-void count_support_roles(const ExtrusionEntity *entity, size_t &base, size_t &interface_roads)
-{
-    if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection*>(entity)) {
-        for (const ExtrusionEntity *child : collection->entities)
-            count_support_roles(child, base, interface_roads);
-        return;
-    }
-    base            += entity->role() == erSupportMaterial;
-    interface_roads += entity->role() == erSupportMaterialInterface;
-}
-
-// Generates support without exporting G-code; returns what is wrong, or an empty string.
-std::string process_case(Mode mode, double fine, double coarse, int ratio, double top_z,
-                         const SupportCase &support, const FilamentCase &filaments)
-{
-    const std::string what = label_of(mode, support, filaments) + ": ";
-    DynamicPrintConfig config = h2d_support_config(mode, fine, coarse, ratio, top_z, support, filaments);
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    load_two_arm_model(model, print, config, mode, fine, coarse);
-    if (const StringObjectException refusal = print.validate(); !refusal.string.empty())
-        return what + "refused: " + refusal.string;
-    try {
-        print.process();
-    } catch (const std::exception &error) {
-        return what + "threw " + error.what();
-    }
-    size_t base = 0, interface_roads = 0;
-    for (const SupportLayer *layer : print.objects().front()->support_layers())
-        count_support_roles(&layer->support_fills, base, interface_roads);
-    if (base == 0 || interface_roads == 0)
-        return what + "base " + std::to_string(base) + ", interface " + std::to_string(interface_roads);
-    return {};
-}
-
-const SupportCase k_organic{"tree organic", stTreeAuto, smsTreeOrganic};
-const SupportCase k_hybrid{"tree hybrid", stTreeAuto, smsTreeHybrid};
-const SupportCase k_slim{"tree slim", stTreeAuto, smsTreeSlim};
-const SupportCase k_normal{"normal auto", stNormalAuto, smsDefault};
-
-// Organic tree support with its base on the coarse nozzle and the interface on a finer one slices. Slim,
-// Strong and Hybrid trees on a coarse base, and trees with the interface on the coarse nozzle too, are
-// refused. The tree cases below count those two refusals as their expected outcome, the second only for a case
-// whose interface is on the base's nozzle; the refusal case further down asserts them.
-bool tree_refused(const std::string &outcome, bool interface_on_base_nozzle = false)
-{
-    if (outcome.find("refused: [SRL-F14]") == std::string::npos && outcome.find("refused: [SRL-A53]") == std::string::npos)
-        return false;
-    const bool style_refusal  = outcome.find("Slim, Strong and Hybrid tree support") != std::string::npos;
-    const bool shared_refusal = outcome.find("cannot have its interface on the") != std::string::npos;
-    // An Organic tree is never refused for its style.
-    if (style_refusal && outcome.find("tree organic") != std::string::npos)
-        return false;
-    return style_refusal || (shared_refusal && interface_on_base_nozzle);
-}
-
-// What a case is expected to do. Every case prints except an interface on a larger nozzle than the
-// base under a mode, which is refused: the interface is what touches the model.
-enum class Expect { Slice, Refusal };
-
-Expect expected(Mode mode, const FilamentCase &filaments)
-{
-    if (mode == Mode::Off || filaments.interface_filament == 0)
-        return Expect::Slice;
-    const bool base_coarse      = k_filament_map[filaments.base - 1] == 2;
-    const bool interface_coarse = k_filament_map[filaments.interface_filament - 1] == 2;
-    return !base_coarse && interface_coarse ? Expect::Refusal : Expect::Slice;
-}
-
-std::string check_expected(Mode mode, const FilamentCase &filaments, const std::string &outcome)
-{
-    // Under a mode a Default interface prints with the base filament.
-    const bool interface_on_base_nozzle = filaments.interface_filament == 0 ||
-        k_filament_map[filaments.base - 1] == k_filament_map[filaments.interface_filament - 1];
-    if (tree_refused(outcome, interface_on_base_nozzle))
-        return {};
-    if (expected(mode, filaments) == Expect::Slice)
-        return outcome;
-    return outcome.find(mode == Mode::Body ? "refused: [SRL-A29]" : "refused: [SRL-F01]") != std::string::npos ?
-        std::string() : "expected a refusal, got: " + (outcome.empty() ? std::string("a slice") : outcome);
-}
-} // namespace
-
-TEST_CASE("Feature Split organic tree support with a coarse base and fine interface slices, Slim and Hybrid are refused; mode Off slices it",
-          "[TestRebuild][Support]")
-{
-    // The layout: fine 0.08 on the 0.2, coarse 0.56 on the 0.8, base on the 0.8 and
-    // interface on the 0.2, trees under two arms at different heights.
-    const FilamentCase base_coarse{"base coarse, interface fine", 2, 3};
-    for (const SupportCase &support : {k_organic, k_hybrid, k_slim}) {
-        const std::string failure = process_case(Mode::Feature, 0.08, 0.56, 7, 0.24, support, base_coarse);
-        INFO(failure);
-        CHECK((failure.empty() || tree_refused(failure)));
-    }
-    // The same filaments with the mode off, both ways round.
-    for (const FilamentCase &filaments : {base_coarse, FilamentCase{"base fine, interface coarse", 3, 4}}) {
-        const std::string failure = process_case(Mode::Off, 0.08, 0.56, 7, 0.24, k_organic, filaments);
-        INFO(failure);
-        CHECK((failure.empty() || tree_refused(failure)));
-    }
-}
-
-TEST_CASE("Feature Split at a 0.08 mm fine layer prints normal and organic support to G-code; Slim and Hybrid on a coarse base are refused",
-          "[TestRebuild][Support]")
-{
-    // Coarse base PLA on the right 0.8, fine interface PETG on the left 0.2, at 0.56 and 0.24 coarse.
-    const FilamentCase layout{"base coarse PLA, interface fine PETG", 2, 3, "PETG"};
-    for (const auto &[coarse, ratio] : {std::pair<double, int>{0.56, 7}, {0.24, 3}})
-        for (const SupportCase &support : {k_organic, k_hybrid, k_slim, k_normal}) {
-            const std::string failure = run_case(Mode::Feature, 0.08, coarse, ratio, 0.24, support, layout);
-            INFO("coarse " << coarse << ": " << failure);
-            CHECK((failure.empty() || tree_refused(failure)));
-        }
-}
-
-TEST_CASE("Feature Split tree support with the interface on the coarse base filament is refused; mode Off slices it",
-          "[TestRebuild][Support]")
-{
-    const std::string failure = process_case(Mode::Feature, 0.08, 0.56, 7, 0.24, k_organic, FilamentCase{"interface = base", 2, 2});
-    INFO(failure);
-    CHECK(tree_refused(failure, true));
-    const std::string off = process_case(Mode::Off, 0.08, 0.56, 7, 0.24, k_organic, FilamentCase{"interface Default", 2, 0});
-    INFO(off);
-    CHECK(off.empty());
-}
-
-TEST_CASE("Support matrix on an H2D 0.2/0.8 slices to G-code; Slim and Hybrid trees on a coarse base are refused", "[TestRebuild][SupportMatrix]")
-{
-    const std::vector<FilamentCase> filament_cases{
-        {"interface Default", 2, 0},
-        {"interface = base", 2, 2},
-        {"interface on the base nozzle", 2, 4},
-        {"base coarse, interface fine", 2, 3},
-        {"base fine, interface coarse", 3, 4},
-    };
-    std::vector<std::string> failures;
-    size_t cases = 0;
-    for (Mode mode : {Mode::Off, Mode::Feature, Mode::Body})
-        for (const SupportCase &support : {k_normal, k_slim, k_hybrid, k_organic})
-            for (const FilamentCase &filaments : filament_cases) {
-                ++cases;
-                const std::string outcome = run_case(mode, 0.10, 0.30, 3, 0.20, support, filaments);
-                if (std::string failure = check_expected(mode, filaments, outcome); !failure.empty() && !tree_refused(failure))
-                    failures.push_back(std::string(mode_name(mode)) + " / " + support.name + " / " + filaments.name +
-                                       ": " + failure);
-            }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CAPTURE(cases, failures.size());
-    CHECK(failures.empty());
-}
-
-namespace {
-// First-layer brim roads that end on a support road, and the brim road count.
-struct BrimOverSupport {
-    std::string refusal;
-    size_t      brim_roads = 0;
-    size_t      support_roads = 0;
-    size_t      brim_on_support = 0;
-};
-
-BrimOverSupport brim_over_support(Mode mode)
-{
-    // Support base on the coarse PLA (2, right 0.8), interface on the fine side (3), a 5 mm brim.
-    const FilamentCase filaments{"base coarse, interface fine", 2, 3};
-    DynamicPrintConfig config = h2d_support_config(mode, 0.10, 0.30, 3, 0.20, k_normal, filaments);
-    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
-    config.set_key_value("brim_width", new ConfigOptionFloat(5.));
-    config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.));
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [mode](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        load_two_arm_model(model, print, cfg, mode, 0.10, 0.30);
-    };
-    const CadenceTest::Facts facts = CadenceTest::slice(scene);
-    // With CADENCE_TEST_DUMP_DIR set, keeps the G-code there for inspection.
-    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR"))
-        std::ofstream(std::string(dir) + "/brim-" + mode_name(mode) + ".gcode") << facts.gcode;
-    BrimOverSupport out;
-    out.refusal = facts.refusal.string;
-    if (!out.refusal.empty())
-        return out;
-    // The first layer, the column's outline on it, and the support standing on the bed beside it.
-    double first_z = std::numeric_limits<double>::max();
-    for (const Move &move : facts.moves)
-        if (CadenceTest::model_road(move))
-            first_z = std::min(first_z, double(move.position.z()));
-    const auto on_first_layer = [first_z](const Move &move) {
-        return move.type == EMoveType::Extrude && std::abs(double(move.position.z()) - first_z) < 1e-3;
-    };
-    // Support roads on the first layer as segments, with their widths.
-    struct Road { Vec2d a, b; double width; };
-    std::vector<Road> support;
-    for (size_t i = 1; i < facts.moves.size(); ++i) {
-        const Move &move = facts.moves[i];
-        if (on_first_layer(move) &&
-            (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface))
-            support.push_back({Vec2d(facts.moves[i - 1].position.x(), facts.moves[i - 1].position.y()),
-                               Vec2d(move.position.x(), move.position.y()), double(move.width)});
-    }
-    out.support_roads = support.size();
-    const auto distance = [](const Vec2d &p, const Road &road) {
-        const Vec2d d = road.b - road.a;
-        const double t = d.squaredNorm() > 0. ? std::clamp((p - road.a).dot(d) / d.squaredNorm(), 0., 1.) : 0.;
-        return (p - (road.a + t * d)).norm();
-    };
-    // A brim road that ends inside a support road would lay filament on top of it.
-    for (const Move &move : facts.moves)
-        if (on_first_layer(move) && move.extrusion_role == erBrim) {
-            ++out.brim_roads;
-            const Vec2d end(move.position.x(), move.position.y());
-            out.brim_on_support += std::any_of(support.begin(), support.end(), [&](const Road &road) {
-                return distance(end, road) < 0.5 * (road.width + double(move.width)) - 0.05;
-            });
-        }
-    return out;
-}
-} // namespace
-
-TEST_CASE("The brim keeps off the first-layer support in Feature Split as it does in Off",
-          "[TestRebuild][Support][Brim]")
-{
-    // With the support base on the coarse nozzle, the fine nozzle lays the support on the first
-    // layer. The brim used to ignore that support and run over it, a brim stock does not lay.
-    for (const Mode mode : {Mode::Off, Mode::Feature}) {
-        const BrimOverSupport tally = brim_over_support(mode);
-        INFO(mode_name(mode) << ": " << tally.refusal);
-        REQUIRE(tally.refusal.empty());
-        CAPTURE(tally.brim_roads, tally.support_roads, tally.brim_on_support);
-        CHECK(tally.support_roads > 0);
-        CHECK(tally.brim_roads > 0);
-        // A few brim ends touch a support road where the two meet; before the fix nearly every
-        // Feature Split brim road lay on the support.
-        CHECK(tally.brim_on_support * 20 <= tally.brim_roads);
-    }
-}
-
-TEST_CASE("Feature Split exports a plate of two different objects of different heights, with and without supports",
-          "[TestRebuild][Support][MultiObject]")
-{
-    // An 8 mm column with two arms and a 20 mm box beside it: each object gets its own layer plan
-    // block, so the plate exports. One block for the whole plate used to refuse the export.
-    const double box_height = 20.;
-    for (const bool supports : {false, true}) {
-        INFO((supports ? "with supports" : "without supports"));
-        const FilamentCase filaments{"base coarse, interface fine", 2, 3};
-        DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.20, k_normal, filaments);
-        config.set_key_value("enable_support", new ConfigOptionBool(supports));
-        CadenceTest::Scene scene;
-        scene.config   = config;
-        double column_max_x = 0., box_min_x = 0.;
-        scene.populate = [&](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-            ModelObject *column = model.add_object();
-            column->name = "two-arm-overhang";
-            column->add_volume(two_arm_mesh(), ModelVolumeType::MODEL_PART, false);
-            column->add_instance();
-            column->instances.front()->set_offset(Vec3d(60., 60., 0.));
-            column->ensure_on_bed();
-            ModelObject *box = model.add_object();
-            box->name = "tall-box";
-            box->add_volume(make_cube(14., 14., box_height), ModelVolumeType::MODEL_PART, false);
-            box->add_instance();
-            box->instances.front()->set_offset(Vec3d(110., 60., 0.));
-            box->ensure_on_bed();
-            column_max_x = column->instance_bounding_box(0).max.x();
-            box_min_x = box->instance_bounding_box(0).min.x();
-            print.apply(model, cfg);
-            print.set_status_silent();
-        };
-        const CadenceTest::Facts facts = CadenceTest::slice(scene);
-        INFO(facts.refusal.string);
-        REQUIRE(facts.refusal.string.empty());
-        REQUIRE_FALSE(facts.gcode.empty());
-        REQUIRE(column_max_x < box_min_x);
-        CHECK(facts.emitted.plan_start_markers == 2);
-        CHECK(facts.emitted.plan_end_markers == 2);
-        CHECK_FALSE(facts.emitted.plan_malformed);
-
-        // Both objects print in full: walls up to each one's own top, sparse infill inside each.
-        double column_top = 0., box_top = 0.;
-        size_t column_sparse = 0, box_sparse = 0, support_roads = 0;
-        for (const Move &move : facts.moves) {
-            if (move.type != EMoveType::Extrude)
-                continue;
-            const bool on_box = double(move.position.x()) > box_min_x - 1.;
-            if (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface)
-                ++support_roads;
-            if (!CadenceTest::model_road(move))
-                continue;
-            (on_box ? box_top : column_top) = std::max(on_box ? box_top : column_top, double(move.position.z()));
-            if (move.extrusion_role == erInternalInfill)
-                ++(on_box ? box_sparse : column_sparse);
-        }
-        CAPTURE(column_top, box_top, column_sparse, box_sparse, support_roads);
-        CHECK_THAT(box_top, Catch::Matchers::WithinAbs(box_height, 0.11));
-        CHECK_THAT(column_top, Catch::Matchers::WithinAbs(8., 0.11));
-        CHECK(column_sparse > 0);
-        CHECK(box_sparse > 0);
-        if (supports)
-            CHECK(support_roads > 0);
-        else
-            CHECK(support_roads == 0);
-    }
-}
-
-namespace {
 // The prime tower as the automatic tower setup leaves it: auto-sized pad under a 35 mm width cap.
 void set_automatic_tower(DynamicPrintConfig &config)
 {
@@ -587,10 +276,8 @@ void set_automatic_tower(DynamicPrintConfig &config)
     config.set_key_value("wipe_tower_y", new ConfigOptionFloats{200.});
 }
 
-// The L test part: a 20 mm column, 50 mm tall, with a 40 mm arm whose flat underside is at 40 mm.
-// Support under the arm stands on the bed. Fine PLA (1) prints the part on the 0.2, sparse infill
-// and the support base use coarse PLA (2) on the 0.8, and the interface is PETG (3) on the 0.2.
-// The project as the app saved it, with the automatic tower put back.
+// The project as the app saved it (fine PLA 1 and PETG 2 on the 0.2, coarse PLA 3 on the 0.8, support base 3 and
+// interface 2), with the automatic tower put back.
 DynamicPrintConfig app_three_filament_config(Mode mode, double fine, double coarse, int ratio, const SupportCase &support)
 {
     DynamicPrintConfig config;
@@ -610,467 +297,48 @@ DynamicPrintConfig app_three_filament_config(Mode mode, double fine, double coar
     return config;
 }
 
-// The L test part: a 20 mm column, 50 mm tall, with a 40 mm arm whose flat underside is at 40 mm.
-// Support under the arm stands on the bed. Fine PLA prints the part on the 0.2, sparse infill and
-// the support base use coarse PLA on the 0.8, and the interface is PETG on the 0.2. With
-// app_settings the project is the one the app saved (filament 2 PETG, 3 coarse PLA), otherwise
-// the synthetic H2D (filament 2 coarse PLA, 3 PETG).
-std::string run_l_part_case(Mode mode, double fine, double coarse, int ratio, const SupportCase &support,
-                            bool app_settings = false)
+std::function<void(ModelObject&)> handy_model(const char *file)
 {
-    const FilamentCase filaments = app_settings ?
-        FilamentCase{"app project", 3, 2, "PETG"} : FilamentCase{"fine PLA, coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
-    std::ostringstream what;
-    what << mode_name(mode) << " / " << support.name << " / " << filaments.name << " / " << fine << "/" << coarse << ": ";
-    const double top_z = 0.;
-    DynamicPrintConfig config;
-    if (app_settings)
-        config = app_three_filament_config(mode, fine, coarse, ratio, support);
-    else {
-        config = h2d_support_config(mode, fine, coarse, ratio, top_z, support, filaments);
-        config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
-        set_automatic_tower(config);
-        // Flush volumes and prime volumes as the H2D profile gives these filaments.
-        {
-            const double gui[32] = {0, 101, 66, 157, 145, 0, 149, 178, 57, 104, 0, 167, 90, 99, 101, 0,
-                                    0, 354, 237, 540, 500, 0, 515, 611, 208, 363, 0, 573, 317, 347, 353, 0};
-            const int profile_index[4] = {0, 2, 1, 3}; // fine PLA, coarse PLA, PETG, spare PETG
-            std::vector<double> flush(32, 0.);
-            for (int nozzle = 0; nozzle < 2; ++nozzle)
-                for (int from = 0; from < 4; ++from)
-                    for (int to = 0; to < 4; ++to)
-                        flush[size_t(nozzle * 16 + from * 4 + to)] = gui[nozzle * 16 + profile_index[from] * 4 + profile_index[to]];
-            config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(flush));
-            config.set_key_value("flush_multiplier", new ConfigOptionFloats{0.3, 1.});
-            config.set_key_value("filament_prime_volume", new ConfigOptionFloats{45., 30., 45., 30.});
-            config.set_key_value("prime_volume", new ConfigOptionFloat(45.));
-            config.set_key_value("raft_first_layer_expansion", new ConfigOptionFloat(2.));
-            config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
-        }
-    }
-    const BoundingBoxf bed(config.option<ConfigOptionPoints>("printable_area")->values);
-    CadenceTest::Scene scene;
-    scene.config = config;
-    double arm_lo = 0., arm_hi = 0.;
-    scene.populate = [&arm_lo, &arm_hi](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "l-part";
-        object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
-        object->ensure_on_bed();
-        const BoundingBoxf3 box = object->instance_bounding_box(0);
-        arm_lo = box.min.x() + 20.;
-        arm_hi = box.max.x();
-        print.apply(model, cfg);
-        print.set_status_silent();
+    return [file](ModelObject &object) {
+        Model loaded = Model::read_from_file(std::string(PROFILES_DIR) + "/../handy_models/" + file);
+        for (const ModelObject *source : loaded.objects)
+            for (const ModelVolume *volume : source->volumes)
+                object.add_volume(*volume);
+        object.add_instance();
+        // The bunny, at the size it imports into the app.
+        if (object.instance_bounding_box(0).size().z() > 118.)
+            object.scale_to_fit(Vec3d(120., 120., 118.));
     };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    if (facts.gcode.empty())
-        return what.str() + "no G-code";
-
-    const int petg = filaments.interface_filament - 1;
-    const double arm_bottom = 40.;
-    size_t first_layer_petg = 0, petg_outside_band = 0, petg_interface = 0, first_layer_base = 0, tower_roads = 0,
-           tower_off_bed = 0;
-    double lowest_petg = std::numeric_limits<double>::max();
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude)
-            continue;
-        const double z = double(move.position.z());
-        if (move.extrusion_role == erWipeTower) {
-            ++tower_roads;
-            tower_off_bed += move.position.x() < bed.min.x() || move.position.x() > bed.max.x() ||
-                             move.position.y() < bed.min.y() || move.position.y() > bed.max.y();
-            continue;
-        }
-        // On the bed: the first layer, or under a mode the first band the coarse nozzle lays there.
-        const bool first_layer = z < (mode == Mode::Off ? fine : coarse) + 1e-3;
-        // The support's own first layer is at the first layer's height. Under a mode the fine nozzle
-        // may lay it, in a filament of the base's material, never the interface filament.
-        if (z < fine + 1e-3 && move.extrusion_role == erSupportMaterial && int(move.extruder_id) != petg)
-            ++first_layer_base;
-        if (int(move.extruder_id) != petg)
-            continue;
-        if (first_layer)
-            ++first_layer_petg;
-        // The interface filament belongs in the top contact band right under the arm.
-        const bool in_band = move.extrusion_role == erSupportMaterialInterface && z > arm_bottom - 1. &&
-                             z < arm_bottom + 1e-3 && move.position.x() > arm_lo - 3. && move.position.x() < arm_hi + 3.;
-        if (in_band)
-            ++petg_interface;
-        else {
-            if (petg_outside_band < 3)
-                what << "[PETG role " << int(move.extrusion_role) << " at " << move.position.x() << ", "
-                     << move.position.y() << ", " << z << "] ";
-            ++petg_outside_band;
-            lowest_petg = std::min(lowest_petg, z);
-        }
-    }
-    bool ok = true;
-    if (first_layer_petg != 0) {
-        what << first_layer_petg << " interface-filament roads on the bed; ";
-        ok = false;
-    }
-    if (first_layer_base == 0) {
-        what << "no support base on the bed; ";
-        ok = false;
-    }
-    if (petg_outside_band != 0) {
-        what << petg_outside_band << " interface-filament roads outside the top contact band (lowest at Z "
-             << lowest_petg << "); ";
-        ok = false;
-    }
-    if (petg_interface == 0) {
-        what << "no interface under the arm; ";
-        ok = false;
-    }
-    if (tower_roads == 0 || tower_off_bed != 0) {
-        what << "tower roads " << tower_roads << ", off the bed " << tower_off_bed << "; ";
-        ok = false;
-    }
-    return ok ? std::string() : what.str();
-}
-} // namespace
-
-TEST_CASE("Three filaments with the automatic tower: PETG interface on the fine nozzle under a coarse PLA base slices, with normal and organic support",
-          "[TestRebuild][SupportMatrix]")
-{
-    std::vector<std::string> failures;
-    for (Mode mode : {Mode::Off, Mode::Feature})
-        for (const auto &[fine, coarse, ratio] : {std::tuple<double, double, int>{0.10, 0.30, 3}, {0.08, 0.56, 7}})
-            for (const SupportCase &support : {k_normal, k_organic}) {
-                // Mode Off runs once per support type, as a reference.
-                if (mode == Mode::Off && fine < 0.1 - 1e-6)
-                    continue;
-                for (bool app_settings : {false, true})
-                    if (std::string failure = run_l_part_case(mode, fine, coarse, ratio, support, app_settings); !failure.empty() && !tree_refused(failure))
-                        failures.push_back(failure);
-            }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
 }
 
-namespace {
-struct TowerTally {
-    std::string refusal;
-    double      seconds = 0.;
-    size_t      tower_levels = 0;
-    size_t      coarse_roads = 0;
-    std::string gcode;
-    double      first_layer_height = 0.;
-    double      max_layer_height = 0.;
-};
-
-// What the G-code does with the prime tower, read from the text as the late-tower sweep's tower_scan.py
-// and plunge.py do: tower extrusions are the ones under "; FEATURE: Prime tower" or inside a wipe tower
-// block, and each move's layer is the last "; Z_HEIGHT:" above it.
-struct TowerPath {
-    double lowest_tower_z = std::numeric_limits<double>::max();
-    // 1-based G-code layer of the lowest tower extrusion, and of the first extrusion above the first layer.
-    int    lowest_tower_layer = 0;
-    int    first_layer_above_bed = 0;
-    // Tower extrusions laid more than `tolerance` away from their layer's Z.
-    size_t off_layer_tower_roads = 0;
-    double worst_off_layer = 0.;
-    // Z-only descents of more than 1 mm to below the layer being printed, outside the tower footprint.
-    std::vector<std::string> plunges;
-};
-
-TowerPath tower_path(const std::string &gcode, double first_layer_height, double tolerance)
+std::function<void(ModelObject&)> parts_of(std::vector<TriangleMesh> (*make)())
 {
-    struct Line { double x, y, z; bool has_xy, has_z, extrudes; std::string text; };
-    const auto number_after = [](const std::string &line, char axis, double &value) {
-        for (size_t at = line.find(axis); at != std::string::npos; at = line.find(axis, at + 1)) {
-            if (at == 0 || line[at - 1] != ' ')
-                continue;
-            char *end = nullptr;
-            value = std::strtod(line.c_str() + at + 1, &end);
-            return end != line.c_str() + at + 1;
-        }
-        return false;
+    return [make](ModelObject &object) {
+        for (TriangleMesh &mesh : make())
+            object.add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
     };
-    TowerPath path;
-    // Pass 1: the tower's footprint, grown by 3 mm.
-    double min_x = std::numeric_limits<double>::max(), min_y = min_x;
-    double max_x = -min_x, max_y = -min_x;
-    {
-        std::istringstream lines(gcode);
-        std::string line, feature;
-        bool in_tower = false;
-        double x = 0., y = 0.;
-        while (std::getline(lines, line)) {
-            if (line.rfind("; FEATURE:", 0) == 0) feature = line.substr(10);
-            if (line.rfind("; WIPE_TOWER_START", 0) == 0) in_tower = true;
-            if (line.rfind("; WIPE_TOWER_END", 0) == 0) in_tower = false;
-            if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0 && line.rfind("G2 ", 0) != 0 && line.rfind("G3 ", 0) != 0)
-                continue;
-            const std::string code = line.substr(0, line.find(';'));
-            double e = 0.;
-            const bool has_x = number_after(code, 'X', x), has_y = number_after(code, 'Y', y);
-            if ((has_x || has_y) && number_after(code, 'E', e) && e > 0. &&
-                (in_tower || feature.find("Prime tower") != std::string::npos)) {
-                min_x = std::min(min_x, x); max_x = std::max(max_x, x);
-                min_y = std::min(min_y, y); max_y = std::max(max_y, y);
-            }
-        }
-    }
-    const auto over_tower = [&](double x, double y) {
-        return x >= min_x - 3. && x <= max_x + 3. && y >= min_y - 3. && y <= max_y + 3.;
-    };
-    // Pass 2: tower levels, the first layer above the bed, and descents.
-    std::istringstream lines(gcode);
-    std::string line, feature;
-    bool in_tower = false;
-    int layer = 0;
-    double layer_z = 0., x = 0., y = 0., z = 0.;
-    size_t number = 0;
-    while (std::getline(lines, line)) {
-        ++number;
-        if (line.rfind("; CHANGE_LAYER", 0) == 0) { ++layer; feature.clear(); continue; }
-        if (line.rfind("; Z_HEIGHT:", 0) == 0) { layer_z = std::atof(line.c_str() + 11); continue; }
-        if (line.rfind("; FEATURE:", 0) == 0) { feature = line.substr(10); continue; }
-        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; CP_TOOLCHANGE_START", 0) == 0) in_tower = true;
-        if (line.rfind("; WIPE_TOWER_END", 0) == 0 || line.rfind("; CP_TOOLCHANGE_END", 0) == 0) in_tower = false;
-        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0 && line.rfind("G2 ", 0) != 0 && line.rfind("G3 ", 0) != 0)
-            continue;
-        const std::string code = line.substr(0, line.find(';'));
-        double nx = x, ny = y, nz = z, e = 0.;
-        const bool has_x = number_after(code, 'X', nx), has_y = number_after(code, 'Y', ny), has_z = number_after(code, 'Z', nz);
-        if (has_z && ! has_x && ! has_y && layer > 0 && z - nz > 1. && nz < layer_z - 0.5 && ! over_tower(x, y)) {
-            std::ostringstream plunge;
-            plunge << "line " << number << " layer " << layer << " at X" << x << " Y" << y << ": Z " << z << " -> " << nz;
-            path.plunges.push_back(plunge.str());
-        }
-        x = nx; y = ny; z = nz;
-        if (layer == 0 || ! (has_x || has_y) || ! number_after(code, 'E', e) || e <= 0.)
-            continue;
-        // A purge the change template lays away from the tower is not a tower level.
-        if ((in_tower || feature.find("Prime tower") != std::string::npos) && over_tower(x, y)) {
-            if (z < path.lowest_tower_z - EPSILON) {
-                path.lowest_tower_z = z;
-                path.lowest_tower_layer = layer;
-            }
-            const double off = std::abs(z - layer_z);
-            if (off > tolerance + EPSILON) {
-                ++path.off_layer_tower_roads;
-                path.worst_off_layer = std::max(path.worst_off_layer, off);
-            }
-        } else if (path.first_layer_above_bed == 0 && z > first_layer_height + EPSILON) {
-            path.first_layer_above_bed = layer;
-        }
-    }
-    return path;
 }
 
-// The L part from the app project, with the support base on fine PLA (1) and the PETG interface (2)
-// on the fine nozzle as well. Counts the tower's levels and every road the coarse nozzle lays.
-TowerTally slice_l_part_fine_support(Mode mode, bool no_sparse_layers = true)
+std::function<void(ModelObject&)> part_of(TriangleMesh (*make)())
 {
-    DynamicPrintConfig config = app_three_filament_config(mode, 0.10, 0.30, 3, k_normal);
-    config.set_key_value("support_filament", new ConfigOptionInt(1));
-    config.set_key_value("support_interface_filament", new ConfigOptionInt(2));
-    // The MN presets and setup's tower policy write "No sparse layers" on; stock Orca does not offer it on a
-    // Bambu tower, so the stock reference turns it off.
-    config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(no_sparse_layers));
-    // Off prints the part in one filament, as stock does.
-    if (mode == Mode::Off)
-        for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
-                                "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
-            config.set_key_value(key, new ConfigOptionInt(0));
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "l-part";
-        object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(60., 60., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    const CadenceTest::Facts facts = CadenceTest::slice(scene);
-    TowerTally tally;
-    tally.refusal = facts.refusal.string;
-    tally.seconds = facts.seconds;
-    tally.gcode = facts.gcode;
-    tally.first_layer_height = config.opt_float("initial_layer_print_height");
-    const std::vector<double> &max_heights = config.option<ConfigOptionFloats>("max_layer_height")->values;
-    tally.max_layer_height = max_heights.empty() ? 0. : *std::max_element(max_heights.begin(), max_heights.end());
-    std::set<long> levels;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude)
-            continue;
-        if (move.extrusion_role == erWipeTower)
-            levels.insert(std::lround(double(move.position.z()) * 1000.));
-        tally.coarse_roads += move.physical_tool_id == 1;
-    }
-    tally.tower_levels = levels.size();
-    return tally;
+    return [make](ModelObject &object) { object.add_volume(make(), ModelVolumeType::MODEL_PART, false); };
 }
 
-// The prime tower stands from the first layer, keeps level with the print, and the nozzle never drops
-// through the part to reach it.
-void check_tower_from_first_layer(const TowerTally &tally)
-{
-    const TowerPath path = tower_path(tally.gcode, tally.first_layer_height, tally.max_layer_height);
-    CAPTURE(path.lowest_tower_z, path.lowest_tower_layer, path.first_layer_above_bed, path.off_layer_tower_roads,
-            path.worst_off_layer, path.plunges.size());
-    INFO((path.plunges.empty() ? std::string("no plunge") : "first plunge: " + path.plunges.front()));
-    REQUIRE(path.lowest_tower_layer > 0);
-    CHECK_THAT(path.lowest_tower_z, Catch::Matchers::WithinAbs(tally.first_layer_height, 0.001));
-    REQUIRE(path.first_layer_above_bed > 0);
-    CHECK(path.lowest_tower_layer < path.first_layer_above_bed);
-    CHECK(path.off_layer_tower_roads == 0);
-    CHECK(path.plunges.empty());
-}
-} // namespace
-
-TEST_CASE("Feature Split with no coarse work left starts the prime tower on the first layer", "[TestRebuild][Tower]")
-{
-    // The time check sends every coarse band of this plate back to the fine nozzle, so the only tool
-    // changes left are the two PETG interface changes under the arm, and the tower is planned as Off.
-    // With "No sparse layers" on, as the MN presets write it, Off's upstream ladder skipped the tower
-    // until the first change at 40 mm, laid its first levels at 0.1 mm beside the part, and on the next
-    // layer dropped the nozzle 40 mm in place through the part (R/LATE-TOWER.md). Stock Orca does not offer
-    // that option on a Bambu tower, so the tower now stands from the first layer as stock lays it.
-    const TowerTally split = slice_l_part_fine_support(Mode::Feature);
-    INFO(split.refusal);
-    REQUIRE(split.refusal.empty());
-    // The scene: the coarse nozzle prints nothing, so this is the as-Off tower path.
-    REQUIRE(split.coarse_roads == 0);
-    check_tower_from_first_layer(split);
-
-    // Off with "No sparse layers" off is stock Orca on a Bambu tower.
-    const TowerTally off = slice_l_part_fine_support(Mode::Off, false);
-    INFO(off.refusal);
-    REQUIRE(off.refusal.empty());
-    REQUIRE(off.coarse_roads == 0);
-    check_tower_from_first_layer(off);
-    CAPTURE(off.seconds, split.seconds, off.tower_levels, split.tower_levels);
-    CHECK(split.tower_levels == off.tower_levels);
-    CHECK(std::abs(split.seconds - off.seconds) <= 0.01 * off.seconds);
-}
-
-namespace {
-// Shapes whose support stands on the part or on the bed under a curved underside.
+// A plate on the bed, a column, and an arm over the plate: support that stands on the part.
 TriangleMesh c_shape_mesh()
 {
-    // A plate on the bed, a column, and an arm over the plate.
     return extruded_xz_outline({{0., 0.}, {40., 0.}, {40., 6.}, {15., 6.}, {15., 16.}, {40., 16.}, {40., 20.}, {0., 20.}}, 20.);
 }
 
+// A ball on the bed, like the underside of a hull or a bunny: a small first layer and support rising
+// from the bed under a curve.
 TriangleMesh hull_mesh()
 {
-    // A ball on the bed, like the underside of a hull or a bunny: a small first layer and
-    // support rising from the bed under a curve.
     TriangleMesh mesh = make_sphere(15., PI / 24.);
     mesh.scale(Vec3f(1.6f, 1.f, 1.f));
     return mesh;
 }
 
-std::string slice_shape(const char *shape_name, TriangleMesh mesh, double fine, double coarse, int ratio,
-                        const SupportCase &support, const FilamentCase &filaments)
-{
-    std::ostringstream what;
-    what << shape_name << " / " << support.name << " / " << filaments.name << " / " << fine << "/" << coarse << ": ";
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, fine, coarse, ratio, 0.2, support, filaments);
-    set_automatic_tower(config);
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [&mesh, shape_name](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = shape_name;
-        object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    size_t support_roads = 0;
-    for (const Move &move : facts.moves)
-        support_roads += move.type == EMoveType::Extrude &&
-                         (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface);
-    return support_roads == 0 ? what.str() + "no support" : std::string();
-}
-} // namespace
-
-TEST_CASE("Feature Split supports slice on shapes that stand on the part or under a curve; Hybrid on a coarse base is refused",
-          "[TestRebuild][SupportMatrix]")
-{
-    std::vector<std::string> failures;
-    for (const auto &[fine, coarse, ratio] : {std::tuple<double, double, int>{0.10, 0.30, 3}, {0.08, 0.56, 7}})
-        for (const SupportCase &support : {k_organic, k_hybrid, k_normal})
-            for (const FilamentCase &filaments : {FilamentCase{"interface = base", 2, 2},
-                                                  FilamentCase{"PETG interface on fine", 2, 3, "PETG"}}) {
-                const bool interface_on_base_nozzle = filaments.interface_filament == filaments.base;
-                if (std::string failure = slice_shape("C shape", c_shape_mesh(), fine, coarse, ratio, support, filaments);
-                    !failure.empty() && !tree_refused(failure, interface_on_base_nozzle))
-                    failures.push_back(failure);
-                if (std::string failure = slice_shape("hull", hull_mesh(), fine, coarse, ratio, support, filaments);
-                    !failure.empty() && !tree_refused(failure, interface_on_base_nozzle))
-                    failures.push_back(failure);
-            }
-    // The handy Benchy and bunny, whose trees stand on the deck and rise under curves.
-    for (const char *file : {"3DBenchy.drc", "Stanford_Bunny.drc"}) {
-        DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.2, k_organic,
-                                                       FilamentCase{"interface = base", 2, 2});
-        set_automatic_tower(config);
-        config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
-        config.set_key_value("printable_height", new ConfigOptionFloat(325.));
-        CadenceTest::Scene scene;
-        scene.config   = config;
-        scene.populate = [file](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-            model = Model::read_from_file(std::string(PROFILES_DIR) + "/../handy_models/" + file);
-            for (ModelObject *object : model.objects) {
-                if (object->instances.empty())
-                    object->add_instance();
-                // The bunny, at the size it imports into the app.
-                if (object->instance_bounding_box(0).size().z() > 118.)
-                    object->scale_to_fit(Vec3d(120., 120., 118.));
-                object->instances.front()->set_offset(Vec3d(40., 40., 0.));
-                object->ensure_on_bed();
-            }
-            print.apply(model, cfg);
-            print.set_status_silent();
-        };
-        try {
-            const CadenceTest::Facts facts = CadenceTest::slice(scene);
-            // Organic with the interface on the base filament: only the interface-on-coarse refusal is expected.
-            if (!facts.refusal.string.empty() && !tree_refused(std::string(k_organic.name) + " refused: " + facts.refusal.string, true))
-                failures.push_back(std::string(file) + " refused: " + facts.refusal.string);
-        } catch (const std::exception &error) {
-            failures.push_back(std::string(file) + " threw " + error.what());
-        }
-    }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
-
-namespace {
 // A bunny-like part: a ball on a foot to one side, its underside curving down to 0.32 mm over the
 // bed, so trees stand on the bed and meet the curve a few layers up.
 std::vector<TriangleMesh> bunny_like_parts()
@@ -1107,191 +375,358 @@ std::vector<TriangleMesh> benchy_like_parts()
     return parts;
 }
 
-// Slices a shape with organic trees in the project the app saved (fine PLA 1
-// and PETG interface 2 on the 0.2, coarse PLA base 3 on the 0.8), and returns what the interface
-// filament lays on the first layer, tower included, or an empty string.
-std::string interface_filament_on_bed(const char *shape_name, const std::function<void(ModelObject&)> &add_parts,
-                                      Mode mode, double fine, double coarse, int ratio)
-{
-    std::ostringstream what;
-    what << shape_name << " / " << mode_name(mode) << " / " << fine << "/" << coarse << ": ";
-    DynamicPrintConfig config = app_three_filament_config(mode, fine, coarse, ratio, k_organic);
-    const int interface_filament = config.opt_int("support_interface_filament");
-    REQUIRE(interface_filament != config.opt_int("support_filament"));
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [&add_parts, shape_name](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = shape_name;
-        add_parts(*object);
-        if (object->instances.empty())
-            object->add_instance();
-        object->center_around_origin(false);
-        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
+// ---- Tower G-code audits -------------------------------------------------------------------------
+
+// One G-code move, or a tool change (T line) after the first layer change: start and end (an arc in pieces
+// of about 0.5 mm), Z before and after, E, the tower block and the purge or ramming row it is in, whether it
+// is under "; FEATURE: Prime tower", and the part layer (the last "; Z_HEIGHT:").
+struct GMove {
+    std::vector<Vec2d> points;
+    double z0 = 0., z = 0., e = 0., height = 0.2, part_z = 0.;
+    bool   tool_change = false, has_xy = false, has_z = false, in_tower = false, in_change = false, prime = false;
+    const char *row = nullptr;
+    size_t row_id = 0, layer = 0, line = 0;
+
+    double length() const
+    {
+        double out = 0.;
+        for (size_t k = 1; k < points.size(); ++k)
+            out += (points[k] - points[k - 1]).norm();
+        return out;
     }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    size_t support = 0, interface_roads = 0, on_bed = 0, tower_on_bed = 0;
-    BoundingBoxf box;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude)
+};
+
+// Calls visit for every move up to the end G-code.
+void walk_gcode(const std::string &gcode, const std::function<void(const GMove &)> &visit)
+{
+    std::istringstream lines(gcode);
+    std::string line;
+    double x = 0., y = 0., z = 0., height = 0.2, part_z = 0.;
+    bool in_tower = false, in_change = false, prime = false, purge = false, ramming = false, relative = false;
+    size_t layer = 0, row_id = 0, number = 0;
+    while (std::getline(lines, line)) {
+        ++number;
+        const auto tag = [&line](const char *prefix) { return line.rfind(prefix, 0) == 0; };
+        if (tag("; MACHINE_END_GCODE_START"))
+            break;
+        if (tag("; CHANGE_LAYER")) {
+            ++layer;
+            prime = false;
+        } else if (tag("; Z_HEIGHT:"))
+            part_z = std::atof(line.c_str() + 11);
+        else if (tag("; FEATURE:"))
+            prime = line.find("Prime tower") != std::string::npos;
+        else if (tag("; WIPE_TOWER_START"))
+            in_tower = true;
+        else if (tag("; WIPE_TOWER_END"))
+            in_tower = purge = ramming = false;
+        else if (tag("; CP_TOOLCHANGE_START"))
+            in_change = true;
+        else if (tag("; CP_TOOLCHANGE_END"))
+            in_change = false;
+        else if (tag("; CP_TOOLCHANGE_WIPE")) {
+            purge = true;
+            ++row_id;
+        } else if (tag("; CP TOOLCHANGE END"))
+            purge = false;
+        else if (tag("; NOZZLE_CHANGE_START")) {
+            ramming = true;
+            ++row_id;
+        } else if (tag("; NOZZLE_CHANGE_END"))
+            ramming = false;
+        else if (tag("; LAYER_HEIGHT:"))
+            height = std::atof(line.c_str() + 15);
+        else if (tag(";HEIGHT:"))
+            height = std::atof(line.c_str() + 8);
+        GMove move;
+        move.height = height;
+        move.part_z = part_z;
+        move.in_tower = in_tower;
+        move.in_change = in_change;
+        move.prime = prime;
+        move.row = purge ? "purge" : ramming ? "ramming" : nullptr;
+        move.row_id = row_id;
+        move.layer = layer;
+        move.line = number;
+        move.z0 = move.z = z;
+        if (layer > 0 && line.size() > 1 && line[0] == 'T' && std::isdigit((unsigned char) line[1]) && std::atoi(line.c_str() + 1) < 255) {
+            move.tool_change = true;
+            move.points = {Vec2d(x, y)};
+            visit(move);
             continue;
-        support += move.extrusion_role == erSupportMaterial;
-        const bool in_interface_filament = int(move.extruder_id) == interface_filament - 1;
-        interface_roads += in_interface_filament && move.extrusion_role == erSupportMaterialInterface;
-        if (!in_interface_filament || double(move.position.z()) > fine + 1e-3)
-            continue;
-        if (move.extrusion_role == erWipeTower)
-            ++tower_on_bed;
-        else {
-            ++on_bed;
-            box.merge(Vec2d(move.position.x(), move.position.y()));
         }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("G90", 0) == 0 && (code.size() == 3 || code[3] == ' '))
+            relative = false;
+        if (code.rfind("G91", 0) == 0 && (code.size() == 3 || code[3] == ' '))
+            relative = true;
+        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
+            continue;
+        double nx = x, ny = y, ci = 0., cj = 0.;
+        std::istringstream words(code.substr(3));
+        for (std::string word; words >> word;) {
+            if (word.size() < 2)
+                continue;
+            const double value = std::atof(word.c_str() + 1);
+            switch (word[0]) {
+            case 'X': nx = relative ? x + value : value; move.has_xy = true; break;
+            case 'Y': ny = relative ? y + value : value; move.has_xy = true; break;
+            case 'Z': move.z = relative ? z + value : value; move.has_z = true; break;
+            case 'E': move.e = value; break;
+            case 'I': ci = value; break;
+            case 'J': cj = value; break;
+            default: break;
+            }
+        }
+        move.points = {Vec2d(x, y), Vec2d(nx, ny)};
+        // An arc (G2 clockwise, G3 counter-clockwise, the rib wall's corners) in pieces of about 0.5 mm.
+        if ((code[1] == '2' || code[1] == '3') && (ci != 0. || cj != 0.)) {
+            const Vec2d center(x + ci, y + cj);
+            const double radius = std::hypot(ci, cj);
+            const double a0 = std::atan2(y - center.y(), x - center.x());
+            double a1 = std::atan2(ny - center.y(), nx - center.x());
+            if (code[1] == '3')
+                while (a1 <= a0) a1 += 2. * M_PI;
+            else
+                while (a1 >= a0) a1 -= 2. * M_PI;
+            const int pieces = std::max(2, int(std::abs(a1 - a0) * radius / 0.5) + 1);
+            move.points.clear();
+            for (int k = 0; k <= pieces; ++k) {
+                const double a = a0 + (a1 - a0) * k / pieces;
+                move.points.emplace_back(center.x() + radius * std::cos(a), center.y() + radius * std::sin(a));
+            }
+        }
+        visit(move);
+        x = nx;
+        y = ny;
+        z = move.z;
     }
-    if (support == 0 || interface_roads == 0)
-        return what.str() + "support " + std::to_string(support) + ", interface " + std::to_string(interface_roads);
-    if (on_bed == 0 && tower_on_bed == 0)
+}
+
+// Empty when the tower never stands more than one coarse minimum layer above the part layer it is laid with. The
+// tower may run ahead of the part only by the steps its own rules allow: an outgoing tool rams at no less than its
+// nozzle's minimum layer height, and right above the bed level a coarse arrival lays a full minimum step.
+std::string tower_ahead_failure(const std::string &gcode, double coarse_min)
+{
+    double most = 0., part_z = 0., tower_z = 0.;
+    walk_gcode(gcode, [&](const GMove &move) {
+        if (move.in_tower && move.e > 0. && move.z - move.part_z > most) {
+            most    = move.z - move.part_z;
+            part_z  = move.part_z;
+            tower_z = move.z;
+        }
+    });
+    if (most <= coarse_min + 1e-3)
         return {};
-    what << on_bed << " interface-filament roads on the first layer";
-    if (on_bed != 0)
-        what << " (X " << box.min.x() << ".." << box.max.x() << ", Y " << box.min.y() << ".." << box.max.y() << ")";
-    what << ", " << tower_on_bed << " tower roads in it on the first layer";
-    return what.str();
+    std::ostringstream out;
+    out << "tower extrusion at Z " << tower_z << " for part Z " << part_z << ", " << most << " mm above the part (allowed "
+        << coarse_min << ")";
+    return out.str();
 }
 
-std::function<void(ModelObject&)> parts_of(std::vector<TriangleMesh> (*make)())
+// Empty when no move outside the tower blocks comes down over the tower's footprint more than allowed below the
+// highest tower road laid so far: the nozzle going back to the part layer would hit a tower standing above it.
+std::string tower_dive_failure(const std::string &gcode, double allowed)
 {
-    return [make](ModelObject &object) {
-        for (TriangleMesh &mesh : make())
-            object.add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-    };
+    BoundingBoxf footprint;
+    walk_gcode(gcode, [&footprint](const GMove &move) {
+        if (move.in_tower && move.e > 0.)
+            footprint.merge(move.points.back());
+    });
+    if (!footprint.defined)
+        return {};
+    double top = 0.;
+    std::string failure;
+    walk_gcode(gcode, [&](const GMove &move) {
+        if (!failure.empty() || move.tool_change)
+            return;
+        if (move.in_tower) {
+            if (move.e > 0.)
+                top = std::max(top, move.z);
+        } else if (footprint.contains(move.points.back()) && move.z < top - allowed - 1e-3) {
+            std::ostringstream out;
+            out << "a move at X " << move.points.back().x() << " Y " << move.points.back().y() << " comes down to Z " << move.z
+                << " over the tower, whose top is at " << top << " (allowed " << allowed << " below it)";
+            failure = out.str();
+        }
+    });
+    return failure;
 }
 
-std::function<void(ModelObject&)> handy_model(const char *file)
-{
-    return [file](ModelObject &object) {
-        Model loaded = Model::read_from_file(std::string(PROFILES_DIR) + "/../handy_models/" + file);
-        for (const ModelObject *source : loaded.objects)
-            for (const ModelVolume *volume : source->volumes)
-                object.add_volume(*volume);
-        object.add_instance();
-        // The bunny, at the size it imports into the app.
-        if (object.instance_bounding_box(0).size().z() > 118.)
-            object.scale_to_fit(Vec3d(120., 120., 118.));
-    };
-}
-} // namespace
+// The tower's roads, each arc piece on its own, with the width its E, length and tagged height give (1.75 mm filament).
+struct TowerRoad { Vec2d a, b; double z, width; const char *row; size_t line; };
 
-TEST_CASE("Organic trees under curves keep the interface filament off the bed, in stock and on a Feature Split coarse base",
-          "[TestRebuild][SupportMatrix]")
+std::vector<TowerRoad> tower_roads(const std::string &gcode)
 {
-    std::vector<std::string> failures;
-    const std::vector<std::pair<const char *, std::function<void(ModelObject&)>>> shapes{
-        {"bunny-like ball on a foot", parts_of(bunny_like_parts)},
-        {"Benchy-like pocket", parts_of(benchy_like_parts)},
-    };
-    for (const auto &[name, parts] : shapes) {
-        // Stock first: it keeps the interface filament off the bed on these shapes.
-        if (std::string failure = interface_filament_on_bed(name, parts, Mode::Off, 0.10, 0.30, 3); !failure.empty() && !tree_refused(failure))
-            failures.push_back(failure);
-        for (const auto &[fine, coarse, ratio] : {std::tuple<double, double, int>{0.10, 0.30, 3}, {0.08, 0.56, 7}})
-            if (std::string failure = interface_filament_on_bed(name, parts, Mode::Feature, fine, coarse, ratio); !failure.empty() && !tree_refused(failure))
-                failures.push_back(failure);
+    const double filament_area = 0.25 * M_PI * 1.75 * 1.75;
+    std::vector<TowerRoad> roads;
+    walk_gcode(gcode, [&](const GMove &move) {
+        const double length = move.length();
+        if (!move.in_tower || move.e <= 0. || length <= 0.05 || move.height <= 0.)
+            return;
+        const double width = move.e * filament_area / (length * move.height) + move.height * (1. - 0.25 * M_PI);
+        for (size_t k = 1; k < move.points.size(); ++k)
+            roads.push_back({move.points[k - 1], move.points[k], move.z, width, move.row, move.line});
+    });
+    return roads;
+}
+
+// The 2 mm grid cells a road's bounding box, grown by reach, covers.
+std::set<std::pair<int, int>> cells_of(const TowerRoad &road, double reach)
+{
+    std::set<std::pair<int, int>> cells;
+    for (int gx = int(std::floor((std::min(road.a.x(), road.b.x()) - reach) / 2.)); gx <= int(std::floor((std::max(road.a.x(), road.b.x()) + reach) / 2.)); ++gx)
+        for (int gy = int(std::floor((std::min(road.a.y(), road.b.y()) - reach) / 2.)); gy <= int(std::floor((std::max(road.a.y(), road.b.y()) + reach) / 2.)); ++gy)
+            cells.insert({gx, gy});
+    return cells;
+}
+
+// Empty when no tower road crosses an earlier purge or ramming row that stands more than 0.02 mm higher: the nozzle
+// would be pushed through deposited plastic. Roads are compared by their bounding boxes, widened by 0.2 mm. A ramming
+// row stands higher when the outgoing tool rams at its own minimum above a lower level.
+std::string tower_plough_failure(const std::vector<TowerRoad> &roads)
+{
+    std::map<std::pair<int, int>, std::vector<size_t>> grid;
+    for (size_t i = 0; i < roads.size(); ++i) {
+        const TowerRoad &road = roads[i];
+        const std::set<std::pair<int, int>> cells = cells_of(road, 0.);
+        for (const auto &cell : cells)
+            for (size_t j : grid[cell]) {
+                const TowerRoad &earlier = roads[j];
+                if (earlier.row != nullptr && earlier.z > road.z + 0.02 &&
+                    std::max(earlier.a.x(), earlier.b.x()) >= std::min(road.a.x(), road.b.x()) - 0.2 &&
+                    std::min(earlier.a.x(), earlier.b.x()) <= std::max(road.a.x(), road.b.x()) + 0.2 &&
+                    std::max(earlier.a.y(), earlier.b.y()) >= std::min(road.a.y(), road.b.y()) - 0.2 &&
+                    std::min(earlier.a.y(), earlier.b.y()) <= std::max(road.a.y(), road.b.y()) + 0.2) {
+                    std::ostringstream out;
+                    out << "a tower road at Z " << road.z << " crosses an earlier " << earlier.row << " row at Z " << earlier.z;
+                    return out.str();
+                }
+            }
+        for (const auto &cell : cells)
+            grid[cell].push_back(i);
     }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
+    return {};
 }
 
-TEST_CASE("Benchy and bunny organic trees on a coarse support base keep the interface filament off the bed",
-          "[TestRebuild][SupportMatrix]")
+// Empty when no tower road touches an earlier purge or ramming row that stands more than 0.02 mm higher: their edges
+// must keep at least min_gap apart, or the nozzle laying the lower road rubs the side of the higher row.
+std::string tower_touch_failure(const std::vector<TowerRoad> &roads, double min_gap)
 {
-    std::vector<std::string> failures;
-    for (const char *file : {"3DBenchy.drc", "Stanford_Bunny.drc"})
-        if (std::string failure = interface_filament_on_bed(file, handy_model(file), Mode::Feature, 0.10, 0.30, 3); !failure.empty() && !tree_refused(failure))
-            failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
-
-namespace {
-// A 20 x 20 x 40 column with a 40 x 20 x 10 arm at its top, under Body Split: one part on the fine
-// 0.2 (filament 1, 0.1 mm), the other on the coarse 0.8 (filament 3, 0.3 mm), in the app's project
-// with supports off and the automatic tower.
-std::string body_split_two_part(bool column_coarse)
-{
-    std::ostringstream what;
-    what << "Body Split, column on the " << (column_coarse ? "coarse" : "fine") << " nozzle: ";
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
-    config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
-    config.set_key_value("enable_support", new ConfigOptionBool(false));
-    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
-                            "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
-        config.set_key_value(key, new ConfigOptionInt(0));
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [column_coarse](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "two-part column and arm";
-        const auto add = [object](TriangleMesh mesh, bool coarse) {
-            ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-            volume->config.set_key_value("extruder", new ConfigOptionInt(coarse ? 3 : 1));
-            volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(coarse ? 0.3 : 0.1));
+    const auto distance = [](const TowerRoad &r, const TowerRoad &s) {
+        const auto side = [](const Vec2d &o, const Vec2d &p, const Vec2d &q) {
+            return (p.x() - o.x()) * (q.y() - o.y()) - (p.y() - o.y()) * (q.x() - o.x());
         };
-        add(make_cube(20., 20., 40.), column_coarse);
-        TriangleMesh arm = make_cube(40., 20., 10.);
-        arm.translate(20.f, 0.f, 30.f);
-        add(std::move(arm), !column_coarse);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
+        if (side(s.a, s.b, r.a) * side(s.a, s.b, r.b) < 0. && side(r.a, r.b, s.a) * side(r.a, r.b, s.b) < 0.)
+            return 0.;
+        return std::min({point_to_segment(r.a, s.a, s.b), point_to_segment(r.b, s.a, s.b), point_to_segment(s.a, r.a, r.b),
+                         point_to_segment(s.b, r.a, r.b)});
     };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
+    // Grid of 2 mm cells over the held rows laid so far: only purge and ramming rows count as earlier roads.
+    std::map<std::pair<int, int>, std::vector<size_t>> grid;
+    for (size_t i = 0; i < roads.size(); ++i) {
+        const TowerRoad &road = roads[i];
+        for (const auto &cell : cells_of(road, 1.)) {
+            const auto found = grid.find(cell);
+            if (found == grid.end())
+                continue;
+            for (size_t j : found->second) {
+                const TowerRoad &earlier = roads[j];
+                if (earlier.z <= road.z + 0.02)
+                    continue;
+                if (const double gap = distance(road, earlier) - 0.5 * (road.width + earlier.width); gap < min_gap) {
+                    std::ostringstream out;
+                    out << "a tower road at Z " << road.z << " (G-code line " << road.line << ") comes within " << gap
+                        << " mm of an earlier " << earlier.row << " row at Z " << earlier.z << " (line " << earlier.line << ")";
+                    return out.str();
+                }
+            }
+        }
+        if (road.row != nullptr)
+            for (const auto &cell : cells_of(road, 0.))
+                grid[cell].push_back(i);
     }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    return facts.gcode.empty() ? what.str() + "no G-code" : std::string();
+    return {};
+}
+
+// Rows (rammings and purges) held above their level: a Z step of 0.02 to 0.1 mm up inside the row.
+size_t held_rows(const std::string &gcode)
+{
+    size_t held = 0, last = 0;
+    walk_gcode(gcode, [&](const GMove &move) {
+        if (move.row != nullptr && move.has_z && move.z > move.z0 + 0.02 && move.z < move.z0 + 0.1 && move.row_id != last) {
+            ++held;
+            last = move.row_id;
+        }
+    });
+    return held;
+}
+
+// Empty when the plate has held rows and no tower road runs under or beside one.
+std::string held_rows_failure(const std::string &gcode)
+{
+    const size_t held = held_rows(gcode);
+    if (held == 0)
+        return "no row held above its level";
+    const std::vector<TowerRoad> roads = tower_roads(gcode);
+    std::string failure = tower_plough_failure(roads);
+    if (failure.empty())
+        failure = tower_touch_failure(roads, 0.02);
+    return failure.empty() ? failure : std::to_string(held) + " held rows, and " + failure;
 }
 } // namespace
 
-TEST_CASE("Body Split slices with the part on the bed on the coarse nozzle", "[TestRebuild][Support]")
-{
-    for (bool column_coarse : {false, true}) {
-        const std::string failure = body_split_two_part(column_coarse);
-        INFO(failure);
-        CHECK((failure.empty() || tree_refused(failure)));
-    }
-}
+// ---- Support matrix ---------------------------------------------------------------------------------
 
 namespace {
-// A column with a shelf on the right whose top is 0.1 mm above the underside of an arm on the left,
-// and a second arm over the shelf. The left arm's support top and the bottom of the support standing
-// on the shelf are closer together than the coarse nozzle's thinnest layer.
-TriangleMesh shelf_and_arms_mesh()
+enum class Shape { TwoArm, Shelf };
+
+struct MatrixCase {
+    Mode         mode;
+    double       fine, coarse;
+    int          ratio;
+    double       top_z;
+    SupportCase  support;
+    FilamentCase filaments;
+    Shape        shape = Shape::TwoArm;
+    // A 5 mm outer brim, tallied against the first-layer support.
+    bool         brim = false;
+    // The PETG interface prints only at the arms' contacts, over a dense fine PLA layer.
+    bool         petg_contacts = false;
+};
+
+struct Outcome { std::string code, opt_key, failure; };
+
+std::string label(const MatrixCase &c)
 {
-    return extruded_xz_outline({{0., 0.}, {20., 0.}, {20., 10.1}, {8., 10.1}, {8., 13.}, {20., 13.}, {20., 14.},
-                                {0., 14.}, {0., 11.}, {-12., 11.}, {-12., 10.}, {0., 10.}},
-                               12.);
+    std::ostringstream out;
+    out << mode_name(c.mode) << " / " << c.support.name << " / " << c.filaments.name << " " << c.filaments.interface_type
+        << " / " << c.fine << "/" << c.coarse << " gap " << c.top_z << (c.shape == Shape::Shelf ? " / shelf" : "");
+    return out.str();
+}
+
+// Top of the support under the model inside [x_lo, x_hi], the model's underside there, and the
+// role of the topmost support road.
+struct Gap {
+    double       support_top   = 0.;
+    double       object_bottom = std::numeric_limits<double>::max();
+    ExtrusionRole top_role     = erNone;
+};
+
+Gap support_gap(const std::vector<Move> &moves, double x_lo, double x_hi)
+{
+    Gap gap;
+    for (const Move &move : moves)
+        if (CadenceTest::model_road(move) && move.position.x() > x_lo && move.position.x() < x_hi)
+            gap.object_bottom = std::min(gap.object_bottom, double(move.position.z()) - double(move.height));
+    for (const Move &move : moves)
+        if (is_support(move) && move.position.x() > x_lo && move.position.x() < x_hi &&
+            double(move.position.z()) < gap.object_bottom + 1e-4 &&
+            double(move.position.z()) > gap.support_top + 1e-4) {
+            gap.support_top = double(move.position.z());
+            gap.top_role    = move.extrusion_role;
+        }
+    return gap;
 }
 
 void collect_paths(const ExtrusionEntity *entity, std::vector<const ExtrusionPath*> &out)
@@ -1337,632 +772,490 @@ std::string support_into_part(const PrintObject &object)
     return count == 0 ? std::string() : std::to_string(count) + " support roads reach into the part " + what.str();
 }
 
-std::string coarse_support_on_shelf(double coarse, int ratio, const SupportCase &support)
+// Slices one case to G-code. Returns the refusal's code and setting, and what is wrong with the slice, if anything.
+// two_body_layers counts the support layers where both nozzles lay body, on the PETG contact cases.
+Outcome run_case(const MatrixCase &c, size_t &two_body_layers)
 {
     std::ostringstream what;
-    what << support.name << " / coarse " << coarse << ": ";
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, coarse, ratio, 0., support,
-                                                   FilamentCase{"body and interface on the coarse nozzle", 2, 4});
-    config.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
+    what << label(c) << ": ";
+    DynamicPrintConfig config = h2d_support_config(c.mode, c.fine, c.coarse, c.ratio, c.top_z, c.support, c.filaments);
+    if (c.shape == Shape::Shelf)
+        config.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
+    if (c.brim) {
+        config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
+        config.set_key_value("brim_width", new ConfigOptionFloat(5.));
+        config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.));
+    }
+    bambu_config(config);
     Model model;
     Print print;
     print.is_BBL_printer() = true;
-    ModelObject *object = model.add_object();
-    object->name = "shelf and two arms";
-    object->add_volume(shelf_and_arms_mesh(), ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->instances.front()->set_offset(Vec3d(60., 60., 0.));
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
-    if (const StringObjectException refusal = print.validate(); !refusal.string.empty())
-        return what.str() + "refused: " + refusal.string;
-    try {
-        print.process();
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (print.objects().front()->support_layers().empty())
-        return what.str() + "no support";
-    const std::string failure = support_into_part(*print.objects().front());
-    return failure.empty() ? failure : what.str() + failure;
-}
-} // namespace
-
-TEST_CASE("Support laid on coarse rows never reaches down into the part it stands on", "[TestRebuild][Support]")
-{
-    std::vector<std::string> failures;
-    for (const auto &[coarse, ratio] : {std::pair<double, int>{0.30, 3}, {0.20, 2}})
-        for (const SupportCase &support : {k_normal, k_organic})
-            // Body and interface share the coarse nozzle here.
-            if (std::string failure = coarse_support_on_shelf(coarse, ratio, support); !failure.empty() && !tree_refused(failure, true))
-                failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
-
-namespace {
-// Body Split: a coarse column on the bed and a fine arm on top of it, with support under the arm
-// standing on the bed. On the layers under the arm only the coarse body prints, so a fine body
-// filament has to come from the project, never the interface filament.
-std::string body_split_support_body(const SupportCase &support)
-{
-    std::ostringstream what;
-    what << "Body Split / " << support.name << ": ";
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, support);
-    config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
-    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
-                            "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
-        config.set_key_value(key, new ConfigOptionInt(0));
-    const int base = config.opt_int("support_filament"), interface_filament = config.opt_int("support_interface_filament");
-    REQUIRE(base != interface_filament);
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "coarse column, fine arm";
-        const auto add = [object](TriangleMesh mesh, int filament, double height) {
-            ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-            volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
-            volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
-        };
-        add(make_cube(20., 20., 40.), 3, 0.3);
-        TriangleMesh arm = make_cube(40., 20., 10.);
-        arm.translate(20.f, 0.f, 30.f);
-        add(std::move(arm), 1, 0.1);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
+    if (c.shape == Shape::Shelf) {
+        add_object(model, "shelf and two arms", shelf_and_arms_mesh(), Vec3d(60., 60., 0.));
+        print.apply(model, config);
         print.set_status_silent();
-    };
+    } else
+        load_two_arm_model(model, print, config, c.mode, c.fine, c.coarse);
+    const double left = model.objects.front()->instance_bounding_box(0).min.x();
+    Outcome out;
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
+    if (out.failure = slice_into(print, what.str(), facts); !out.failure.empty()) {
+        out.code    = code_of(facts.refusal.string);
+        out.opt_key = facts.refusal.opt_key;
+        return out;
     }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    const double coarse_minimum = config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
-    size_t body = 0, body_in_interface = 0, interface_on_bed = 0, coarse_body = 0, coarse_thin = 0;
+
+    const bool mode_on = c.mode != Mode::Off;
+    const bool petg    = std::string(c.filaments.interface_type) == "PETG";
+    // Under a mode a Default interface prints with the base filament.
+    const int interface_filament = c.filaments.interface_filament > 0 ? c.filaments.interface_filament :
+                                   mode_on ? c.filaments.base : 0;
+    // Each nozzle's layer height range, as h2d_support_config sets it.
+    const double nozzle_min[2] = {0.04, 0.16};
+    const double nozzle_max[2] = {0.14, 0.56};
+    size_t base = 0, interface_roads = 0, base_wrong = 0, interface_wrong = 0, out_of_range = 0;
     for (const Move &move : facts.moves) {
         if (move.type != EMoveType::Extrude)
             continue;
-        const bool in_interface = int(move.extruder_id) == interface_filament - 1;
+        const int nozzle = int(move.physical_tool_id);
         if (move.extrusion_role == erSupportMaterial) {
-            ++body;
-            body_in_interface += in_interface;
-            if (move.physical_tool_id == 1) {
-                ++coarse_body;
-                coarse_thin += double(move.position.z()) > 0.1 + 1e-3 && double(move.height) < coarse_minimum - 0.005;
+            ++base;
+            // Under a mode, body the coarse base nozzle cannot lay is laid by the interface nozzle in a filament of
+            // the base's material there, never an interface filament of another material.
+            const bool fine_body = mode_on && c.filaments.interface_filament > 0 &&
+                k_filament_map[c.filaments.base - 1] != k_filament_map[c.filaments.interface_filament - 1] &&
+                nozzle == k_filament_map[c.filaments.interface_filament - 1] - 1 &&
+                (int(move.extruder_id) != c.filaments.interface_filament - 1 || !petg);
+            base_wrong += !fine_body && (int(move.extruder_id) != c.filaments.base - 1 ||
+                          nozzle != k_filament_map[c.filaments.base - 1] - 1);
+        } else if (move.extrusion_role == erSupportMaterialInterface) {
+            ++interface_roads;
+            if (interface_filament > 0)
+                interface_wrong += int(move.extruder_id) != interface_filament - 1 ||
+                                   nozzle != k_filament_map[interface_filament - 1] - 1;
+        } else if (move.extrusion_role != erInternalInfill || nozzle != 1)
+            continue;
+        // Under a mode every support road above the first layer is a height its nozzle can lay, and the coarse
+        // nozzle lays no sparse infill thinner than its minimum.
+        const bool sparse = move.extrusion_role == erInternalInfill;
+        if (mode_on && nozzle >= 0 && nozzle < 2 && double(move.position.z()) > c.fine + 1e-3 &&
+            (double(move.height) < nozzle_min[nozzle] - (sparse ? 0.005 : 1e-3) ||
+             (!sparse && double(move.height) > nozzle_max[nozzle] + 1e-3))) {
+            if (out_of_range < 3)
+                what << "[Z " << move.position.z() << ", height " << move.height << ", role " << int(move.extrusion_role)
+                     << ", nozzle " << nozzle + 1 << "] ";
+            ++out_of_range;
+        }
+    }
+    bool ok = true;
+    if (base == 0 || interface_roads == 0 || base_wrong != 0 || interface_wrong != 0) {
+        what << "base " << base << " (" << base_wrong << " on the wrong filament), interface " << interface_roads
+             << " (" << interface_wrong << " on the wrong filament); ";
+        ok = false;
+    }
+    if (out_of_range != 0) {
+        what << out_of_range << " support or coarse sparse roads outside their nozzle's layer height range; ";
+        ok = false;
+    }
+    // Under each arm the topmost support road is interface and sits the top Z distance below the
+    // model, rounded up to at most one fine layer.
+    if (c.shape == Shape::TwoArm)
+        for (const auto &[name, lo, hi] : {std::tuple<const char *, double, double>{"left arm", left + 1., left + 7.},
+                                            {"right arm", left + 18., left + 23.}}) {
+            const Gap gap = support_gap(facts.moves, lo, hi);
+            const double distance = gap.object_bottom - gap.support_top;
+            if (gap.support_top <= 0. || gap.top_role != erSupportMaterialInterface ||
+                distance < c.top_z - 1e-3 || distance > c.top_z + c.fine + 1e-3) {
+                what << name << " support top " << gap.support_top << " role " << int(gap.top_role) << " under model at "
+                     << gap.object_bottom << "; ";
+                ok = false;
             }
         }
-        interface_on_bed += in_interface && double(move.position.z()) < 0.3 + 1e-3;
+    // Support laid on coarse rows never reaches down into the part it stands on.
+    if (mode_on)
+        if (const std::string into = support_into_part(*print.objects().front()); !into.empty()) {
+            what << into << "; ";
+            ok = false;
+        }
+
+    if (c.petg_contacts) {
+        for (const SupportLayer *layer : print.objects().front()->support_layers())
+            two_body_layers += !layer->fine_body_fills.empty();
+        // The PETG prints only the interface right under each arm (x range and underside from two_arm_mesh()), and
+        // the layer under its lowest one is dense PLA on the fine nozzle.
+        struct Arm { const char *name; double x_lo, x_hi, underside; };
+        const Arm arms[2] = {{"left arm", left, left + 8., 6.6}, {"right arm", left + 16., left + 24., 3.0}};
+        const int petg_filament = c.filaments.interface_filament - 1;
+        size_t petg_roads = 0, petg_elsewhere = 0;
+        double lowest_petg[2] = {std::numeric_limits<double>::max(), std::numeric_limits<double>::max()};
+        for (const Move &move : facts.moves) {
+            if (move.type != EMoveType::Extrude || move.extrusion_role == erWipeTower || int(move.extruder_id) != petg_filament)
+                continue;
+            ++petg_roads;
+            const double x = double(move.position.x()), z = double(move.position.z());
+            bool at_contact = false;
+            for (size_t i = 0; i < 2; ++i)
+                if (move.extrusion_role == erSupportMaterialInterface && x > arms[i].x_lo - 2. && x < arms[i].x_hi + 2. &&
+                    z > arms[i].underside - c.top_z - 2. * c.fine - 1e-3 && z < arms[i].underside - c.top_z + 1e-3) {
+                    at_contact = true;
+                    lowest_petg[i] = std::min(lowest_petg[i], z);
+                }
+            if (!at_contact && petg_elsewhere++ < 3)
+                what << "[PETG role " << int(move.extrusion_role) << " at x " << x << ", z " << z << "] ";
+        }
+        if (petg_roads == 0 || petg_elsewhere != 0) {
+            what << petg_roads << " PETG roads, " << petg_elsewhere << " of them away from the contacts; ";
+            ok = false;
+        }
+        for (size_t i = 0; i < 2; ++i) {
+            const double below = lowest_petg[i] - c.fine;
+            const bool pla_below = lowest_petg[i] < std::numeric_limits<double>::max() &&
+                std::any_of(facts.moves.begin(), facts.moves.end(), [&](const Move &move) {
+                    return move.type == EMoveType::Extrude && move.extrusion_role == erSupportMaterial &&
+                        int(move.extruder_id) != petg_filament && move.physical_tool_id == 0 &&
+                        std::abs(double(move.position.z()) - below) < 1e-3 &&
+                        double(move.position.x()) > arms[i].x_lo && double(move.position.x()) < arms[i].x_hi;
+                });
+            if (!pla_below) {
+                what << "no fine PLA body under the " << arms[i].name << "'s PETG; ";
+                ok = false;
+            }
+        }
     }
-    if (body == 0)
-        return what.str() + "no support body";
-    // The support base is coarse PLA: the coarse nozzle lays body, never thinner than it can.
-    if (body_in_interface == 0 && interface_on_bed == 0 && coarse_body > 0 && coarse_thin == 0)
+
+    if (c.brim) {
+        // The brim keeps off the first-layer support: a brim road that ends inside a support road would lay
+        // filament on top of it. A few brim ends touch a support road where the two meet.
+        double first_z = std::numeric_limits<double>::max();
+        for (const Move &move : facts.moves)
+            if (CadenceTest::model_road(move))
+                first_z = std::min(first_z, double(move.position.z()));
+        struct Road { Vec2d a, b; double width; };
+        std::vector<Road> support;
+        for (size_t i = 1; i < facts.moves.size(); ++i)
+            if (const Move &move = facts.moves[i]; is_support(move) && std::abs(double(move.position.z()) - first_z) < 1e-3)
+                support.push_back({facts.moves[i - 1].position.head<2>().cast<double>(), move.position.head<2>().cast<double>(),
+                                   double(move.width)});
+        size_t brim_roads = 0, brim_on_support = 0;
+        for (const Move &move : facts.moves)
+            if (move.type == EMoveType::Extrude && move.extrusion_role == erBrim && std::abs(double(move.position.z()) - first_z) < 1e-3) {
+                ++brim_roads;
+                const Vec2d end = move.position.head<2>().cast<double>();
+                brim_on_support += std::any_of(support.begin(), support.end(), [&](const Road &road) {
+                    return point_to_segment(end, road.a, road.b) < 0.5 * (road.width + double(move.width)) - 0.05;
+                });
+            }
+        if (support.empty() || brim_roads == 0 || brim_on_support * 20 > brim_roads) {
+            what << brim_on_support << " of " << brim_roads << " brim roads end on the " << support.size() << " first-layer support roads; ";
+            ok = false;
+        }
+    }
+    out.failure = ok ? std::string() : what.str();
+    return out;
+}
+
+// Slim, Strong and Hybrid trees on a coarse base are refused for their style (an Organic tree never is), and any
+// tree with its interface on the base's coarse nozzle for that: SRL-F14 under Feature Split, SRL-A53 under Body Split.
+bool tree_refused(const Outcome &outcome, const MatrixCase &c)
+{
+    if (outcome.code != "SRL-F14" && outcome.code != "SRL-A53")
+        return false;
+    if (outcome.opt_key == "support_style")
+        return c.support.style != smsTreeOrganic;
+    const bool interface_on_base_nozzle = c.filaments.interface_filament == 0 ||
+        k_filament_map[c.filaments.base - 1] == k_filament_map[c.filaments.interface_filament - 1];
+    return outcome.opt_key == "support_interface_filament" && interface_on_base_nozzle;
+}
+
+// Every case prints, or is refused as a tree on a coarse base, except an interface on a larger nozzle than the base
+// under a mode, which is refused (SRL-F01, SRL-A29): the interface is what touches the model.
+std::string judge(const MatrixCase &c, const Outcome &outcome)
+{
+    if (tree_refused(outcome, c))
         return {};
-    what << body_in_interface << " support body roads in the interface filament, " << interface_on_bed
-         << " interface-filament roads in the first coarse layer, " << coarse_body << " coarse body roads, "
-         << coarse_thin << " of them under the coarse minimum";
-    return what.str();
+    const bool interface_larger = c.mode != Mode::Off && c.filaments.interface_filament > 0 &&
+        k_filament_map[c.filaments.base - 1] == 1 && k_filament_map[c.filaments.interface_filament - 1] == 2;
+    if (!interface_larger)
+        return outcome.failure;
+    if (outcome.code == (c.mode == Mode::Body ? "SRL-A29" : "SRL-F01") && outcome.opt_key == "support_interface_filament")
+        return {};
+    return label(c) + ": expected a refusal, got " + (outcome.failure.empty() ? std::string("a slice") : outcome.failure);
 }
 } // namespace
 
-TEST_CASE("Support body the fine nozzle lays never takes the interface filament", "[TestRebuild][Support]")
+TEST_CASE("Support matrix on an H2D 0.2/0.8 slices to G-code; Slim and Hybrid trees on a coarse base are refused", "[TestRebuild][SupportMatrix]")
 {
-    std::vector<std::string> failures;
+    const FilamentCase base_coarse{"base coarse, interface fine", 2, 3};
+    const FilamentCase petg{"base coarse, interface fine", 2, 3, "PETG"};
+    const std::vector<FilamentCase> filament_cases{
+        {"interface Default", 2, 0},
+        {"interface = base", 2, 2},
+        {"interface on the base nozzle", 2, 4},
+        base_coarse,
+        {"base fine, interface coarse", 3, 4},
+    };
+    std::vector<MatrixCase> cases;
+    for (Mode mode : {Mode::Off, Mode::Feature, Mode::Body})
+        for (const SupportCase &support : {k_normal, k_slim, k_hybrid, k_organic})
+            for (const FilamentCase &filaments : filament_cases)
+                // With the base on the coarse nozzle the fine nozzle lays the first-layer support, which the brim keeps
+                // off in Feature Split as in Off.
+                cases.push_back({mode, 0.10, 0.30, 3, 0.20, support, filaments, Shape::TwoArm,
+                                 mode != Mode::Body && support.type == stNormalAuto && filaments.base == 2 && filaments.interface_filament == 3});
+    // A 0.08 fine layer under 0.56 (ratio 7) and 0.24 (ratio 3) coarse layers, with a 0.24 gap.
+    for (const auto &[coarse, ratio] : {std::pair<double, int>{0.56, 7}, {0.24, 3}})
+        for (const SupportCase &support : {k_organic, k_hybrid, k_slim, k_normal})
+            cases.push_back({Mode::Feature, 0.08, coarse, ratio, 0.24, support, petg});
+    for (const SupportCase &support : {k_organic, k_hybrid, k_slim})
+        cases.push_back({Mode::Feature, 0.08, 0.56, 7, 0.24, support, base_coarse});
+    cases.push_back({Mode::Feature, 0.08, 0.56, 7, 0.24, k_organic, filament_cases[1]});
+    for (const FilamentCase &filaments : {base_coarse, filament_cases[4], filament_cases[0]})
+        cases.push_back({Mode::Off, 0.08, 0.56, 7, 0.24, k_organic, filaments});
+    // At zero gap a PETG interface prints only at the contacts, also where both nozzles lay body on one layer. The
+    // shelf's support stands on the part with body and interface sharing the coarse nozzle.
     for (const SupportCase &support : {k_normal, k_organic})
-        if (std::string failure = body_split_support_body(support); !failure.empty() && !tree_refused(failure))
-            failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
+        for (const auto &[coarse, ratio] : {std::pair<double, int>{0.30, 3}, {0.20, 2}}) {
+            cases.push_back({Mode::Feature, 0.10, coarse, ratio, 0., support, petg, Shape::TwoArm, false, true});
+            if (support.type == stNormalAuto)
+                cases.push_back({Mode::Feature, 0.10, coarse, ratio, 0., support, filament_cases[2], Shape::Shelf});
+        }
+    std::vector<std::string> failures;
+    size_t two_body_layers = 0;
+    for (const MatrixCase &c : cases)
+        failures.push_back(judge(c, run_case(c, two_body_layers)));
+    CAPTURE(cases.size());
+    check_no_failures(failures);
+    // Organic trees leave thin pieces to the fine nozzle beside coarse band roads, so the PETG contact cases have
+    // layers where both nozzles lay body.
+    CHECK(two_body_layers > 0);
 }
 
-namespace {
-// How far the prime tower's highest extrusion stands above the part layer it is printed with (the last Z_HEIGHT), over
-// the whole print, with the part Z where that happens. The tower may run ahead of the part only by the steps its own
-// rules allow: an outgoing tool rams at no less than its nozzle's minimum layer height (ramming_height()), and right
-// above the bed level a coarse arrival lays a full minimum step. Neither is more than the coarse minimum.
-struct TowerAhead { double most = 0.; double part_z = 0.; double tower_z = 0.; };
-TowerAhead tower_ahead_of_part(const std::string &gcode_text)
+TEST_CASE("Feature Split exports a plate of two different objects of different heights, with and without supports",
+          "[TestRebuild][Support][MultiObject]")
 {
-    TowerAhead ahead;
-    std::istringstream gcode(gcode_text);
-    std::string line;
-    double part = 0., z = 0.;
-    bool in_tower = false, relative = false;
-    while (std::getline(gcode, line)) {
-        if (line.rfind("; Z_HEIGHT:", 0) == 0) {
-            part = std::atof(line.c_str() + 11);
-            continue;
-        }
-        if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
-            break;
-        if (line.rfind("; WIPE_TOWER_START", 0) == 0) {
-            in_tower = true;
-            continue;
-        }
-        if (line.rfind("; WIPE_TOWER_END", 0) == 0) {
-            in_tower = false;
-            continue;
-        }
-        const std::string code = line.substr(0, line.find(';'));
-        if (code.rfind("G90", 0) == 0 && (code.size() == 3 || code[3] == ' ')) {
-            relative = false;
-            continue;
-        }
-        if (code.rfind("G91", 0) == 0 && (code.size() == 3 || code[3] == ' ')) {
-            relative = true;
-            continue;
-        }
-        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
-            continue;
-        double e = 0.;
-        std::istringstream words(code.substr(3));
-        std::string word;
-        while (words >> word) {
-            if (word.size() < 2)
-                continue;
-            const double value = std::atof(word.c_str() + 1);
-            if (word[0] == 'Z')
-                z = relative ? z + value : value;
-            else if (word[0] == 'E')
-                e = value;
-        }
-        if (in_tower && e > 0. && z - part > ahead.most) {
-            ahead.most    = z - part;
-            ahead.part_z  = part;
-            ahead.tower_z = z;
-        }
-    }
-    return ahead;
-}
-
-// Empty when the tower never stands more than one coarse minimum layer above the part.
-std::string tower_ahead_failure(const std::string &gcode, double coarse_min)
-{
-    const TowerAhead ahead = tower_ahead_of_part(gcode);
-    if (ahead.most <= coarse_min + 1e-3)
-        return {};
-    std::ostringstream out;
-    out << "tower extrusion at Z " << ahead.tower_z << " for part Z " << ahead.part_z << ", " << ahead.most
-        << " mm above the part (allowed " << coarse_min << ")";
-    return out.str();
-}
-
-// Empty when no tower road crosses an earlier purge row (between "; CP_TOOLCHANGE_WIPE" and "; CP TOOLCHANGE END")
-// or ramming row (between "; NOZZLE_CHANGE_START" and "; NOZZLE_CHANGE_END") that stands more than 0.02 mm higher:
-// the nozzle would be pushed through deposited plastic. Roads are compared by their bounding boxes, widened by 0.2 mm.
-// A ramming row stands higher when the outgoing tool rams at its own minimum above a lower level.
-std::string tower_plough_failure(const std::string &gcode_text)
-{
-    struct Road { double x0, y0, x1, y1, z; const char *row; };
-    std::vector<Road> roads;
-    std::istringstream gcode(gcode_text);
-    std::string line;
-    double x = 0., y = 0., z = 0.;
-    bool in_tower = false, in_purge = false, in_ramming = false;
-    while (std::getline(gcode, line)) {
-        if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
-            break;
-        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; WIPE_TOWER_END", 0) == 0) {
-            in_tower = line.rfind("; WIPE_TOWER_START", 0) == 0;
-            continue;
-        }
-        if (line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0) {
-            in_purge = line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0;
-            continue;
-        }
-        if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
-            in_ramming = line.rfind("; NOZZLE_CHANGE_START", 0) == 0;
-            continue;
-        }
-        const std::string code = line.substr(0, line.find(';'));
-        // Arcs (the rib wall's corners) count from end to end.
-        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
-            continue;
-        double nx = x, ny = y, e = 0., ci = 0., cj = 0.;
-        std::istringstream words(code.substr(3));
-        std::string word;
-        while (words >> word) {
-            if (word.size() < 2)
-                continue;
-            const double value = std::atof(word.c_str() + 1);
-            if (word[0] == 'X') nx = value;
-            else if (word[0] == 'Y') ny = value;
-            else if (word[0] == 'Z') z = value;
-            else if (word[0] == 'E') e = value;
-            else if (word[0] == 'I') ci = value;
-            else if (word[0] == 'J') cj = value;
-        }
-        // Points along the road: an arc (G2 clockwise, G3 counter-clockwise) in pieces of about 0.5 mm.
-        std::vector<Vec2d> points{Vec2d(x, y), Vec2d(nx, ny)};
-        if ((code[1] == '2' || code[1] == '3') && (ci != 0. || cj != 0.)) {
-            const Vec2d center(x + ci, y + cj);
-            const double radius = std::hypot(ci, cj);
-            const double a0 = std::atan2(y - center.y(), x - center.x());
-            double a1 = std::atan2(ny - center.y(), nx - center.x());
-            if (code[1] == '3')
-                while (a1 <= a0) a1 += 2. * M_PI;
-            else
-                while (a1 >= a0) a1 -= 2. * M_PI;
-            const int pieces = std::max(2, int(std::abs(a1 - a0) * radius / 0.5) + 1);
-            points.clear();
-            for (int k = 0; k <= pieces; ++k) {
-                const double a = a0 + (a1 - a0) * k / pieces;
-                points.emplace_back(center.x() + radius * std::cos(a), center.y() + radius * std::sin(a));
-            }
-        }
-        if (in_tower && e > 0. && std::abs(nx - x) + std::abs(ny - y) > 0.05)
-            for (size_t k = 1; k < points.size(); ++k)
-                roads.push_back({std::min(points[k - 1].x(), points[k].x()), std::min(points[k - 1].y(), points[k].y()),
-                                 std::max(points[k - 1].x(), points[k].x()), std::max(points[k - 1].y(), points[k].y()), z,
-                                 in_purge ? "purge" : in_ramming ? "ramming" : nullptr});
-        x = nx;
-        y = ny;
-    }
-    // Grid of 2 mm cells over the roads laid so far.
-    std::map<std::pair<int, int>, std::vector<size_t>> grid;
-    for (size_t i = 0; i < roads.size(); ++i) {
-        const Road &road = roads[i];
-        std::set<std::pair<int, int>> cells;
-        for (int gx = int(std::floor(road.x0 / 2.)); gx <= int(std::floor(road.x1 / 2.)); ++gx)
-            for (int gy = int(std::floor(road.y0 / 2.)); gy <= int(std::floor(road.y1 / 2.)); ++gy)
-                cells.insert({gx, gy});
-        for (const auto &cell : cells)
-            for (size_t j : grid[cell]) {
-                const Road &earlier = roads[j];
-                if (earlier.row != nullptr && earlier.z > road.z + 0.02 && earlier.x1 >= road.x0 - 0.2 && earlier.x0 <= road.x1 + 0.2 &&
-                    earlier.y1 >= road.y0 - 0.2 && earlier.y0 <= road.y1 + 0.2) {
-                    std::ostringstream out;
-                    out << "a tower road at Z " << road.z << " crosses an earlier " << earlier.row << " row at Z " << earlier.z;
-                    return out.str();
-                }
-            }
-        for (const auto &cell : cells)
-            grid[cell].push_back(i);
-    }
-    return {};
-}
-
-// Empty when no tower road touches an earlier purge or ramming row that stands more than 0.02 mm higher: their edges
-// must keep at least min_gap apart, or the nozzle laying the lower road rubs the side of the higher row. Each road's
-// width comes from its E, length and tagged height (1.75 mm filament); arcs are followed in pieces of about 0.5 mm.
-std::string tower_touch_failure(const std::string &gcode_text, double min_gap)
-{
-    struct Road { Vec2d a, b; double z, width; const char *row; size_t line; };
-    std::vector<Road> roads;
-    std::istringstream gcode(gcode_text);
-    std::string line;
-    double x = 0., y = 0., z = 0., height = 0.2;
-    bool in_tower = false, in_purge = false, in_ramming = false;
-    const double filament_area = 0.25 * M_PI * 1.75 * 1.75;
-    size_t line_no = 0;
-    while (std::getline(gcode, line)) {
-        ++line_no;
-        if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
-            break;
-        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; WIPE_TOWER_END", 0) == 0) {
-            in_tower = line.rfind("; WIPE_TOWER_START", 0) == 0;
-            if (! in_tower)
-                in_purge = in_ramming = false;
-            continue;
-        }
-        if (line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0) {
-            in_purge = line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0;
-            continue;
-        }
-        if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; NOZZLE_CHANGE_END", 0) == 0) {
-            in_ramming = line.rfind("; NOZZLE_CHANGE_START", 0) == 0;
-            continue;
-        }
-        for (const char *tag : {"; LAYER_HEIGHT:", ";HEIGHT:"})
-            if (line.rfind(tag, 0) == 0)
-                height = std::atof(line.c_str() + std::strlen(tag));
-        const std::string code = line.substr(0, line.find(';'));
-        if (code.size() < 3 || code[0] != 'G' || code[1] < '0' || code[1] > '3' || code[2] != ' ')
-            continue;
-        double nx = x, ny = y, e = 0., ci = 0., cj = 0.;
-        std::istringstream words(code.substr(3));
-        std::string word;
-        while (words >> word) {
-            if (word.size() < 2)
-                continue;
-            const double value = std::atof(word.c_str() + 1);
-            if (word[0] == 'X') nx = value;
-            else if (word[0] == 'Y') ny = value;
-            else if (word[0] == 'Z') z = value;
-            else if (word[0] == 'E') e = value;
-            else if (word[0] == 'I') ci = value;
-            else if (word[0] == 'J') cj = value;
-        }
-        std::vector<Vec2d> points{Vec2d(x, y), Vec2d(nx, ny)};
-        if ((code[1] == '2' || code[1] == '3') && (ci != 0. || cj != 0.)) {
-            const Vec2d center(x + ci, y + cj);
-            const double radius = std::hypot(ci, cj);
-            const double a0 = std::atan2(y - center.y(), x - center.x());
-            double a1 = std::atan2(ny - center.y(), nx - center.x());
-            if (code[1] == '3')
-                while (a1 <= a0) a1 += 2. * M_PI;
-            else
-                while (a1 >= a0) a1 -= 2. * M_PI;
-            const int pieces = std::max(2, int(std::abs(a1 - a0) * radius / 0.5) + 1);
-            points.clear();
-            for (int k = 0; k <= pieces; ++k) {
-                const double a = a0 + (a1 - a0) * k / pieces;
-                points.emplace_back(center.x() + radius * std::cos(a), center.y() + radius * std::sin(a));
-            }
-        }
-        double length = 0.;
-        for (size_t k = 1; k < points.size(); ++k)
-            length += (points[k] - points[k - 1]).norm();
-        if (in_tower && e > 0. && length > 0.05 && height > 0.) {
-            const double width = e * filament_area / (length * height) + height * (1. - 0.25 * M_PI);
-            for (size_t k = 1; k < points.size(); ++k)
-                roads.push_back({points[k - 1], points[k], z, width, in_purge ? "purge" : in_ramming ? "ramming" : nullptr, line_no});
-        }
-        x = nx;
-        y = ny;
-    }
-    const auto point_to_segment = [](const Vec2d &p, const Vec2d &a, const Vec2d &b) {
-        const Vec2d ab = b - a;
-        const double t = ab.squaredNorm() > 0. ? std::clamp((p - a).dot(ab) / ab.squaredNorm(), 0., 1.) : 0.;
-        return (p - (a + t * ab)).norm();
-    };
-    const auto distance = [&point_to_segment](const Road &r, const Road &s) {
-        const auto side = [](const Vec2d &o, const Vec2d &p, const Vec2d &q) {
-            return (p.x() - o.x()) * (q.y() - o.y()) - (p.y() - o.y()) * (q.x() - o.x());
+    // An 8 mm column with two arms and a 20 mm box beside it: each object gets its own layer plan
+    // block, so the plate exports.
+    const double box_height = 20.;
+    for (const bool supports : {false, true}) {
+        INFO((supports ? "with supports" : "without supports"));
+        CadenceTest::Scene scene;
+        scene.config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.20, k_normal, FilamentCase{"base coarse, interface fine", 2, 3});
+        scene.config.set_key_value("enable_support", new ConfigOptionBool(supports));
+        double column_max_x = 0., box_min_x = 0.;
+        scene.populate = [&](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+            column_max_x = add_object(model, "two-arm-overhang", two_arm_mesh(), Vec3d(60., 60., 0.))->instance_bounding_box(0).max.x();
+            box_min_x = add_object(model, "tall-box", make_cube(14., 14., box_height), Vec3d(110., 60., 0.))->instance_bounding_box(0).min.x();
+            print.apply(model, cfg);
+            print.set_status_silent();
         };
-        if (side(s.a, s.b, r.a) * side(s.a, s.b, r.b) < 0. && side(r.a, r.b, s.a) * side(r.a, r.b, s.b) < 0.)
-            return 0.;
-        return std::min({point_to_segment(r.a, s.a, s.b), point_to_segment(r.b, s.a, s.b), point_to_segment(s.a, r.a, r.b),
-                         point_to_segment(s.b, r.a, r.b)});
-    };
-    // Grid of 2 mm cells over the held rows laid so far: only purge and ramming rows count as earlier roads.
-    std::map<std::pair<int, int>, std::vector<size_t>> grid;
-    for (size_t i = 0; i < roads.size(); ++i) {
-        const Road &road = roads[i];
-        const double reach = 1.;
-        for (int gx = int(std::floor((std::min(road.a.x(), road.b.x()) - reach) / 2.)); gx <= int(std::floor((std::max(road.a.x(), road.b.x()) + reach) / 2.)); ++gx)
-            for (int gy = int(std::floor((std::min(road.a.y(), road.b.y()) - reach) / 2.)); gy <= int(std::floor((std::max(road.a.y(), road.b.y()) + reach) / 2.)); ++gy) {
-                const auto cell = grid.find({gx, gy});
-                if (cell == grid.end())
-                    continue;
-                for (size_t j : cell->second) {
-                    const Road &earlier = roads[j];
-                    if (earlier.z <= road.z + 0.02)
-                        continue;
-                    const double gap = distance(road, earlier) - 0.5 * (road.width + earlier.width);
-                    if (gap < min_gap) {
-                        std::ostringstream out;
-                        out << "a tower road at Z " << road.z << " (G-code line " << road.line << ") comes within " << gap
-                            << " mm of an earlier " << earlier.row << " row at Z " << earlier.z << " (line " << earlier.line << ")";
-                        return out.str();
-                    }
-                }
-            }
-        if (road.row == nullptr)
-            continue;
-        std::set<std::pair<int, int>> cells;
-        for (int gx = int(std::floor(std::min(road.a.x(), road.b.x()) / 2.)); gx <= int(std::floor(std::max(road.a.x(), road.b.x()) / 2.)); ++gx)
-            for (int gy = int(std::floor(std::min(road.a.y(), road.b.y()) / 2.)); gy <= int(std::floor(std::max(road.a.y(), road.b.y()) / 2.)); ++gy)
-                cells.insert({gx, gy});
-        for (const auto &cell : cells)
-            grid[cell].push_back(i);
+        const CadenceTest::Facts facts = CadenceTest::slice(scene);
+        INFO(facts.refusal.string);
+        REQUIRE(facts.refusal.string.empty());
+        REQUIRE_FALSE(facts.gcode.empty());
+        REQUIRE(column_max_x < box_min_x);
+        CHECK(facts.emitted.plan_start_markers == 2);
+        CHECK(facts.emitted.plan_end_markers == 2);
+        CHECK_FALSE(facts.emitted.plan_malformed);
+
+        // Both objects print in full: walls up to each one's own top, sparse infill inside each.
+        double column_top = 0., box_top = 0.;
+        size_t column_sparse = 0, box_sparse = 0, support_roads = 0;
+        for (const Move &move : facts.moves) {
+            support_roads += is_support(move);
+            if (!CadenceTest::model_road(move))
+                continue;
+            const bool on_box = double(move.position.x()) > box_min_x - 1.;
+            (on_box ? box_top : column_top) = std::max(on_box ? box_top : column_top, double(move.position.z()));
+            if (move.extrusion_role == erInternalInfill)
+                ++(on_box ? box_sparse : column_sparse);
+        }
+        CAPTURE(column_top, box_top, column_sparse, box_sparse, support_roads);
+        CHECK_THAT(box_top, Catch::Matchers::WithinAbs(box_height, 0.11));
+        CHECK_THAT(column_top, Catch::Matchers::WithinAbs(8., 0.11));
+        CHECK(column_sparse > 0);
+        CHECK(box_sparse > 0);
+        CHECK((support_roads > 0) == supports);
     }
-    return {};
 }
 
-// Empty when no move outside the tower blocks comes down over the tower's footprint more than allowed below the
-// highest tower road laid so far: the nozzle going back to the part layer would hit a tower standing above it.
-std::string tower_dive_failure(const std::string &gcode_text, double allowed)
-{
-    struct Move { double x, y, z, e; bool in_tower; };
-    std::vector<Move> moves;
-    std::istringstream gcode(gcode_text);
-    std::string line;
-    double x = 0., y = 0., z = 0.;
-    bool in_tower = false, relative = false;
-    while (std::getline(gcode, line)) {
-        if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
-            break;
-        if (line.rfind("; WIPE_TOWER_START", 0) == 0 || line.rfind("; WIPE_TOWER_END", 0) == 0) {
-            in_tower = line.rfind("; WIPE_TOWER_START", 0) == 0;
-            continue;
-        }
-        const std::string code = line.substr(0, line.find(';'));
-        if (code.rfind("G90", 0) == 0 && (code.size() == 3 || code[3] == ' '))
-            relative = false;
-        if (code.rfind("G91", 0) == 0 && (code.size() == 3 || code[3] == ' '))
-            relative = true;
-        if (code.size() < 3 || code[0] != 'G' || (code[1] != '0' && code[1] != '1') || code[2] != ' ')
-            continue;
-        double e = 0.;
-        std::istringstream words(code.substr(3));
-        std::string word;
-        while (words >> word) {
-            if (word.size() < 2)
-                continue;
-            const double value = std::atof(word.c_str() + 1);
-            if (word[0] == 'X') x = value;
-            else if (word[0] == 'Y') y = value;
-            else if (word[0] == 'Z') z = relative ? z + value : value;
-            else if (word[0] == 'E') e = value;
-        }
-        moves.push_back({x, y, z, e, in_tower});
-    }
-    BoundingBoxf footprint;
-    for (const Move &move : moves)
-        if (move.in_tower && move.e > 0.)
-            footprint.merge(Vec2d(move.x, move.y));
-    if (!footprint.defined)
-        return {};
-    double top = 0.;
-    for (const Move &move : moves) {
-        if (move.in_tower) {
-            if (move.e > 0.)
-                top = std::max(top, move.z);
-        } else if (footprint.contains(Vec2d(move.x, move.y)) && move.z < top - allowed - 1e-3) {
-            std::ostringstream out;
-            out << "a move at X " << move.x << " Y " << move.y << " comes down to Z " << move.z << " over the tower, whose top is at "
-                << top << " (allowed " << allowed << " below it)";
-            return out.str();
-        }
-    }
-    return {};
-}
-} // namespace
+// ---- Tower from the first layer -------------------------------------------------------------------
 
 namespace {
-// Body Split: a fine base (filament 1, at the fine layer height), a coarse column on it (filament 3, at the coarse layer
-// height) and a PETG cap on the fine nozzle (filament 2) overhanging both, with support under the cap on the base and on
-// the bed. The support base is coarse PLA, the interface the given filament. The coarse nozzle hands over to the fine one
-// on base levels one fine layer tall, and the support changes nozzle on layers that print only support. Every nozzle
-// change has to be a tower visit, and the tower never stands more than one coarse minimum layer above the part.
-// With mushroom set, the object is a fine stem (filament 1) under a wide coarse cap (filament 3) instead.
-std::string body_split_three_part(const SupportCase &support, int interface_filament, double fine, double coarse,
-                                  bool mushroom = false)
+struct TowerTally {
+    double      seconds = 0.;
+    size_t      tower_levels = 0;
+    size_t      coarse_roads = 0;
+    std::string gcode;
+    double      first_layer_height = 0.;
+    double      max_layer_height = 0.;
+};
+
+// What the G-code does with the prime tower: tower extrusions are the ones under "; FEATURE: Prime tower" or inside
+// a tower block, and each move's layer is the last "; Z_HEIGHT:" above it.
+struct TowerPath {
+    double lowest_tower_z = std::numeric_limits<double>::max();
+    // G-code layer of the lowest tower extrusion, and of the first extrusion above the first layer.
+    size_t lowest_tower_layer = 0;
+    size_t first_layer_above_bed = 0;
+    // Tower extrusions laid more than `tolerance` away from their layer's Z.
+    size_t off_layer_tower_roads = 0;
+    double worst_off_layer = 0.;
+    // Z-only descents of more than 1 mm to below the layer being printed, outside the tower footprint.
+    std::vector<std::string> plunges;
+};
+
+TowerPath tower_path(const std::string &gcode, double first_layer_height, double tolerance)
 {
-    std::ostringstream what;
-    what << (mushroom ? "Body Split two-part mushroom " : "Body Split three-part block ") << fine << "/" << coarse << " / "
-         << support.name << " / interface filament " << interface_filament << ": ";
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, fine, coarse, int(std::lround(coarse / fine)), support);
-    config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
-    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
-                            "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
-        config.set_key_value(key, new ConfigOptionInt(0));
-    config.set_key_value("enable_support", new ConfigOptionBool(true));
-    config.set_key_value("support_filament", new ConfigOptionInt(3));
-    config.set_key_value("support_interface_filament", new ConfigOptionInt(interface_filament));
+    const auto on_tower = [](const GMove &move) { return move.in_tower || move.in_change || move.prime; };
+    // The tower's footprint, grown by 3 mm.
+    BoundingBoxf footprint;
+    walk_gcode(gcode, [&](const GMove &move) {
+        if (move.has_xy && move.e > 0. && on_tower(move))
+            footprint.merge(move.points.back());
+    });
+    const auto over_tower = [&footprint](const Vec2d &p) {
+        return footprint.defined && p.x() >= footprint.min.x() - 3. && p.x() <= footprint.max.x() + 3. &&
+            p.y() >= footprint.min.y() - 3. && p.y() <= footprint.max.y() + 3.;
+    };
+    TowerPath path;
+    walk_gcode(gcode, [&](const GMove &move) {
+        if (move.tool_change)
+            return;
+        if (move.has_z && !move.has_xy && move.layer > 0 && move.z0 - move.z > 1. && move.z < move.part_z - 0.5 &&
+            !over_tower(move.points.front())) {
+            std::ostringstream plunge;
+            plunge << "line " << move.line << " layer " << move.layer << " at X" << move.points.front().x() << " Y"
+                   << move.points.front().y() << ": Z " << move.z0 << " -> " << move.z;
+            path.plunges.push_back(plunge.str());
+        }
+        if (move.layer == 0 || !move.has_xy || move.e <= 0.)
+            return;
+        // A purge the change template lays away from the tower is not a tower level.
+        if (on_tower(move) && over_tower(move.points.back())) {
+            if (move.z < path.lowest_tower_z - EPSILON) {
+                path.lowest_tower_z = move.z;
+                path.lowest_tower_layer = move.layer;
+            }
+            if (const double off = std::abs(move.z - move.part_z); off > tolerance + EPSILON) {
+                ++path.off_layer_tower_roads;
+                path.worst_off_layer = std::max(path.worst_off_layer, off);
+            }
+        } else if (path.first_layer_above_bed == 0 && move.z > first_layer_height + EPSILON)
+            path.first_layer_above_bed = move.layer;
+    });
+    return path;
+}
+
+// The L part from the app project with support base (fine PLA 1) and PETG interface (2) both on the fine nozzle; with
+// `plain`, one filament and no support or sparse infill, so no layer switches tools. Requires a slice.
+TowerTally slice_l_part_fine_support(Mode mode, bool no_sparse_layers = true, bool plain = false)
+{
+    DynamicPrintConfig config = app_three_filament_config(mode, 0.10, 0.30, 3, k_normal);
+    config.set_key_value("support_filament", new ConfigOptionInt(1));
+    config.set_key_value("support_interface_filament", new ConfigOptionInt(2));
+    // Stock Orca does not offer "No sparse layers" on a Bambu tower; the presets write it on.
+    config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(no_sparse_layers));
+    // Off prints the part in one filament, as stock does.
+    if (mode == Mode::Off || plain)
+        single_filament_roles(config);
+    if (plain) {
+        config.set_key_value("enable_support", new ConfigOptionBool(false));
+        config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0.));
+    }
     CadenceTest::Scene scene;
     scene.config   = config;
-    scene.populate = [fine, coarse, mushroom](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "fine base, coarse column, PETG cap";
-        const auto add = [object](TriangleMesh mesh, int filament, double height) {
-            ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-            volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
-            volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
-        };
-        if (mushroom) {
-            TriangleMesh stem = make_cube(10., 10., 20.);
-            stem.translate(20.f, 20.f, 0.f);
-            add(std::move(stem), 1, fine);
-            TriangleMesh cap = make_cube(50., 50., 4.);
-            cap.translate(0.f, 0.f, 20.f);
-            add(std::move(cap), 3, coarse);
-        } else {
-            add(make_cube(40., 30., 4.), 1, fine);
-            TriangleMesh column = make_cube(20., 20., 26.);
-            column.translate(10.f, 5.f, 4.f);
-            add(std::move(column), 3, coarse);
-            TriangleMesh cap = make_cube(50., 30., 4.);
-            cap.translate(0.f, 0.f, 30.f);
-            add(std::move(cap), 2, fine);
-        }
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
+    scene.populate = one_object("l-part", overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(60., 60., 0.));
+    const CadenceTest::Facts facts = CadenceTest::slice(scene);
+    INFO(mode_name(mode) << (plain ? " plain: " : ": ") << facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    TowerTally tally;
+    tally.seconds = facts.seconds;
+    tally.gcode = facts.gcode;
+    tally.first_layer_height = config.opt_float("initial_layer_print_height");
+    const std::vector<double> &max_heights = config.option<ConfigOptionFloats>("max_layer_height")->values;
+    tally.max_layer_height = max_heights.empty() ? 0. : *std::max_element(max_heights.begin(), max_heights.end());
+    std::set<long> levels;
+    for (const Move &move : facts.moves) {
+        if (move.type != EMoveType::Extrude)
+            continue;
+        if (move.extrusion_role == erWipeTower)
+            levels.insert(std::lround(double(move.position.z()) * 1000.));
+        tally.coarse_roads += move.physical_tool_id == 1;
     }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    // Tool changes between the first layer change and the end G-code that are not inside a tower block.
-    std::istringstream gcode(facts.gcode);
-    std::string line, z = "?", first_off_tower;
-    bool printing = false, in_tower = false;
-    size_t changes = 0, off_tower = 0;
-    while (std::getline(gcode, line)) {
-        if (line.rfind("; CHANGE_LAYER", 0) == 0)
-            printing = true;
-        else if (line.rfind("; MACHINE_END_GCODE_START", 0) == 0)
-            break;
-        else if (line.rfind("; Z_HEIGHT:", 0) == 0)
-            z = line.substr(11);
-        else if (line.rfind("; WIPE_TOWER_START", 0) == 0)
-            in_tower = true;
-        else if (line.rfind("; WIPE_TOWER_END", 0) == 0)
-            in_tower = false;
-        else if (printing && line.size() > 1 && line[0] == 'T' && std::isdigit((unsigned char) line[1]) &&
-                 std::stoi(line.substr(1)) < 255) {
-            ++changes;
-            if (!in_tower && off_tower++ == 0)
-                first_off_tower = z;
-        }
-    }
-    if (changes == 0)
-        return what.str() + "no tool change";
-    if (off_tower > 0)
-        return what.str() + std::to_string(off_tower) + " of " + std::to_string(changes) +
-               " tool changes off the prime tower, the first at Z" + first_off_tower;
-    // The coarse nozzle's minimum layer height (min_layer_height 0.04,0.16 in the test profile).
-    const double coarse_min = config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
-    if (std::string ahead = tower_ahead_failure(facts.gcode, coarse_min); !ahead.empty())
-        return what.str() + ahead;
-    if (std::string dive = tower_dive_failure(facts.gcode, coarse_min); !dive.empty())
-        return what.str() + dive;
-    if (std::string plough = tower_plough_failure(facts.gcode); !plough.empty())
-        return what.str() + plough;
-    return {};
+    tally.tower_levels = levels.size();
+    return tally;
+}
+
+// The prime tower stands from the first layer, keeps level with the print, and the nozzle never drops
+// through the part to reach it.
+void check_tower_from_first_layer(const TowerTally &tally)
+{
+    const TowerPath path = tower_path(tally.gcode, tally.first_layer_height, tally.max_layer_height);
+    CAPTURE(path.lowest_tower_z, path.lowest_tower_layer, path.first_layer_above_bed, path.off_layer_tower_roads,
+            path.worst_off_layer, path.plunges.size());
+    INFO((path.plunges.empty() ? std::string("no plunge") : "first plunge: " + path.plunges.front()));
+    REQUIRE(path.lowest_tower_layer > 0);
+    CHECK_THAT(path.lowest_tower_z, Catch::Matchers::WithinAbs(tally.first_layer_height, 0.001));
+    REQUIRE(path.first_layer_above_bed > 0);
+    CHECK(path.lowest_tower_layer < path.first_layer_above_bed);
+    CHECK(path.off_layer_tower_roads == 0);
+    CHECK(path.plunges.empty());
 }
 } // namespace
 
-TEST_CASE("Body Split blocks with supports slice, every nozzle change is on the prime tower, and no tower road runs into another", "[TestRebuild][Support]")
+TEST_CASE("Feature Split with no coarse work left starts the prime tower on the first layer", "[TestRebuild][Tower]")
 {
-    std::vector<std::string> failures;
-    // 0.08/0.56 has coarse support switching nozzle every few fine layers under the cap, where a coarse arrival right at
-    // the tower top once laid a full coarse layer and the tower ran ahead of the part.
-    for (const auto &[fine, coarse] : {std::pair<double, double>{0.10, 0.30}, {0.08, 0.56}})
-        for (const SupportCase &support : {k_normal, k_organic})
-            // PETG on the fine nozzle, and PLA on the fine nozzle (the base's own filament).
-            for (const int interface_filament : {2, 1})
-                if (std::string failure = body_split_three_part(support, interface_filament, fine, coarse); !failure.empty())
-                    failures.push_back(failure);
-    // A fine stem under a coarse cap at 0.08/0.56, with Normal support from the bed: coarse prime roads held above the
-    // tower top, which the next fine purge must not run under.
-    for (const SupportCase &support : {k_normal, k_organic})
-        if (std::string failure = body_split_three_part(support, 2, 0.08, 0.56, true); !failure.empty())
-            failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
+    // Every coarse band goes back fine, so only the PETG interface changes are left and the tower is planned as Off;
+    // with "No sparse layers" on it still stands from the first layer as stock lays it.
+    const TowerTally split = slice_l_part_fine_support(Mode::Feature);
+    REQUIRE(split.coarse_roads == 0);
+    check_tower_from_first_layer(split);
+
+    // Off with "No sparse layers" off is stock Orca on a Bambu tower.
+    const TowerTally off = slice_l_part_fine_support(Mode::Off, false);
+    REQUIRE(off.coarse_roads == 0);
+    check_tower_from_first_layer(off);
+    CAPTURE(off.seconds, split.seconds, off.tower_levels, split.tower_levels);
+    CHECK(split.tower_levels == off.tower_levels);
+    CHECK(std::abs(split.seconds - off.seconds) <= 0.01 * off.seconds);
+
+    // With the tower on but no tool change, the conflict check never reads a tower that was not generated.
+    const TowerTally plain = slice_l_part_fine_support(Mode::Feature, true, true);
+    CHECK_FALSE(plain.gcode.empty());
+    CHECK(plain.coarse_roads == 0);
 }
 
+// ---- Shapes --------------------------------------------------------------------------------------
+
 namespace {
-// Slices a shape in Feature Split with organic trees in the project the app saved (fine PLA and PETG interface on the
-// 0.2, coarse PLA base on the 0.8). Where the coarse tool hands over to the fine one, the tower level is one fine layer
-// tall and the coarse tool rams at its own minimum, above that level. Empty when such rammings are there and no later
-// tower road runs under one (or under a purge row).
-std::string feature_split_held_ramming(const char *shape_name, const std::function<void(ModelObject&)> &add_parts,
-                                       double fine, double coarse, int ratio)
+struct ShapeRun {
+    const char                        *name;
+    std::function<void(ModelObject&)> parts;
+    Mode                               mode;
+    double                             fine, coarse;
+    int                                ratio;
+    SupportCase                        support;
+    // Organic coarse support leaves few short scraps (the large bunny).
+    bool                               scraps = false;
+    // The coarse nozzle rams above fine levels: the held rows keep clear of later tower roads.
+    bool                               held_rows = false;
+};
+
+// Slices a shape in the app project (Normal support takes the fine PLA as interface) and returns what is wrong: an
+// Organic interface filament on the bed or tower bed level, or a coarse support or sparse road outside its heights.
+std::string shape_case(const ShapeRun &run, size_t &coarse_roads)
 {
     std::ostringstream what;
-    what << shape_name << " / Feature Split / " << fine << "/" << coarse << ": ";
+    what << run.name << " / " << mode_name(run.mode) << " / " << run.support.name << " / " << run.fine << "/" << run.coarse << ": ";
+    const bool organic = run.support.style == smsTreeOrganic;
     CadenceTest::Scene scene;
-    scene.config   = app_three_filament_config(Mode::Feature, fine, coarse, ratio, k_organic);
-    scene.populate = [&add_parts, shape_name](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+    scene.config = app_three_filament_config(run.mode, run.fine, run.coarse, run.ratio, run.support);
+    if (!organic)
+        scene.config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
+    scene.populate = [&run](Model &model, Print &print, const DynamicPrintConfig &cfg) {
         ModelObject *object = model.add_object();
-        object->name = shape_name;
-        add_parts(*object);
+        object->name = run.name;
+        run.parts(*object);
         if (object->instances.empty())
             object->add_instance();
         object->center_around_origin(false);
@@ -1972,239 +1265,201 @@ std::string feature_split_held_ramming(const char *shape_name, const std::functi
         print.set_status_silent();
     };
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    // Nozzle changes whose ramming climbs above the Z the head had when the change began.
-    size_t held = 0;
-    {
-        std::istringstream gcode(facts.gcode);
-        std::string line;
-        double z = 0., z_at_start = 0.;
-        bool ramming = false, counted = false;
-        while (std::getline(gcode, line)) {
-            if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0) {
-                ramming = true;
-                counted = false;
-                z_at_start = z;
-            } else if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0)
-                ramming = false;
-            else if (line.rfind("G1 ", 0) == 0) {
-                const std::string code = line.substr(0, line.find(';'));
-                if (const size_t at = code.find(" Z"); at != std::string::npos) {
-                    z = std::atof(code.c_str() + at + 2);
-                    if (ramming && !counted && z > z_at_start + 0.02) {
-                        ++held;
-                        counted = true;
-                    }
-                }
-            }
+    if (std::string failure = slice_into(scene, what.str(), facts); !failure.empty())
+        return failure;
+    const int    interface_filament = scene.config.opt_int("support_interface_filament");
+    const double coarse_min = scene.config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
+    const double coarse_max = scene.config.option<ConfigOptionFloats>("max_layer_height")->get_at(1);
+    size_t support = 0, interface_roads = 0, on_bed = 0, tower_on_bed = 0, outside = 0;
+    // Coarse support road length per height.
+    std::map<long long, double> coarse_support;
+    for (size_t i = 1; i < facts.moves.size(); ++i) {
+        const Move &move = facts.moves[i];
+        if (move.type != EMoveType::Extrude)
+            continue;
+        const double z = double(move.position.z()), height = double(move.height);
+        const bool body = move.extrusion_role == erSupportMaterial;
+        const bool in_interface = int(move.extruder_id) == interface_filament - 1;
+        support += body;
+        interface_roads += in_interface && move.extrusion_role == erSupportMaterialInterface;
+        if (organic && in_interface && z < run.fine + 1e-3)
+            ++(move.extrusion_role == erWipeTower ? tower_on_bed : on_bed);
+        if (run.mode == Mode::Off || move.physical_tool_id != 1 || z < run.fine + 1e-3 ||
+            (!body && move.extrusion_role != erInternalInfill))
+            continue;
+        ++coarse_roads;
+        if (height < coarse_min - 0.005 || (body && height > coarse_max + 0.005)) {
+            if (outside < 3)
+                what << "[coarse " << (body ? "support" : "sparse") << " at Z " << z << ", height " << height << "] ";
+            ++outside;
         }
+        if (body)
+            coarse_support[std::llround(z * 1e4)] += double((move.position - facts.moves[i - 1].position).head<2>().norm());
     }
-    if (held == 0)
-        return what.str() + "no ramming held above its level";
-    if (std::string plough = tower_plough_failure(facts.gcode); !plough.empty())
-        return what.str() + std::to_string(held) + " held rammings, and " + plough;
-    // Roads laid later at the level's height keep clear of the held rows, not only out from under them.
-    if (std::string touch = tower_touch_failure(facts.gcode, 0.02); !touch.empty())
-        return what.str() + std::to_string(held) + " held rammings, and " + touch;
+    size_t scraps = 0;
+    for (const auto &[z, length] : coarse_support)
+        scraps += length < 5.;
+    bool ok = true;
+    if (support == 0 || interface_roads == 0) {
+        what << "support " << support << ", interface " << interface_roads << "; ";
+        ok = false;
+    }
+    if (on_bed + tower_on_bed != 0) {
+        what << on_bed << " interface-filament roads on the first layer, and " << tower_on_bed << " on the tower's; ";
+        ok = false;
+    }
+    if (outside != 0) {
+        what << outside << " coarse roads outside its layer heights; ";
+        ok = false;
+    }
+    if (run.scraps && scraps > coarse_support.size() / 20) {
+        what << scraps << " of " << coarse_support.size() << " coarse support heights lay less than 5 mm; ";
+        ok = false;
+    }
+    if (run.held_rows)
+        if (const std::string failure = held_rows_failure(facts.gcode); !failure.empty()) {
+            what << failure << "; ";
+            ok = false;
+        }
+    return ok ? std::string() : what.str();
+}
+} // namespace
+
+TEST_CASE("Supports on curved and standing shapes keep the interface filament off the bed and the coarse nozzle within its heights",
+          "[TestRebuild][SupportMatrix]")
+{
+    // Support standing on the part (C shape) or on the bed under a curve. Rows the coarse tool rams above a fine level
+    // (Benchy at 0.10/0.30, the pocket at 0.08/0.56) keep clear of later tower roads.
+    const auto benchy = handy_model("3DBenchy.drc"), bunny = handy_model("Stanford_Bunny.drc");
+    const auto ball = parts_of(bunny_like_parts), pocket = parts_of(benchy_like_parts);
+    const std::vector<ShapeRun> runs{
+        {"bunny-like ball on a foot", ball, Mode::Off, 0.10, 0.30, 3, k_organic},
+        {"bunny-like ball on a foot", ball, Mode::Feature, 0.10, 0.30, 3, k_organic},
+        {"bunny-like ball on a foot", ball, Mode::Feature, 0.08, 0.56, 7, k_organic},
+        {"Benchy-like pocket", pocket, Mode::Off, 0.10, 0.30, 3, k_organic},
+        {"Benchy-like pocket", pocket, Mode::Feature, 0.10, 0.30, 3, k_organic},
+        {"Benchy-like pocket", pocket, Mode::Feature, 0.08, 0.56, 7, k_organic, false, true},
+        {"C shape", part_of(c_shape_mesh), Mode::Feature, 0.10, 0.30, 3, k_organic},
+        {"C shape", part_of(c_shape_mesh), Mode::Feature, 0.08, 0.56, 7, k_normal},
+        {"hull", part_of(hull_mesh), Mode::Feature, 0.10, 0.30, 3, k_organic},
+        {"hull", part_of(hull_mesh), Mode::Feature, 0.08, 0.56, 7, k_normal},
+        {"3DBenchy", benchy, Mode::Feature, 0.10, 0.30, 3, k_organic, false, true},
+        {"Stanford bunny", bunny, Mode::Feature, 0.10, 0.30, 3, k_organic, true},
+        {"Stanford bunny", bunny, Mode::Feature, 0.10, 0.30, 3, k_normal},
+    };
+    std::vector<std::string> failures;
+    size_t coarse_roads = 0;
+    for (const ShapeRun &run : runs)
+        failures.push_back(shape_case(run, coarse_roads));
+    check_no_failures(failures);
+    CHECK(coarse_roads > 0);
+}
+
+// ---- Body Split support and the tower --------------------------------------------------------------
+
+namespace {
+enum class BodyShape { Block, Mushroom, CoarseColumn };
+
+// Body Split in the app project, support base coarse PLA (3). Block: fine base, coarse column, PETG cap overhanging
+// both. Mushroom: fine stem under a wide coarse cap. CoarseColumn: coarse column with a fine arm on top. Every nozzle
+// change is on the tower, the tower never runs ahead of, under or through the part, and PETG never prints support body.
+std::string body_split_support_case(BodyShape shape, const SupportCase &support, int interface_filament, double fine, double coarse)
+{
+    std::ostringstream what;
+    what << (shape == BodyShape::Block ? "Body Split three-part block " : shape == BodyShape::Mushroom ? "Body Split mushroom " :
+             "Body Split coarse column, fine arm ") << fine << "/" << coarse << " / " << support.name << " / interface filament "
+         << interface_filament << ": ";
+    CadenceTest::Scene scene;
+    scene.config = app_three_filament_config(Mode::Feature, fine, coarse, int(std::lround(coarse / fine)), support);
+    scene.config.set_key_value("mixed_nozzle_slicing_mode", new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::BodySplit));
+    single_filament_roles(scene.config);
+    scene.config.set_key_value("enable_support", new ConfigOptionBool(true));
+    scene.config.set_key_value("support_filament", new ConfigOptionInt(3));
+    scene.config.set_key_value("support_interface_filament", new ConfigOptionInt(interface_filament));
+    scene.populate = [shape, fine, coarse](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = "Body Split support block";
+        const auto at = [](TriangleMesh mesh, float x, float y, float z) { mesh.translate(x, y, z); return mesh; };
+        if (shape == BodyShape::Mushroom) {
+            add_part(*object, at(make_cube(10., 10., 20.), 20.f, 20.f, 0.f), 1, fine);
+            add_part(*object, at(make_cube(50., 50., 4.), 0.f, 0.f, 20.f), 3, coarse);
+        } else if (shape == BodyShape::Block) {
+            add_part(*object, make_cube(40., 30., 4.), 1, fine);
+            add_part(*object, at(make_cube(20., 20., 26.), 10.f, 5.f, 4.f), 3, coarse);
+            add_part(*object, at(make_cube(50., 30., 4.), 0.f, 0.f, 30.f), 2, fine);
+        } else {
+            add_part(*object, make_cube(20., 20., 40.), 3, coarse);
+            add_part(*object, at(make_cube(40., 20., 10.), 20.f, 0.f, 30.f), 1, fine);
+        }
+        object->add_instance();
+        object->instances.front()->set_offset(Vec3d(100., 120., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    CadenceTest::Facts facts;
+    if (std::string failure = slice_into(scene, what.str(), facts); !failure.empty())
+        return failure;
+    size_t changes = 0, off_tower = 0;
+    double first_off_tower = 0.;
+    walk_gcode(facts.gcode, [&](const GMove &move) {
+        if (!move.tool_change)
+            return;
+        ++changes;
+        if (!move.in_tower && off_tower++ == 0)
+            first_off_tower = move.part_z;
+    });
+    if (changes == 0)
+        return what.str() + "no tool change";
+    if (off_tower > 0)
+        return what.str() + std::to_string(off_tower) + " of " + std::to_string(changes) +
+               " tool changes off the prime tower, the first at Z " + std::to_string(first_off_tower);
+    // Filament 2 is PETG: the support body is PLA, whichever nozzle lays it.
+    if (interface_filament == 2)
+        if (const auto petg_body = std::count_if(facts.moves.begin(), facts.moves.end(), [](const Move &move) {
+                return move.type == EMoveType::Extrude && move.extrusion_role == erSupportMaterial && move.extruder_id == 1; });
+            petg_body != 0)
+            return what.str() + std::to_string(petg_body) + " support body roads in the PETG interface filament";
+    const double coarse_min = scene.config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
+    if (std::string ahead = tower_ahead_failure(facts.gcode, coarse_min); !ahead.empty())
+        return what.str() + ahead;
+    if (std::string dive = tower_dive_failure(facts.gcode, coarse_min); !dive.empty())
+        return what.str() + dive;
+    if (std::string plough = tower_plough_failure(tower_roads(facts.gcode)); !plough.empty())
+        return what.str() + plough;
     return {};
 }
 } // namespace
 
-TEST_CASE("Feature Split towers: no tower road runs under a ramming the coarse nozzle holds at its own minimum", "[TestRebuild][Support]")
+TEST_CASE("Supported plates keep every nozzle change on the prime tower, and no tower road runs into another", "[TestRebuild][Support]")
 {
     std::vector<std::string> failures;
-    // The Benchy at 0.10/0.30 (ratio 3) is the plate the crossing was measured on; the Benchy-like pocket at 0.08/0.56
-    // (ratio 7) rams a 0.16 coarse minimum over half-height fine levels.
-    if (std::string failure = feature_split_held_ramming("3DBenchy.drc", handy_model("3DBenchy.drc"), 0.10, 0.30, 3); !failure.empty())
-        failures.push_back(failure);
-    if (std::string failure = feature_split_held_ramming("Benchy-like pocket", parts_of(benchy_like_parts), 0.08, 0.56, 7); !failure.empty())
-        failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
-
-TEST_CASE("Feature Split towers: rows held above their level keep clear of the roads laid beside them", "[TestRebuild][Support]")
-{
-    // Owner-style tower test plate (test build 7): an H2D 0.2/0.6, an L of a 10 mm column with an arm on Feature
-    // Split at 0.08/0.40, organic support with a PETG interface. The 0.6 rams at its 0.12 minimum on 0.08 levels, so
-    // its ramming rows stand 0.04 mm proud, and later purge rows are lifted onto them. Both used to lie one road
-    // from the wall line and the block's start, so the wall, the block before and the arriving tool's purge, laid
-    // after them at the level's height, ran edge to edge along them (and under them where the wall's arcs bow in).
-    Model model;
-    DynamicPrintConfig config;
-    {
-        ScopedTemporaryDir unpack("cadence-3mf");
-        const std::string previous = temporary_dir();
-        set_temporary_dir(unpack.string());
-        ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
-        model = Model::read_from_file(std::string(TEST_DATA_DIR) + "/feature-split-L-tower-008.3mf", &config, &substitutions,
-                                      LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
-        set_temporary_dir(previous);
+    // 0.08/0.56 has coarse support switching nozzle every few fine layers under the cap: a coarse arrival right at the
+    // tower top lays no full coarse layer there, so the tower never runs ahead of the part.
+    for (const auto &[fine, coarse] : {std::pair<double, double>{0.10, 0.30}, {0.08, 0.56}})
+        for (const SupportCase &support : {k_normal, k_organic})
+            // PETG on the fine nozzle, and PLA on the fine nozzle (the base's own material).
+            for (const int interface_filament : {2, 1})
+                failures.push_back(body_split_support_case(BodyShape::Block, support, interface_filament, fine, coarse));
+    for (const SupportCase &support : {k_normal, k_organic}) {
+        // Coarse prime roads held above the tower top, which the next fine purge must not run under.
+        failures.push_back(body_split_support_case(BodyShape::Mushroom, support, 2, 0.08, 0.56));
+        // The fine nozzle's support body filament comes from the project, never the PETG interface.
+        failures.push_back(body_split_support_case(BodyShape::CoarseColumn, support, 2, 0.10, 0.30));
     }
+    // A saved Feature Split L part on 0.2/0.6 at 0.08/0.40 with organic support and a PETG interface: the 0.6 rams at
+    // its 0.12 minimum on 0.08 levels, so its rows stand 0.04 mm proud; later roads on that level must keep clear.
+    DynamicPrintConfig config;
+    Model model = CadenceTest::load_project("feature-split-L-tower-008.3mf", config);
     REQUIRE(model.objects.size() == 1);
     Print print;
     print.is_BBL_printer() = true;
     print.apply(model, config);
     print.set_status_silent();
-    const CadenceTest::Facts facts = CadenceTest::slice(print);
-    INFO(facts.refusal.string);
-    REQUIRE(facts.refusal.string.empty());
-    REQUIRE_FALSE(facts.gcode.empty());
-    // The plate has rows held above their level: rammings that climb, and purge rows lifted onto them.
-    size_t climbing = 0;
-    {
-        std::istringstream gcode(facts.gcode);
-        std::string line;
-        double z = 0.;
-        bool in_row = false, counted = false;
-        while (std::getline(gcode, line)) {
-            if (line.rfind("; NOZZLE_CHANGE_START", 0) == 0 || line.rfind("; CP_TOOLCHANGE_WIPE", 0) == 0) {
-                in_row = true;
-                counted = false;
-            } else if (line.rfind("; NOZZLE_CHANGE_END", 0) == 0 || line.rfind("; CP TOOLCHANGE END", 0) == 0)
-                in_row = false;
-            else if (line.rfind("G1 ", 0) == 0) {
-                const std::string code = line.substr(0, line.find(';'));
-                if (const size_t at = code.find(" Z"); at != std::string::npos) {
-                    const double next = std::atof(code.c_str() + at + 2);
-                    if (in_row && !counted && next > z + 0.02 && next < z + 0.1) {
-                        ++climbing;
-                        counted = true;
-                    }
-                    z = next;
-                }
-            }
-        }
-    }
-    CHECK(climbing > 0);
-    const std::string plough = tower_plough_failure(facts.gcode);
-    INFO(plough);
-    CHECK(plough.empty());
-    const std::string touch = tower_touch_failure(facts.gcode, 0.02);
-    INFO(touch);
-    CHECK(touch.empty());
-}
-
-namespace {
-struct InterfaceFilamentTally {
-    std::string failure;
-    size_t      layers_with_two_body_filaments = 0;
-};
-
-// The two-arm part with a PLA base on the coarse nozzle and a PETG interface on the fine one. The
-// PETG prints only the interface right under each arm, and the layer under it is dense PLA on the
-// fine nozzle. Also counts the support layers where both nozzles lay body.
-InterfaceFilamentTally petg_only_at_the_contacts(const SupportCase &support, double fine, double coarse, int ratio)
-{
-    InterfaceFilamentTally tally;
-    std::ostringstream what;
-    what << support.name << " / " << fine << "/" << coarse << ": ";
-    const FilamentCase filaments{"PETG interface on fine", 2, 3, "PETG"};
-    const double top_z = 0.;
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, fine, coarse, ratio, top_z, support, filaments);
-    fill_per_filament_values(config);
-    config.set_key_value("machine_start_gcode", new ConfigOptionString(config.opt_string("machine_start_gcode") + "\nM1020 S[initial_extruder]\n"));
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    load_two_arm_model(model, print, config, Mode::Feature, fine, coarse);
-    const double left = model.objects.front()->instance_bounding_box(0).min.x();
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(print);
-    } catch (const std::exception &error) {
-        tally.failure = what.str() + "threw " + error.what();
-        return tally;
-    }
-    if (!facts.refusal.string.empty()) {
-        tally.failure = what.str() + "refused: " + facts.refusal.string;
-        return tally;
-    }
-    for (const SupportLayer *layer : print.objects().front()->support_layers())
-        tally.layers_with_two_body_filaments += ! layer->fine_body_fills.empty();
-
-    // Each arm: x range and the height of its underside (two_arm_mesh()).
-    struct Arm { const char *name; double x_lo, x_hi, underside; };
-    const Arm arms[2] = {{"left arm", left, left + 8., 6.6}, {"right arm", left + 16., left + 24., 3.0}};
-    const int petg = filaments.interface_filament - 1;
-    size_t petg_roads = 0, petg_elsewhere = 0;
-    double lowest_petg[2] = {std::numeric_limits<double>::max(), std::numeric_limits<double>::max()};
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude || move.extrusion_role == erWipeTower || int(move.extruder_id) != petg)
-            continue;
-        ++petg_roads;
-        const double x = double(move.position.x()), z = double(move.position.z());
-        bool at_contact = false;
-        for (size_t i = 0; i < 2; ++i)
-            if (move.extrusion_role == erSupportMaterialInterface && x > arms[i].x_lo - 2. && x < arms[i].x_hi + 2. &&
-                z > arms[i].underside - top_z - 2. * fine - 1e-3 && z < arms[i].underside - top_z + 1e-3) {
-                at_contact = true;
-                lowest_petg[i] = std::min(lowest_petg[i], z);
-            }
-        if (! at_contact) {
-            if (petg_elsewhere < 3)
-                what << "[PETG role " << int(move.extrusion_role) << " at x " << x << ", z " << z << "] ";
-            ++petg_elsewhere;
-        }
-    }
-    bool ok = true;
-    if (petg_roads == 0 || petg_elsewhere != 0) {
-        what << petg_roads << " PETG roads, " << petg_elsewhere << " of them away from the contacts; ";
-        ok = false;
-    }
-    // Under the lowest PETG layer of each arm: dense PLA on the fine nozzle.
-    for (size_t i = 0; i < 2; ++i) {
-        if (lowest_petg[i] == std::numeric_limits<double>::max()) {
-            what << "no PETG under the " << arms[i].name << "; ";
-            ok = false;
-            continue;
-        }
-        const double below = lowest_petg[i] - fine;
-        size_t pla_below = 0;
-        for (const Move &move : facts.moves)
-            pla_below += move.type == EMoveType::Extrude && move.extrusion_role == erSupportMaterial &&
-                int(move.extruder_id) != petg && move.physical_tool_id == 0 &&
-                std::abs(double(move.position.z()) - below) < 1e-3 &&
-                double(move.position.x()) > arms[i].x_lo && double(move.position.x()) < arms[i].x_hi;
-        if (pla_below == 0) {
-            what << "no fine PLA body at z " << below << " under the " << arms[i].name << "'s PETG; ";
-            ok = false;
-        }
-    }
-    if (! ok)
-        tally.failure = what.str();
-    return tally;
-}
-} // namespace
-
-TEST_CASE("A PETG interface prints only at the contacts, also where both nozzles lay support body on one layer", "[TestRebuild][Support]")
-{
-    std::vector<std::string> failures;
-    size_t two_body_layers = 0;
-    for (const SupportCase &support : {k_normal, k_organic})
-        for (const auto &[coarse, ratio] : {std::pair<double, int>{0.30, 3}, {0.20, 2}}) {
-            const InterfaceFilamentTally tally = petg_only_at_the_contacts(support, 0.10, coarse, ratio);
-            if (! tally.failure.empty())
-                failures.push_back(tally.failure);
-            two_body_layers += tally.layers_with_two_body_filaments;
-        }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-    // Organic trees leave thin pieces to the fine nozzle beside coarse band roads, so this scene has
-    // layers where both nozzles lay body.
-    CHECK(two_body_layers > 0);
+    const std::string refused = slice_into(print, "Feature Split L tower project: ", facts);
+    failures.push_back(refused.empty() ? held_rows_failure(facts.gcode) : refused);
+    check_no_failures(failures);
 }
 
 TEST_CASE("The fine nozzle's support body filament comes from the project, never the interface filament", "[TestRebuild][Support]")
@@ -2242,73 +1497,65 @@ TEST_CASE("The fine nozzle's support body filament comes from the project, never
     CHECK(pick({}) == std::optional<unsigned int>(1));
 }
 
+// ---- The tower's first level -----------------------------------------------------------------------
+
 namespace {
+// A nozzle pair with its layer height limits, fine, first and coarse layer heights.
 struct NozzlePair {
     const char *name;
     double      fine_nozzle, coarse_nozzle;
     double      fine_min, fine_max, coarse_min, coarse_max;
     double      fine, first_layer, coarse;
-    int         ratio;
 };
 
-// A low arm whose interface prints near the bed, beside a taller arm whose support base covers the
-// first layer. Returns how the first tower visit went, and sets qualifies when that visit had both
-// a coarse arrival and the interface filament. coarse_roads counts every road the coarse nozzle lays.
-std::string interface_on_tower_bed(const NozzlePair &nozzles, int base, double arm_z, bool &qualifies, std::string &seen,
-                                   Mode mode = Mode::Feature, size_t *coarse_roads = nullptr)
+void set_pair(DynamicPrintConfig &config, const NozzlePair &c)
 {
-    qualifies = false;
+    set_nozzles(config, c.fine_nozzle, c.coarse_nozzle, c.fine_min, c.fine_max, c.coarse_min, c.coarse_max);
+    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(c.first_layer));
+}
+
+struct TowerBed {
+    std::string failure;            // a refusal or a throw
+    size_t      interface_on_bed_level = 0;
+    size_t      coarse_roads = 0;
+};
+
+// A low arm whose interface prints near the bed beside a taller arm: counts the interface-filament roads the first
+// tower visit lays on the tower's bed level, and every coarse road.
+TowerBed interface_on_tower_bed(const NozzlePair &nozzles, int base, double arm_z, Mode mode)
+{
     std::ostringstream what;
     what << mode_name(mode) << " / " << nozzles.name << " / base " << base << " / arm at " << arm_z << ": ";
     const FilamentCase filaments{"PETG interface on fine", base, 3, "PETG"};
-    DynamicPrintConfig config = h2d_support_config(mode, nozzles.fine, nozzles.coarse, nozzles.ratio, 0., k_normal, filaments);
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{nozzles.fine_nozzle, nozzles.coarse_nozzle});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{nozzles.fine_nozzle, nozzles.coarse_nozzle});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{nozzles.fine_min, nozzles.coarse_min});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{nozzles.fine_max, nozzles.coarse_max});
-    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(nozzles.first_layer));
-    config.set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
-    config.set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0.));
-    set_automatic_tower(config);
-    fill_per_filament_values(config);
     CadenceTest::Scene scene;
-    scene.config   = config;
+    scene.config = h2d_support_config(mode, nozzles.fine, nozzles.coarse, int(std::lround(nozzles.coarse / nozzles.fine)), 0., k_normal, filaments);
+    set_pair(scene.config, nozzles);
+    scene.config.set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
+    scene.config.set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0.));
+    set_automatic_tower(scene.config);
     scene.populate = [arm_z](Model &model, Print &print, const DynamicPrintConfig &cfg) {
         // One object: the layer plan export takes one object per plate.
-        ModelObject *object = model.add_object();
-        object->name = "low and tall arms";
-        object->add_volume(overhang_shelf_mesh(10., 30., arm_z, arm_z + 3.), ModelVolumeType::MODEL_PART, false);
+        ModelObject *object = add_object(model, "low and tall arms", overhang_shelf_mesh(10., 30., arm_z, arm_z + 3.), Vec3d(80., 80., 0.));
         TriangleMesh tall = overhang_shelf_mesh(10., 30., 4., 7.);
         tall.translate(0.f, 50.f, 0.f);
         object->add_volume(std::move(tall), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
         object->ensure_on_bed();
         print.apply(model, cfg);
         print.set_status_silent();
     };
+    TowerBed out;
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
+    if (out.failure = slice_into(scene, what.str(), facts); !out.failure.empty())
+        return out;
     double tower_bottom = std::numeric_limits<double>::max();
     for (const Move &move : facts.moves)
-        if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
-            tower_bottom = std::min(tower_bottom, double(move.position.z()));
-    if (coarse_roads != nullptr) {
-        *coarse_roads = 0;
-        for (const Move &move : facts.moves)
-            *coarse_roads += move.type == EMoveType::Extrude && move.physical_tool_id == 1;
-    }
+        if (move.type == EMoveType::Extrude) {
+            if (move.extrusion_role == erWipeTower)
+                tower_bottom = std::min(tower_bottom, double(move.position.z()));
+            out.coarse_roads += move.physical_tool_id == 1;
+        }
     // The first visit: tower roads from the first one to the next road off the tower.
-    bool in_visit = false, coarse_arrival = false, interface_arrival = false;
-    size_t interface_at_bottom = 0;
-    std::string sequence;
-    int last = -1;
+    bool in_visit = false;
     for (const Move &move : facts.moves) {
         if (move.type != EMoveType::Extrude)
             continue;
@@ -2318,288 +1565,67 @@ std::string interface_on_tower_bed(const NozzlePair &nozzles, int base, double a
             continue;
         }
         in_visit = true;
-        const int filament = int(move.extruder_id);
-        if (filament != last) {
-            sequence += " F" + std::to_string(filament + 1) + "@" + std::to_string(move.position.z());
-            last = filament;
-        }
-        coarse_arrival    |= k_filament_map[size_t(filament) % k_filament_map.size()] == 2;
-        interface_arrival |= filament == filaments.interface_filament - 1;
-        interface_at_bottom += filament == filaments.interface_filament - 1 && double(move.position.z()) < tower_bottom + 1e-3;
+        out.interface_on_bed_level += int(move.extruder_id) == filaments.interface_filament - 1 &&
+                                      double(move.position.z()) < tower_bottom + 1e-3;
     }
-    qualifies = coarse_arrival && interface_arrival;
-    what << "first visit" << sequence;
-    seen = what.str();
-    if (interface_at_bottom != 0)
-        what << "; " << interface_at_bottom << " interface-filament roads on the tower's bed level";
-    return interface_at_bottom != 0 ? what.str() : std::string();
+    return out;
 }
 } // namespace
 
-TEST_CASE("The interface filament primes above the tower's first level", "[TestRebuild][Support]")
+TEST_CASE("The tower's first level lies on the bed with its brim, and the interface filament primes above it",
+          "[TestRebuild][Support][TowerFirstLayer]")
 {
     const NozzlePair pairs[] = {
-        {"0.4/0.6", 0.4, 0.6, 0.08, 0.28, 0.12, 0.42, 0.20, 0.20, 0.40, 2},
+        {"0.4/0.6", 0.4, 0.6, 0.08, 0.28, 0.12, 0.42, 0.20, 0.20, 0.40},
         // The 0.2 nozzle cannot lay a 0.2 mm first layer, so this pair starts at its fine height.
-        {"0.2/0.8", 0.2, 0.8, 0.04, 0.14, 0.16, 0.56, 0.10, 0.10, 0.30, 3},
+        {"0.2/0.8", 0.2, 0.8, 0.04, 0.14, 0.16, 0.56, 0.10, 0.10, 0.30},
     };
     std::vector<std::string> failures;
-    std::ostringstream seen;
-    for (const NozzlePair &nozzles : pairs) {
-        size_t qualifying = 0;
+    for (const NozzlePair &nozzles : pairs)
         for (int base : {1, 2})
             for (double arm_z : {0.2, 0.4, 0.6, 1.0}) {
-                bool qualifies = false;
-                std::string scene;
-                size_t coarse_roads = 0;
-                std::string failure = interface_on_tower_bed(nozzles, base, arm_z, qualifies, scene, Mode::Feature, &coarse_roads);
-                qualifying += qualifies;
-                seen << scene << (qualifies ? " (interface in the first visit)" : "") << '\n';
-                // A plate the coarse nozzle never prints on builds Off's tower, so it is held to Off.
-                if (!failure.empty() && coarse_roads == 0) {
-                    bool off_qualifies = false;
-                    std::string off_scene;
-                    const std::string off = interface_on_tower_bed(nozzles, base, arm_z, off_qualifies, off_scene, Mode::Off);
-                    seen << off_scene << '\n';
-                    if (!off.empty() && off.find("interface-filament roads on the tower's bed level") != std::string::npos)
-                        failure.clear();
+                const TowerBed split = interface_on_tower_bed(nozzles, base, arm_z, Mode::Feature);
+                if (!split.failure.empty()) {
+                    failures.push_back(split.failure);
+                    continue;
                 }
-                if (!failure.empty() && !tree_refused(failure))
-                    failures.push_back(failure);
+                // A plate the coarse nozzle never prints on builds Off's tower, so it is held to Off.
+                if (split.interface_on_bed_level != 0 &&
+                    (split.coarse_roads != 0 || interface_on_tower_bed(nozzles, base, arm_z, Mode::Off).interface_on_bed_level == 0))
+                    failures.push_back(std::string(nozzles.name) + " / base " + std::to_string(base) + " / arm at " +
+                                       std::to_string(arm_z) + ": " + std::to_string(split.interface_on_bed_level) +
+                                       " interface-filament roads on the tower's bed level");
             }
-        // No slice here brings the interface to the first visit; the tower plan test below covers
-        // that case directly. This one only guards the sliced scenes.
-        (void) qualifying;
-    }
-    std::ostringstream report;
-    report << seen.str();
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
 
-namespace {
-// The lagging tower's plan for the first visit: PLA on the fine nozzle, then the PLA base
-// on the coarse one, then the PETG interface on the fine one. Returns the Z of the level holding
-// the interface arrival and of the tower's bed level, from the generated plan.
-struct FirstVisit { float interface_z = -1.f, bed_z = -1.f; std::string plan; };
-FirstVisit plan_first_visit(const NozzlePair &nozzles)
-{
-    const FilamentCase filaments{"PETG interface on fine", 2, 3, "PETG"};
-    DynamicPrintConfig dynamic = h2d_support_config(Mode::Feature, nozzles.fine, nozzles.coarse, nozzles.ratio, 0., k_normal, filaments);
-    dynamic.set_key_value("nozzle_diameter", new ConfigOptionFloats{nozzles.fine_nozzle, nozzles.coarse_nozzle});
-    dynamic.set_key_value("min_layer_height", new ConfigOptionFloats{nozzles.fine_min, nozzles.coarse_min});
-    dynamic.set_key_value("max_layer_height", new ConfigOptionFloats{nozzles.fine_max, nozzles.coarse_max});
-    dynamic.set_key_value("initial_layer_print_height", new ConfigOptionFloat(nozzles.first_layer));
-    set_automatic_tower(dynamic);
-    fill_per_filament_values(dynamic);
-    PrintConfig config;
-    config.apply(dynamic, true);
-
-    std::vector<MultiNozzleUtils::NozzleInfo> nozzle_list(2);
-    for (int e = 0; e < 2; ++e) {
-        std::ostringstream diameter;
-        diameter << (e == 0 ? nozzles.fine_nozzle : nozzles.coarse_nozzle);
-        nozzle_list[size_t(e)].diameter    = diameter.str();
-        nozzle_list[size_t(e)].volume_type = nvtStandard;
-        nozzle_list[size_t(e)].extruder_id = e;
-        nozzle_list[size_t(e)].group_id    = e;
-    }
-    const std::vector<int>          filament_extruders{0, 1, 0, 1};
-    const std::vector<unsigned int> used{0, 1, 2, 3};
-    const auto group = MultiNozzleUtils::LayeredNozzleGroupResult::create(filament_extruders, nozzle_list, used);
-    REQUIRE(group.has_value());
-
-    const float first = float(nozzles.first_layer), coarse = float(nozzles.coarse), fine = float(nozzles.fine);
-    const float top   = first + 10.f * coarse;
-    WipeTower tower(config, 0, Vec3d::Zero(), 0, top, used);
-    tower.set_nozzle_group_result(*group);
-    for (size_t idx = 0; idx < used.size(); ++idx)
-        tower.set_extruder(idx, config);
-    tower.set_lagging(2.f * coarse, 1, filament_extruders, 1, coarse, fine);
-    // The first part layer, a legal first level with nothing held back: fine PLA, coarse PLA base,
-    // then the fine interface.
-    tower.plan_toolchange(first, first, 0, 1, 50.f, 0.f, 15.f);
-    tower.plan_toolchange(first, first, 1, 2, 50.f, 0.f, 15.f);
-    // Later coarse layers keep the same pattern, so the tower has a base to stand on.
-    for (int layer = 1; layer <= 10; ++layer) {
-        const float z = first + float(layer) * coarse;
-        tower.plan_toolchange(z, coarse, 2, 1, 50.f, 0.f, 15.f);
-        tower.plan_toolchange(z, coarse, 1, 2, 50.f, 0.f, 15.f);
-    }
-    tower.plan_levels();
-
-    FirstVisit visit;
-    visit.plan = tower.plan_digest();
-    const size_t generated = visit.plan.find("plan as generated\n");
-    REQUIRE(generated != std::string::npos);
-    std::istringstream lines(visit.plan.substr(generated));
-    std::map<int, float> level_z;
-    std::map<int, bool>  level_idle;
-    std::string line;
-    while (std::getline(lines, line)) {
-        int level = -1, change = -1;
-        if (std::sscanf(line.c_str(), "level %d change %d", &level, &change) == 2) {
-            // The first arrival of the interface filament (index 2).
-            if (visit.interface_z < 0.f && line.find(" enters=2 ") != std::string::npos)
-                visit.interface_z = level_z[level];
-        } else if (float z = 0.f; std::sscanf(line.c_str(), "level %d z=%f", &level, &z) == 2) {
-            level_z[level]    = z;
-            level_idle[level] = line.find(" idle=1") != std::string::npos;
-            if (visit.bed_z < 0.f && !level_idle[level])
-                visit.bed_z = z;
-        }
-    }
-    return visit;
-}
-} // namespace
-
-TEST_CASE("The tower plan primes the interface above its bed level on the first visit", "[TestRebuild][Support]")
-{
-    const NozzlePair pairs[] = {
-        {"0.4/0.6", 0.4, 0.6, 0.08, 0.28, 0.12, 0.42, 0.20, 0.20, 0.40, 2},
-        {"0.2/0.8", 0.2, 0.8, 0.04, 0.14, 0.16, 0.56, 0.10, 0.10, 0.30, 3},
-    };
-    for (const NozzlePair &nozzles : pairs) {
-        const FirstVisit visit = plan_first_visit(nozzles);
-        INFO(nozzles.name << "\n" << visit.plan);
-        REQUIRE(visit.bed_z > 0.f);
-        REQUIRE(visit.interface_z > 0.f);
-        CHECK(visit.interface_z > visit.bed_z + 1e-4f);
-    }
-}
-
-TEST_CASE("The fake wipe tower stops on data that could never give a finite stack", "[TestRebuild][Support]")
-{
-    // A tower drawn with no outer wall falls back to the generic fake paths; the BBL setter
-    // gives no depth steps, cone or rotation of its own.
-    FakeWipeTower tower;
-    tower.set_fake_extrusion_data(Vec2f(10.f, 20.f), 30.f, 10.f, 0.2f, 15.f, 2.f, Vec2d::Zero());
-    const ExtrusionLayers layers = tower.getTrueExtrusionLayersFromWipeTower();
-    CHECK(layers.size() == 50);
-    for (const ExtrusionLayer &layer : layers) {
-        REQUIRE(std::isfinite(layer.bottom_z));
-        CHECK(layer.bottom_z < 10.f);
-    }
-    // A zero layer height, a step too small to advance the Z sum, or no depth steps: no layers,
-    // never an endless loop.
-    const std::vector<std::pair<float, float>> steps{{0.f, 15.f}};
-    FakeWipeTower flat;
-    flat.set_fake_extrusion_data(Vec2f(10.f, 20.f), 30.f, 10.f, 0.f, 15.f, steps, 2.f, 0.f, 0.f, Vec2d::Zero());
-    CHECK(flat.getTrueExtrusionLayersFromWipeTower().empty());
-    FakeWipeTower stalled;
-    stalled.set_fake_extrusion_data(Vec2f(10.f, 20.f), 30.f, 300.f, 1e-5f, 15.f, steps, 2.f, 0.f, 0.f, Vec2d::Zero());
-    CHECK(stalled.getTrueExtrusionLayersFromWipeTower().empty());
-    FakeWipeTower stepless;
-    stepless.set_fake_extrusion_data(Vec2f(10.f, 20.f), 30.f, 10.f, 0.2f, 15.f, {}, 2.f, 0.f, 0.f, Vec2d::Zero());
-    CHECK(stepless.getTrueExtrusionLayersFromWipeTower().empty());
-}
-
-TEST_CASE("A tower-enabled print that needs no tower never checks conflicts against one", "[TestRebuild][Support]")
-{
-    // Feature Split with no sparse infill and no support, so nothing reaches the coarse nozzle: the tower
-    // is on, but no layer switches tools. (This was a Body Split column and arm on two nozzles with
-    // support from the bed, which does switch tools; it only looked tower-free while a plate whose first
-    // layer is support alone got no tower. Body Split always prints on both nozzles.)
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
-    config.set_key_value("enable_support", new ConfigOptionBool(false));
-    config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0.));
-    for (const char *key : {"outer_wall_filament_id", "inner_wall_filament_id", "internal_solid_filament_id",
-                            "top_surface_filament_id", "bottom_surface_filament_id", "sparse_infill_filament_id"})
-        config.set_key_value(key, new ConfigOptionInt(0));
-    mixed_nozzle_fixtures::fill_per_filament_values(config);
-    Model model;
-    // Fill the Print's memory first, so a member nothing sets reads as garbage rather than as zero.
-    void *memory = ::operator new(sizeof(Print));
-    std::memset(memory, 0x7f, sizeof(Print));
-    const std::unique_ptr<Print, void (*)(Print *)> owner(new (memory) Print, [](Print *p) {
-        p->~Print();
-        ::operator delete(p);
-    });
-    Print &print = *owner;
-    print.is_BBL_printer() = CadenceTest::Scene{}.bambu;
-    ModelObject *object = model.add_object();
-    const auto add = [object](TriangleMesh mesh, int filament, double height) {
-        ModelVolume *volume = object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-        volume->config.set_key_value("extruder", new ConfigOptionInt(filament));
-        volume->config.set_key_value("regional_layer_height", new ConfigOptionFloat(height));
-    };
-    add(make_cube(20., 20., 40.), 1, 0.1);
-    TriangleMesh arm = make_cube(40., 20., 10.);
-    arm.translate(20.f, 0.f, 30.f);
-    add(std::move(arm), 1, 0.1);
-    object->add_instance();
-    object->instances.front()->set_offset(Vec3d(100., 120., 0.));
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
-    // Without the conflict check, which read the never-filled fake tower and could loop without end.
-    print.set_no_check_flag(true);
-    const std::string refusal = print.validate().string;
-    INFO(refusal);
-    REQUIRE(refusal.empty());
-    print.process();
-    REQUIRE(print.has_wipe_tower());
-    REQUIRE(print.wipe_tower_data().tool_changes.empty());
-    // No tower was generated, so the fake tower holds nothing, never data left from elsewhere.
-    const FakeWipeTower &fake = print.get_fake_wipe_tower();
-    CHECK(fake.outer_wall.empty());
-    CHECK(fake.width == 0.f);
-    CHECK(fake.height == 0.f);
-    CHECK(fake.layer_height == 0.f);
-    CHECK(fake.z_and_depth_pairs.empty());
-}
-
-TEST_CASE("The tower lays its first layer on the bed with its brim when layer 1 has no switch", "[TestRebuild][TowerFirstLayer]")
-{
-    // Support under a ball, its body on the coarse nozzle. Layer 1 prints on the fine nozzle alone,
-    // and the coarse nozzle first arrives one fine layer up, closer than its own minimum. The L part
-    // prints three filaments, with the PETG interface under its arm.
+    // Layer 1 has no tool switch: under the ball only the fine nozzle prints it, and the coarse nozzle first arrives one
+    // fine layer up, closer than its own minimum. The L part prints three filaments, with the PETG interface under its arm.
     const double fine = 0.10;
-    std::vector<std::string> failures;
     for (const auto &[filaments, ball] : {std::pair<FilamentCase, bool>{{"ball, interface on the part filament", 2, 1}, true},
                                           {{"L part, PETG interface on fine", 2, 3, "PETG"}, false}}) {
-        std::ostringstream what;
-        what << filaments.name << ": ";
-        DynamicPrintConfig config = h2d_support_config(Mode::Feature, fine, 0.30, 3, 0.2, k_normal, filaments);
-        set_automatic_tower(config);
+        const std::string what = std::string(filaments.name) + ": ";
         CadenceTest::Scene scene;
-        scene.config   = config;
-        scene.populate = [ball = ball](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-            ModelObject *object = model.add_object();
-            object->name = ball ? "ball" : "l-part";
-            object->add_volume(ball ? hull_mesh() : overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-            object->add_instance();
-            object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-            object->ensure_on_bed();
-            print.apply(model, cfg);
-            print.set_status_silent();
-        };
+        scene.config = h2d_support_config(Mode::Feature, fine, 0.30, 3, 0.2, k_normal, filaments);
+        set_automatic_tower(scene.config);
+        scene.populate = one_object(ball ? "ball" : "l-part", ball ? hull_mesh() : overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(80., 80., 0.));
         CadenceTest::Facts facts;
-        try {
-            facts = CadenceTest::slice(scene);
-        } catch (const std::exception &error) {
-            failures.push_back(what.str() + "threw " + error.what());
+        if (std::string failure = slice_into(scene, what, facts); !failure.empty()) {
+            failures.push_back(failure);
             continue;
         }
-        if (!facts.refusal.string.empty()) {
-            failures.push_back(what.str() + "refused: " + facts.refusal.string);
-            continue;
-        }
-        // Layer 1 has no tool switch, so nothing brings the tower there but the first layer itself.
+        // The brim widens the tower's first layer past the fullest of the next few tower levels.
         std::set<int> first_layer_filaments;
-        for (const Move &move : facts.moves)
-            if (move.type == EMoveType::Extrude && move.extrusion_role != erWipeTower && double(move.position.z()) < fine + 1e-3)
-                first_layer_filaments.insert(int(move.extruder_id));
-        // The brim widens the first layer past the fullest of the next few tower levels.
         BoundingBoxf first;
         std::map<double, std::pair<size_t, BoundingBoxf>> above;
         size_t first_roads = 0, first_interface = 0;
         double lowest = std::numeric_limits<double>::max();
         for (const Move &move : facts.moves) {
-            if (move.type != EMoveType::Extrude || move.extrusion_role != erWipeTower)
+            if (move.type != EMoveType::Extrude)
                 continue;
+            if (move.extrusion_role != erWipeTower) {
+                if (double(move.position.z()) < fine + 1e-3)
+                    first_layer_filaments.insert(int(move.extruder_id));
+                continue;
+            }
             const double z = double(move.position.z());
             lowest = std::min(lowest, z);
             const Vec2d xy(move.position.x(), move.position.y());
@@ -2621,23 +1647,19 @@ TEST_CASE("The tower lays its first layer on the bed with its brim when layer 1 
         const double brim = first.defined && fullest != nullptr ?
             std::min({fullest->second.min.x() - first.min.x(), fullest->second.min.y() - first.min.y(),
                       first.max.x() - fullest->second.max.x(), first.max.y() - fullest->second.max.y()}) : 0.;
-        what << "layer 1 filaments";
-        for (int filament : first_layer_filaments)
-            what << ' ' << filament + 1;
-        what << ", lowest tower road at Z " << lowest
-             << ", first-layer tower roads " << first_roads << ", brim " << brim;
-        if ((ball && first_layer_filaments.size() != 1) || first_roads == 0 || brim < 1. || first_interface != 0)
-            failures.push_back(what.str() + (first_interface != 0 ? ", interface filament on the tower's first layer" : ""));
+        if ((ball && first_layer_filaments.size() != 1) || first_roads == 0 || brim < 1. || first_interface != 0) {
+            std::ostringstream out;
+            out << what << first_layer_filaments.size() << " layer 1 filaments, lowest tower road at Z " << lowest
+                << ", first-layer tower roads " << first_roads << " (" << first_interface << " in the interface filament), brim " << brim;
+            failures.push_back(out.str());
+        }
     }
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
+    check_no_failures(failures);
 }
 
-struct CoarseNozzle { double coarse, coarse_min, coarse_max; };
+// ---- Coarse support base ---------------------------------------------------------------------------
 
+namespace {
 // Where the coarse-base cases put the support filaments. Filaments 1 and 3 are on the 0.2, 2 and 4 on the coarse nozzle.
 enum class SupportPlacement { PetgOnFine, AllCoarse, PetgOnCoarse };
 
@@ -2645,85 +1667,75 @@ enum class SupportPlacement { PetgOnFine, AllCoarse, PetgOnCoarse };
 // wider than the box, so the support under the slab stands both on the box (bottom contacts) and on the bed.
 enum class PartShape { L, Step };
 
-// Slices a fine PLA part on the 0.2 with its support base in PLA on the coarse nozzle, 0.10 / 0.40 with a
-// 0.10 first layer and widths set for the 0.2 (0.25 first layer, 0.22 support), and returns what is
-// wrong, or an empty string.
-std::string coarse_base_case(Mode mode, const CoarseNozzle &nozzles, const SupportCase &support, SupportPlacement where,
-                     int raft_layers = 0, PartShape part_shape = PartShape::L)
+FilamentCase placement_filaments(SupportPlacement where)
 {
-    const double fine = 0.10;
-    const FilamentCase filaments = where == SupportPlacement::AllCoarse ? FilamentCase{"PLA base and interface on coarse", 2, 2} :
-        where == SupportPlacement::PetgOnCoarse ? FilamentCase{"PLA base, PETG interface, both on coarse", 2, 4, "PETG"} :
-                                            FilamentCase{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
-    const bool coarse_interface = where != SupportPlacement::PetgOnFine;
-    std::ostringstream what;
-    what << mode_name(mode) << " / " << nozzles.coarse << " / " << support.name << " / " << filaments.name
-         << (part_shape == PartShape::Step ? " / step part" : "") << ": ";
-    DynamicPrintConfig config = h2d_support_config(mode, fine, 0.40, 4, 0., support, filaments);
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, nozzles.coarse});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, nozzles.coarse});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, nozzles.coarse_min});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, nozzles.coarse_max});
-    config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
-    config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("raft_layers", new ConfigOptionInt(raft_layers));
-    set_automatic_tower(config);
+    return where == SupportPlacement::AllCoarse ? FilamentCase{"PLA base and interface on coarse", 2, 2} :
+           where == SupportPlacement::PetgOnCoarse ? FilamentCase{"PLA base, PETG interface, both on coarse", 2, 4, "PETG"} :
+                                                    FilamentCase{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
+}
+
+// A fine PLA part on the 0.2 with its support base in PLA on the coarse nozzle, 0.10 / 0.40 with a 0.10 first layer
+// and widths set for the 0.2. On a Body Split plate a one-part object on one filament is a plain object, so the plate
+// gets a Body Split block too, a block with a coarse half that needs no support.
+CadenceTest::Scene coarse_base_scene(Mode mode, const CoarseNozzle &nozzles, const SupportCase &support, SupportPlacement where,
+                                     int raft_layers = 0, PartShape part_shape = PartShape::L)
+{
     CadenceTest::Scene scene;
-    scene.config   = config;
+    scene.config = h2d_support_config(mode, 0.10, 0.40, 4, 0., support, placement_filaments(where));
+    set_nozzles(scene.config, 0.2, nozzles.coarse, 0.04, 0.14, nozzles.coarse_min, nozzles.coarse_max);
+    scene.config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
+    scene.config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
+    set_fine_widths(scene.config);
+    scene.config.set_key_value("raft_layers", new ConfigOptionInt(raft_layers));
+    set_automatic_tower(scene.config);
     scene.populate = [mode, part_shape](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "coarse-base-part";
-        if (part_shape == PartShape::L)
-            object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-        else {
-            TriangleMesh mesh = make_cube(30., 20., 10.);
+        TriangleMesh mesh = overhang_shelf_mesh(20., 60., 40., 50.);
+        if (part_shape == PartShape::Step) {
+            mesh = make_cube(30., 20., 10.);
             TriangleMesh column = make_cube(8., 8., 10.);
             column.translate(11.f, 6.f, 10.f);
             mesh.merge(column);
             TriangleMesh slab = make_cube(44., 20., 2.);
             slab.translate(-7.f, 0.f, 20.f);
             mesh.merge(slab);
-            object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
         }
-        // On a Body Split plate a one-part object on one filament is a plain object. The plate needs a
-        // Body Split object too: a block with a coarse half, which needs no support.
+        ModelObject *object = add_object(model, "coarse-base-part", std::move(mesh), Vec3d(80., 80., 0.));
         if (mode == Mode::Body) {
             object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(1));
             ModelObject *body = model.add_object();
             body->name = "body-block";
-            ModelVolume *fine_half = body->add_volume(make_cube(10., 10., 10.), ModelVolumeType::MODEL_PART, false);
-            fine_half->config.set_key_value("extruder", new ConfigOptionInt(1));
-            fine_half->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.1));
-            ModelVolume *coarse_half = body->add_volume(make_cube(10., 10., 10.), ModelVolumeType::MODEL_PART, false);
-            coarse_half->set_offset(Vec3d(10., 0., 0.));
-            coarse_half->config.set_key_value("extruder", new ConfigOptionInt(2));
-            coarse_half->config.set_key_value("regional_layer_height", new ConfigOptionFloat(0.4));
+            add_part(*body, make_cube(10., 10., 10.), 1, 0.1);
+            add_part(*body, make_cube(10., 10., 10.), 2, 0.4);
+            body->volumes.back()->set_offset(Vec3d(10., 0., 0.));
             body->add_instance();
             body->instances.front()->set_offset(Vec3d(200., 200., 0.));
             body->ensure_on_bed();
         }
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
         print.apply(model, cfg);
         print.set_status_silent();
     };
+    return scene;
+}
+
+// Slices a coarse_base_scene and returns what is wrong, or an empty string.
+std::string coarse_base_case(Mode mode, const CoarseNozzle &nozzles, const SupportCase &support, SupportPlacement where,
+                             PartShape part_shape)
+{
+    const double fine = 0.10;
+    const FilamentCase filaments = placement_filaments(where);
+    const bool coarse_interface = where != SupportPlacement::PetgOnFine;
+    std::ostringstream what;
+    what << mode_name(mode) << " / " << nozzles.coarse << " / " << support.name << " / " << filaments.name
+         << (part_shape == PartShape::Step ? " / step part" : "") << ": ";
+    const CadenceTest::Scene scene = coarse_base_scene(mode, nozzles, support, where, 0, part_shape);
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
+    if (std::string failure = slice_into(scene, what.str(), facts); !failure.empty())
+        return failure;
     const double nozzle[2] = {0.2, nozzles.coarse};
     const int    petg      = filaments.interface_filament != filaments.base ? filaments.interface_filament - 1 : -1;
     // The first row: layer 1, or on the coarse nozzle the first whole layers it can lay.
     const double bed_z     = coarse_interface ? fine * std::ceil(nozzles.coarse_min / fine - 1e-6) : fine;
-    const double bed_speed = config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed")->get_at(coarse_interface ? 1 : 0);
+    const double bed_speed = scene.config.option<ConfigOptionFloatsNullable>("initial_layer_infill_speed")->get_at(coarse_interface ? 1 : 0);
     double lowest_support = std::numeric_limits<double>::max();
     size_t narrow = 0, first_layer_petg = 0, bed_roads = 0, bed_thin = 0, bed_fast = 0, roads[2] = {0, 0};
     double thinnest[2] = {1e9, 1e9}, widest[2] = {0., 0.};
@@ -2739,7 +1751,7 @@ std::string coarse_base_case(Mode mode, const CoarseNozzle &nozzles, const Suppo
         const double z = double(move.position.z());
         if (z < fine + 1e-3 && int(move.extruder_id) == petg)
             ++first_layer_petg;
-        if (move.extrusion_role != erSupportMaterial && move.extrusion_role != erSupportMaterialInterface)
+        if (!is_support(move))
             continue;
         support_z.insert(key(z));
         lowest_support = std::min(lowest_support, z);
@@ -2793,7 +1805,7 @@ std::string coarse_base_case(Mode mode, const CoarseNozzle &nozzles, const Suppo
             const double area = double((move.position - from).norm()) * double(move.width);
             if (CadenceTest::model_road(move))
                 out.part += area;
-            if (move.extrusion_role != erSupportMaterial && move.extrusion_role != erSupportMaterialInterface)
+            if (!is_support(move))
                 continue;
             out.support += area;
             if (move.extrusion_role == erSupportMaterial && int(move.extruder_id) != petg &&
@@ -2854,49 +1866,98 @@ std::string coarse_base_case(Mode mode, const CoarseNozzle &nozzles, const Suppo
     return ok ? std::string() : what.str();
 }
 
-std::string failure_report(const std::vector<std::string> &failures)
+// The handy Benchy (tree roots thinner than a coarse road) with a coarse PLA base and a PETG interface on the fine
+// nozzle, on a first layer the coarse nozzle can lay: every support road is 0.75 to 1.5 times its own nozzle wide.
+std::string first_layer_widths(const NozzlePair &c, const SupportCase &support)
 {
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        if (!failure.empty())
-            report << failure << '\n';
-    return report.str();
+    std::ostringstream what;
+    what << c.name << " / " << support.name << ": ";
+    CadenceTest::Scene scene;
+    scene.config = h2d_support_config(Mode::Feature, c.fine, c.coarse, int(std::lround(c.coarse / c.fine)), 0., support,
+                                      FilamentCase{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"});
+    scene.config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
+    scene.config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
+    scene.config.set_key_value("raft_first_layer_expansion", new ConfigOptionFloat(2.));
+    set_pair(scene.config, c);
+    scene.config.set_key_value("line_width", new ConfigOptionFloatOrPercent(1.1 * c.fine_nozzle, false));
+    scene.config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(1.25 * c.fine_nozzle, false));
+    scene.config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(1.1 * c.fine_nozzle, false));
+    scene.config.set_key_value("tree_support_wall_count", new ConfigOptionInt(0));
+    set_automatic_tower(scene.config);
+    scene.config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
+    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+        ModelObject *object = model.add_object();
+        object->name = "benchy";
+        handy_model("3DBenchy.drc")(*object);
+        // A small tab just above the bed beside the hull, whose tree root on the bed is thinner than a coarse road.
+        TriangleMesh tab = make_cube(1.2, 1.2, 0.6);
+        tab.translate(-1.2f, 0.f, 1.2f);
+        TriangleMesh post = make_cube(4., 4., 3.);
+        post.translate(0.f, -1.4f, 0.f);
+        post.merge(tab);
+        post.translate(-12.f, 20.f, 0.f);
+        object->add_volume(std::move(post), ModelVolumeType::MODEL_PART, false);
+        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
+        object->ensure_on_bed();
+        print.apply(model, cfg);
+        print.set_status_silent();
+    };
+    CadenceTest::Facts facts;
+    if (std::string failure = slice_into(scene, what.str(), facts); !failure.empty())
+        return failure;
+    const double nozzle[2] = {c.fine_nozzle, c.coarse_nozzle};
+    size_t roads = 0, coarse_roads = 0, wrong = 0;
+    for (const Move &move : facts.moves) {
+        if (!is_support(move))
+            continue;
+        const int tool = std::clamp(int(move.physical_tool_id), 0, 1);
+        ++roads;
+        coarse_roads += tool == 1;
+        if (double(move.width) > 1.5 * nozzle[tool] + 1e-3 || double(move.width) < 0.75 * nozzle[tool] - 1e-3) {
+            if (wrong < 3)
+                what << "[width " << move.width << " on the " << nozzle[tool] << " at Z " << move.position.z() << "] ";
+            ++wrong;
+        }
+    }
+    if (roads == 0 || coarse_roads == 0 || wrong != 0) {
+        what << roads << " support roads, " << coarse_roads << " on the coarse nozzle, " << wrong << " too wide or too narrow for their nozzle";
+        return what.str();
+    }
+    if (std::string ahead = tower_ahead_failure(facts.gcode, c.coarse_min); !ahead.empty())
+        return what.str() + ahead;
+    return {};
 }
+} // namespace
 
-TEST_CASE("The support's bed layer prints on layer 1 and every support road is at least its nozzle's width",
-          "[TestRebuild][Support]")
+TEST_CASE("Every support road stays within its own nozzle's widths, and the support's bed layer prints on layer 1", "[TestRebuild][Support]")
 {
-    // The coarse nozzle's minimum layer is above 0.10, so it cannot lay the support's first layer; that
-    // layer must still print on layer 1, and no nozzle may lay a support road much narrower than its own
-    // face. With base and interface both on the coarse nozzle there is no fine support filament: the
-    // first row stays the coarse nozzle's first legal height from the bed, laid at its own first-layer
-    // width and speed.
     std::vector<std::string> failures;
-    for (const CoarseNozzle &nozzles : {CoarseNozzle{0.6, 0.12, 0.42}, CoarseNozzle{0.8, 0.16, 0.56}})
-        for (const SupportPlacement where : {SupportPlacement::PetgOnFine, SupportPlacement::AllCoarse, SupportPlacement::PetgOnCoarse})
-            for (const PartShape part_shape : {PartShape::L, PartShape::Step}) {
-                failures.push_back(coarse_base_case(Mode::Feature, nozzles, k_normal, where, 0, part_shape));
+    // A first layer the coarse nozzle can lay, on the Benchy.
+    for (const NozzlePair &c : {NozzlePair{"0.2/0.6, first layer 0.12", 0.2, 0.6, 0.04, 0.14, 0.12, 0.42, 0.10, 0.12, 0.40},
+                                NozzlePair{"0.2/0.6, first layer 0.14", 0.2, 0.6, 0.04, 0.14, 0.12, 0.42, 0.10, 0.14, 0.40},
+                                NozzlePair{"0.4/0.8, 0.12 layers, first layer 0.20", 0.4, 0.8, 0.08, 0.28, 0.16, 0.56, 0.12, 0.20, 0.36}})
+        for (const SupportCase &support : {k_normal, k_organic})
+            failures.push_back(first_layer_widths(c, support));
+    // A 0.10 first layer the coarse nozzle cannot lay: the support's first layer still prints on layer 1, and no nozzle
+    // lays a support road much narrower than its own face. With base and interface both on the coarse nozzle there is
+    // no fine support filament: the first row stays the coarse nozzle's first legal height from the bed, laid at its
+    // own first-layer width and speed.
+    for (const SupportPlacement where : {SupportPlacement::PetgOnFine, SupportPlacement::AllCoarse, SupportPlacement::PetgOnCoarse})
+        for (const PartShape part_shape : {PartShape::L, PartShape::Step}) {
+            for (const CoarseNozzle &nozzles : {CoarseNozzle{0.6, 0.12, 0.42}, CoarseNozzle{0.8, 0.16, 0.56}}) {
+                failures.push_back(coarse_base_case(Mode::Feature, nozzles, k_normal, where, part_shape));
                 // Organic trees band their body too when the interface is on the fine nozzle.
                 if (where == SupportPlacement::PetgOnFine)
-                    failures.push_back(coarse_base_case(Mode::Feature, nozzles, k_organic, where, 0, part_shape));
+                    failures.push_back(coarse_base_case(Mode::Feature, nozzles, k_organic, where, part_shape));
             }
-    const std::string report = failure_report(failures);
-    INFO(report);
-    CHECK(report.empty());
+            // A plain object on a Body Split plate: with the interface on the 0.2 its support body has no coarse
+            // cadence to band to, so the 0.2 lays it; with both support filaments on the 0.6 the 0.6 lays all of it.
+            failures.push_back(coarse_base_case(Mode::Body, CoarseNozzle{0.6, 0.12, 0.42}, k_normal, where, part_shape));
+        }
+    check_no_failures(failures);
 }
 
-TEST_CASE("A plain object on a Body Split plate lays its coarse support at the coarse nozzle's width", "[TestRebuild][Support]")
-{
-    // With the interface on the 0.2 the plain object's support body has no coarse cadence to band to, so
-    // the 0.2 lays it; with both support filaments on the 0.6 the 0.6 lays all of it.
-    std::vector<std::string> failures;
-    for (const SupportPlacement where : {SupportPlacement::PetgOnFine, SupportPlacement::AllCoarse, SupportPlacement::PetgOnCoarse})
-        for (const PartShape part_shape : {PartShape::L, PartShape::Step})
-            failures.push_back(coarse_base_case(Mode::Body, CoarseNozzle{0.6, 0.12, 0.42}, k_normal, where, 0, part_shape));
-    const std::string report = failure_report(failures);
-    INFO(report);
-    CHECK(report.empty());
-}
+// ---- Rafts ---------------------------------------------------------------------------------------
 
 namespace {
 // What a coarse raft case is made of: the support filaments' placement, the support style and the raft layers.
@@ -2911,32 +1972,20 @@ struct RaftCase {
     bool           zero_gap = false;
 };
 
-std::string raft_case_name(const RaftCase &rc)
-{
-    std::ostringstream out;
-    out << "0.2/" << rc.nozzles.coarse << " / " << (rc.support_on ? rc.support.name : "no support") << " / "
-        << rc.filaments.name << " / raft " << rc.raft_layers << (rc.skirt ? " / skirt" : "") << (rc.zero_gap ? " / no gap" : "");
-    return out.str();
-}
-
 // Slices the L part (support from the bed under its arm) on a raft whose base is PLA on the coarse nozzle, under
 // Feature Split, 0.10 / 0.40 with a 0.10 first layer, and returns what is wrong, or an empty string.
 std::string coarse_raft_case(const RaftCase &rc)
 {
     std::ostringstream what;
-    what << raft_case_name(rc) << ": ";
+    what << "0.2/" << rc.nozzles.coarse << " / " << (rc.support_on ? rc.support.name : "no support") << " / "
+         << rc.filaments.name << " / raft " << rc.raft_layers << (rc.skirt ? " / skirt" : "") << (rc.zero_gap ? " / no gap" : "") << ": ";
     const double fine = 0.10;
     DynamicPrintConfig config = h2d_support_config(Mode::Feature, fine, 0.40, 4, 0., rc.support, rc.filaments);
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, rc.nozzles.coarse});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, rc.nozzles.coarse});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, rc.nozzles.coarse_min});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, rc.nozzles.coarse_max});
+    set_nozzles(config, 0.2, rc.nozzles.coarse, 0.04, 0.14, rc.nozzles.coarse_min, rc.nozzles.coarse_max);
     config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
     config.set_key_value("support_top_z_distance", new ConfigOptionFloat(rc.zero_gap ? 0. : 0.1));
     config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.1));
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    set_fine_widths(config);
     config.set_key_value("raft_layers", new ConfigOptionInt(rc.raft_layers));
     config.set_key_value("enable_support", new ConfigOptionBool(rc.support_on));
     config.set_key_value("skirt_loops", new ConfigOptionInt(rc.skirt ? 2 : 0));
@@ -2946,27 +1995,12 @@ std::string coarse_raft_case(const RaftCase &rc)
     Model model;
     Print print;
     print.is_BBL_printer() = true;
-    ModelObject *object = model.add_object();
-    object->name = "coarse-raft-part";
-    object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-    object->ensure_on_bed();
+    add_object(model, "coarse-raft-part", overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(80., 80., 0.));
     print.apply(model, config);
     print.set_status_silent();
     CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(print);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
-    }
-    if (! facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    if (const char *dir = std::getenv("CADENCE_TEST_DUMP_DIR")) {
-        std::string name = raft_case_name(rc);
-        std::replace_if(name.begin(), name.end(), [](char c) { return ! std::isalnum((unsigned char)c) && c != '.'; }, '_');
-        std::ofstream(std::string(dir) + "/raft-" + name + ".gcode") << facts.gcode;
-    }
+    if (std::string failure = slice_into(print, what.str(), facts); !failure.empty())
+        return failure;
     const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
     const double nozzle[2]  = {0.2, rc.nozzles.coarse};
     const double minimum[2] = {0.04, rc.nozzles.coarse_min};
@@ -2996,7 +2030,7 @@ std::string coarse_raft_case(const RaftCase &rc)
         }
         if (z < bed_z + 1e-3) {
             bed_nozzles.insert(tool);
-            if (move.extrusion_role == erSupportMaterial || move.extrusion_role == erSupportMaterialInterface) {
+            if (is_support(move)) {
                 ++bed_roads;
                 if (tool != base_tool || std::abs(double(move.height) - bed_z) > 1e-3 || double(move.width) < nozzle[tool] - 1e-3)
                     ++bed_wrong;
@@ -3031,10 +2065,17 @@ std::string coarse_raft_case(const RaftCase &rc)
     }
     // A raised first layer is said, as a warning on First layer height.
     const bool warned = std::any_of(facts.validation_warnings.begin(), facts.validation_warnings.end(), [](const StringObjectException &w) {
-        return w.opt_key == "initial_layer_print_height" && w.string.find("The raft's first layer prints at") != std::string::npos;
+        return w.opt_key == "initial_layer_print_height";
     });
     if (warned != (bed_z > fine + 1e-3)) {
         what << (warned ? ", warns of a raised first layer" : ", no warning of the raised first layer");
+        ok = false;
+    }
+    // The gap above the raft is rounded to a whole fine layer, and the export's empty-layer check allows for it.
+    const std::vector<PrintStateBase::Warning> export_warnings = print.step_state_with_warnings(psGCodeExport).warnings;
+    if (std::any_of(export_warnings.begin(), export_warnings.end(), [](const PrintStateBase::Warning &w) {
+            return w.message_id == PrintStateBase::SlicingEmptyGcodeLayers; })) {
+        what << ", empty-layer warning";
         ok = false;
     }
     if (rc.skirt && (skirt_roads == 0 || skirt_wrong != 0)) {
@@ -3063,6 +2104,44 @@ std::string coarse_raft_case(const RaftCase &rc)
     }
     return ok ? std::string() : what.str();
 }
+
+// The L part on a raft, Feature Split 0.2/0.6, 0.10 / 0.40, PETG interface on the 0.2.
+DynamicPrintConfig raft_reslice_config(int support_filament)
+{
+    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"PETG interface", support_filament, 3, "PETG"});
+    set_nozzles(config, 0.2, 0.6, 0.04, 0.14, 0.12, 0.42);
+    config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.1));
+    config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.1));
+    set_fine_widths(config);
+    config.set_key_value("raft_layers", new ConfigOptionInt(5));
+    set_automatic_tower(config);
+    fill_per_filament_values(config);
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nM1020 S[initial_extruder]\n"));
+    return config;
+}
+
+// Where the part's first road starts (bottom of its lowest model road) against the raft top plus gap, after a
+// slice of this print as it stands; empty when they agree.
+std::string part_on_raft(Print &print, const std::string &what)
+{
+    CadenceTest::Facts facts;
+    if (std::string failure = slice_into(print, what + ": ", facts); !failure.empty())
+        return failure;
+    const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
+    double part = 1e9, lowest = 1e9;
+    for (const Move &move : facts.moves)
+        if (move.type == EMoveType::Extrude && move.delta_extruder > 0.f) {
+            lowest = std::min(lowest, double(move.position.z()));
+            if (CadenceTest::model_road(move))
+                part = std::min(part, double(move.position.z()) - double(move.height));
+        }
+    std::ostringstream out;
+    if (std::abs(part - slicing.raft_contact_top_z - slicing.gap_raft_object) > 1e-3 ||
+        std::abs(lowest - slicing.first_print_layer_height) > 1e-3)
+        out << what << ": part from Z " << part << " on a raft whose top is " << slicing.raft_contact_top_z << " (gap "
+            << slicing.gap_raft_object << "), first layer at Z " << lowest << " for " << slicing.first_print_layer_height;
+    return out.str();
+}
 } // namespace
 
 TEST_CASE("A raft with its base on the coarse nozzle starts on the bed at a height that nozzle lays", "[TestRebuild][Support][Raft]")
@@ -3084,39 +2163,30 @@ TEST_CASE("A raft with its base on the coarse nozzle starts on the bed at a heig
         failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 2, true, true}));
         failures.push_back(coarse_raft_case(RaftCase{nozzles, k_normal, petg, 4, true, false, true}));
     }
-    const std::string report = failure_report(failures);
-    INFO(report);
-    CHECK(report.empty());
+
+    // Changing what the raft is laid with slices the part again at the raft's new height: the support/raft base on
+    // the 0.2 (filament 1), then on the 0.6 (filament 2), then back, and the 0.6's layer height limits, each move the
+    // raft's first layer and base levels.
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    add_object(model, "raft-reslice", overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(80., 80., 0.));
+    for (const int base : {1, 2, 1}) {
+        print.apply(model, raft_reslice_config(base));
+        print.set_status_silent();
+        failures.push_back(part_on_raft(print, "base on filament " + std::to_string(base)));
+    }
+    DynamicPrintConfig config = raft_reslice_config(2);
+    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.16});
+    print.apply(model, config);
+    failures.push_back(part_on_raft(print, "0.6 minimum 0.16"));
+    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.40});
+    print.apply(model, config);
+    failures.push_back(part_on_raft(print, "0.6 maximum 0.40"));
+    check_no_failures(failures);
 }
 
-TEST_CASE("Tree support with the support base on the coarse nozzle is refused unless it is Organic with a finer interface", "[TestRebuild][Support]")
-{
-    const CoarseNozzle nozzles{0.6, 0.12, 0.42};
-    for (const Mode mode : {Mode::Feature, Mode::Body}) {
-        const char *code = mode == Mode::Feature ? "refused: [SRL-F14]" : "refused: [SRL-A53]";
-        // Slim, Strong and Hybrid are refused, pointing to Organic or Normal support. They are no longer
-        // drawn as Organic trees behind the user's back.
-        for (const SupportCase &support : {k_slim, k_hybrid, SupportCase{"tree strong", stTreeAuto, smsTreeStrong}}) {
-            const std::string outcome = coarse_base_case(mode, nozzles, support, SupportPlacement::PetgOnFine);
-            INFO(outcome);
-            CHECK(outcome.find(code) != std::string::npos);
-            CHECK(outcome.find("Slim, Strong and Hybrid tree support cannot have its base on the 0.6 mm nozzle") != std::string::npos);
-            CHECK(outcome.find("Use Organic tree support or Normal support") != std::string::npos);
-        }
-        // Organic with its interface on the coarse nozzle too.
-        const std::string shared = coarse_base_case(mode, nozzles, k_organic, SupportPlacement::AllCoarse);
-        INFO(shared);
-        CHECK(shared.find(code) != std::string::npos);
-        CHECK(shared.find("Tree support cannot have its interface on the 0.6 mm nozzle with its base") != std::string::npos);
-        CHECK(shared.find("Normal support") != std::string::npos);
-        // Organic with the interface on the fine nozzle slices, and so do Snug and Grid, which a tree draws as Organic.
-        for (const SupportCase &support : {k_organic, SupportCase{"tree snug", stTreeAuto, smsSnug}, SupportCase{"tree grid", stTreeAuto, smsGrid}}) {
-            const std::string organic = coarse_base_case(mode, nozzles, support, SupportPlacement::PetgOnFine);
-            INFO(organic);
-            CHECK(organic.find("refused") == std::string::npos);
-        }
-    }
-}
+// ---- Interface filament against stock -----------------------------------------------------------------
 
 namespace {
 // Length of the support interface roads laid in the interface filament: on the first layer and in all.
@@ -3124,110 +2194,69 @@ struct InterfaceLength {
     double      first_layer = 0.;
     double      total       = 0.;
     size_t      layers      = 0;
-    std::string refusal;
-    // "Z: mm" for every layer that has the interface filament, and what else the support lays there.
+    // "Z: mm" for every layer that has the interface filament.
     std::string by_layer;
     // Support layers where both nozzles lay body.
     size_t      two_body_layers = 0;
 };
 
-// A part whose overhang starts on layer 2 (a 20 mm foot one layer tall under a 60 mm slab) and a
-// second overhang 10 mm up, with the support base in PLA on the coarse nozzle and a PETG interface on
-// the fine one at zero gap. Mode Off is the stock print of the same settings.
+// A part overhanging from layer 2 and again 10 mm up, a coarse PLA base and a PETG interface on the fine nozzle at
+// zero gap; mode Off is the stock print of the same settings. Requires a slice.
 InterfaceLength interface_length_case(Mode mode, const CoarseNozzle &nozzles)
 {
     const double fine = 0.10;
     const FilamentCase filaments{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
     DynamicPrintConfig config = h2d_support_config(mode, fine, 0.40, 4, 0., k_normal, filaments);
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, nozzles.coarse});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, nozzles.coarse});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, nozzles.coarse_min});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, nozzles.coarse_max});
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
+    set_nozzles(config, 0.2, nozzles.coarse, 0.04, 0.14, nozzles.coarse_min, nozzles.coarse_max);
+    set_fine_widths(config);
     set_automatic_tower(config);
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "overhang-from-layer-two";
-        TriangleMesh mesh = extruded_xz_outline({{0., 0.}, {20., 0.}, {20., 0.1}, {60., 0.1}, {60., 3.}, {40., 3.},
-                                                 {40., 10.}, {70., 10.}, {70., 13.}, {0., 13.}}, 20.);
-        object->add_volume(std::move(mesh), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
+    bambu_config(config);
     InterfaceLength out;
     CadenceTest::Facts facts;
     Model model;
     Print print;
-    try {
-        fill_per_filament_values(scene.config);
-        scene.config.set_key_value("machine_start_gcode", new ConfigOptionString(scene.config.opt_string("machine_start_gcode") + "\nM1020 S[initial_extruder]\n"));
-        print.is_BBL_printer() = true;
-        scene.populate(model, print, scene.config);
-        facts = CadenceTest::slice(print);
-    } catch (const std::exception &error) {
-        out.refusal = std::string("threw ") + error.what();
-        return out;
-    }
-    out.refusal = facts.refusal.string;
-    if (out.refusal.empty())
-        for (const SupportLayer *layer : print.objects().front()->support_layers())
-            out.two_body_layers += ! layer->fine_body_fills.empty();
+    print.is_BBL_printer() = true;
+    add_object(model, "overhang-from-layer-two",
+               extruded_xz_outline({{0., 0.}, {20., 0.}, {20., 0.1}, {60., 0.1}, {60., 3.}, {40., 3.},
+                                    {40., 10.}, {70., 10.}, {70., 13.}, {0., 13.}}, 20.),
+               Vec3d(80., 80., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    const std::string refused = slice_into(print, std::string(mode_name(mode)) + ": ", facts);
+    INFO(refused);
+    REQUIRE(refused.empty());
+    for (const SupportLayer *layer : print.objects().front()->support_layers())
+        out.two_body_layers += ! layer->fine_body_fills.empty();
     std::map<int, double> layers;
-    std::map<int, std::map<std::string, double>> others;
-    Vec3f previous = Vec3f::Zero();
-    for (const Move &move : facts.moves) {
-        const Vec3f from = previous;
-        previous = move.position;
-        if (move.type != EMoveType::Extrude ||
-            (move.extrusion_role != erSupportMaterialInterface && move.extrusion_role != erSupportMaterial))
+    for (size_t i = 1; i < facts.moves.size(); ++i) {
+        const Move &move = facts.moves[i];
+        if (move.type != EMoveType::Extrude || move.extrusion_role != erSupportMaterialInterface ||
+            int(move.extruder_id) != filaments.interface_filament - 1)
             continue;
-        const double length = (move.position.head<2>() - from.head<2>()).norm();
-        const int    z      = int(std::lround(double(move.position.z()) * 1000.));
-        if (move.extrusion_role != erSupportMaterialInterface || int(move.extruder_id) != filaments.interface_filament - 1) {
-            others[z][std::string(move.extrusion_role == erSupportMaterial ? "base" : "interface") + " filament " +
-                      std::to_string(int(move.extruder_id) + 1) + " h " + std::to_string(move.height).substr(0, 4)] += length;
-            continue;
-        }
+        const double length = (move.position.head<2>() - facts.moves[i - 1].position.head<2>()).norm();
         out.total += length;
         if (double(move.position.z()) < fine + 1e-3)
             out.first_layer += length;
-        layers[z] += length;
+        layers[int(std::lround(double(move.position.z()) * 1000.))] += length;
     }
     out.layers = layers.size();
     std::ostringstream text;
-    for (const auto &[z, length] : layers) {
-        text << "Z " << z / 1000. << ": " << length << " mm";
-        for (const auto &[what, other] : others[z])
-            text << ", " << what << " " << other << " mm";
-        text << "; ";
-    }
+    for (const auto &[z, length] : layers)
+        text << "Z " << z / 1000. << ": " << length << " mm; ";
     out.by_layer = text.str();
     return out;
 }
 } // namespace
 
-// The contact and interface areas were once grown with the support base's road width, which is
-// scaled to the coarse nozzle (0.22 to 0.66 or 0.88). The interface filament
-// then covered about twice stock's area on every contact, the first layer included, and a sliver of
-// it appeared on layers where stock lays none, each costing a filament swap on the fine nozzle.
+// Contact and interface areas are not grown with the coarse base road width: the interface filament covers about
+// stock's area, the first layer included, and appears on no layer where stock lays none.
 TEST_CASE("A coarse support base lays no more interface filament than the stock print of the same settings",
           "[TestRebuild][Support]")
 {
     const CoarseNozzle nozzles = GENERATE(CoarseNozzle{0.6, 0.12, 0.42}, CoarseNozzle{0.8, 0.16, 0.56});
     CAPTURE(nozzles.coarse);
     const InterfaceLength stock = interface_length_case(Mode::Off, nozzles);
-    INFO(stock.refusal);
-    REQUIRE(stock.refusal.empty());
     const InterfaceLength split = interface_length_case(Mode::Feature, nozzles);
-    INFO(split.refusal);
-    REQUIRE(split.refusal.empty());
     CAPTURE(stock.first_layer, split.first_layer, stock.total, split.total, stock.layers, split.layers);
     INFO("stock: " << stock.by_layer);
     INFO("split: " << split.by_layer);
@@ -3235,9 +2264,7 @@ TEST_CASE("A coarse support base lays no more interface filament than the stock 
     REQUIRE(stock.first_layer > 100.);
     REQUIRE(stock.total > stock.first_layer);
     CHECK(split.first_layer <= 1.05 * stock.first_layer);
-    // The support that stands on the part starts with a layer the interface nozzle lays in the body
-    // filament, also where that layer shares its height with a coarse band top, so the interface
-    // filament prints on the same layers as in stock and about as much.
+    // Support standing on the part starts with a body-filament layer from the interface nozzle, also on a band top.
     CHECK(split.total <= 1.05 * stock.total);
     CHECK(split.total >= 0.9 * stock.total);
     CHECK(split.layers <= stock.layers);
@@ -3245,142 +2272,6 @@ TEST_CASE("A coarse support base lays no more interface filament than the stock 
     CAPTURE(split.two_body_layers);
     CHECK(split.two_body_layers > 0);
     CHECK(stock.two_body_layers == 0);
-}
-
-namespace {
-struct CoarseRoads {
-    std::string refusal;
-    size_t      roads = 0;       // roads of the role the coarse nozzle lays above the first layer
-    size_t      thin_roads = 0;  // of those, roads thinner than its minimum layer height
-    size_t      thick_roads = 0; // and thicker than its maximum
-    size_t      layers = 0;      // heights at which the coarse nozzle lays roads of the role
-    size_t      scrap_layers = 0; // of those, heights with less than 5 mm of such road
-    std::string where;
-};
-
-// The bunny in the app project under Feature Split, its support base on the coarse PLA (3) and the
-// interface on the fine PLA (1). Counts the roads of one role the 0.8 lays above the first layer,
-// and those below its 0.16 mm minimum layer height.
-CoarseRoads bunny_coarse_roads(ExtrusionRole role, double fine, double coarse, int ratio, bool support,
-                               const SupportCase &support_case = k_normal)
-{
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, fine, coarse, ratio, support_case);
-    config.set_key_value("enable_support", new ConfigOptionBool(support));
-    config.set_key_value("support_filament", new ConfigOptionInt(3));
-    config.set_key_value("support_interface_filament", new ConfigOptionInt(1));
-    set_automatic_tower(config);
-    config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
-    config.set_key_value("printable_height", new ConfigOptionFloat(325.));
-    const double coarse_minimum = config.option<ConfigOptionFloats>("min_layer_height")->get_at(1);
-    const double coarse_maximum = config.option<ConfigOptionFloats>("max_layer_height")->get_at(1);
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "bunny";
-        handy_model("Stanford_Bunny.drc")(*object);
-        object->instances.front()->set_offset(Vec3d(40., 40., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    const CadenceTest::Facts facts = CadenceTest::slice(scene);
-    CoarseRoads tally;
-    tally.refusal = facts.refusal.string;
-    std::ostringstream where;
-    std::map<long long, double> length_at;
-    for (size_t i = 1; i < facts.moves.size(); ++ i) {
-        const Move &move = facts.moves[i];
-        if (move.type != EMoveType::Extrude || move.extrusion_role != role || move.physical_tool_id != 1 ||
-            double(move.position.z()) < fine + 1e-3)
-            continue;
-        ++tally.roads;
-        length_at[std::llround(double(move.position.z()) * 1e4)] += double((move.position - facts.moves[i - 1].position).head<2>().norm());
-        if (double(move.height) < coarse_minimum - 0.005) {
-            if (tally.thin_roads < 5)
-                where << "[Z " << move.position.z() << ", height " << move.height << "] ";
-            ++tally.thin_roads;
-        }
-        tally.thick_roads += double(move.height) > coarse_maximum + 0.005;
-    }
-    tally.layers = length_at.size();
-    for (const auto &[z, length] : length_at)
-        tally.scrap_layers += length < 5.;
-    tally.where = where.str();
-    return tally;
-}
-} // namespace
-
-TEST_CASE("The coarse nozzle never lays sparse infill thinner than its minimum layer height", "[TestRebuild][Support]")
-{
-    // On a band's top layer the sparse infill left beside the band (its clearance ring, and wherever
-    // the outline changes) is one fine layer thick. It used to print on the 0.8 at 0.08 or 0.1 mm.
-    for (const auto &[fine, coarse, ratio, support] : {std::tuple<double, double, int, bool>{0.08, 0.56, 7, false},
-                                                       {0.10, 0.30, 3, true}}) {
-        CAPTURE(fine, coarse, support);
-        const CoarseRoads sparse = bunny_coarse_roads(erInternalInfill, fine, coarse, ratio, support);
-        INFO(sparse.refusal);
-        REQUIRE(sparse.refusal.empty());
-        INFO(sparse.where);
-        CAPTURE(sparse.roads, sparse.thin_roads);
-        REQUIRE(sparse.roads > 0);
-        CHECK(sparse.thin_roads == 0);
-    }
-}
-
-TEST_CASE("The coarse nozzle never lays support thinner than its minimum layer height", "[TestRebuild][Support]")
-{
-    // A band road that reached a top contact inside the band was trimmed down to the height left
-    // above that contact, 0.1 mm on the 0.8. Such pieces now go to the interface nozzle. Organic trees
-    // are laid in bands too, cut at each band's middle, and leave few short scraps of coarse road.
-    for (const SupportCase &support : {k_normal, k_organic}) {
-        CAPTURE(support.name);
-        const CoarseRoads body = bunny_coarse_roads(erSupportMaterial, 0.10, 0.30, 3, true, support);
-        INFO(body.refusal);
-        REQUIRE(body.refusal.empty());
-        INFO(body.where);
-        CAPTURE(body.roads, body.thin_roads, body.thick_roads, body.layers, body.scrap_layers);
-        REQUIRE(body.roads > 0);
-        CHECK(body.thin_roads == 0);
-        CHECK(body.thick_roads == 0);
-        if (support.style == smsTreeOrganic)
-            CHECK(body.scrap_layers <= body.layers / 20);
-    }
-}
-
-TEST_CASE("Feature Split with PLA walls and PETG sparse infill on the other nozzle says what to change",
-          "[TestRebuild][Tower][MaterialMix]")
-{
-    // The owner's Windows test: PLA walls on the 0.2, sparse infill in PETG HF (slot 4) on the 0.8,
-    // no support. The tower keeps PLA and PETG in separate blocks, so it cannot be built; the
-    // refusal names the two materials and the fix.
-    DynamicPrintConfig config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
-    config.set_key_value("enable_support", new ConfigOptionBool(false));
-    config.set_key_value("filament_map", new ConfigOptionInts{1, 1, 1, 2});
-    config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(4));
-    CadenceTest::Scene scene;
-    scene.config   = config;
-    scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "cube";
-        object->add_volume(make_cube(30., 30., 12.), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
-        print.apply(model, cfg);
-        print.set_status_silent();
-    };
-    std::string message;
-    try {
-        const CadenceTest::Facts facts = CadenceTest::slice(scene);
-        message = facts.refusal.string;
-    } catch (const std::exception &error) {
-        message = error.what();
-    }
-    INFO(message);
-    REQUIRE_FALSE(message.empty());
-    CHECK(message.find("PLA on the 0.2 mm nozzle and PETG on the 0.8 mm nozzle") != std::string::npos);
-    CHECK(message.find("Use the same kind of material on both nozzles") != std::string::npos);
 }
 
 namespace {
@@ -3594,362 +2485,172 @@ TEST_CASE("Organic trees on a coarse base match the stock tree of the same plan"
     }
 }
 
+// ---- Refusals ------------------------------------------------------------------------------------
+
 namespace {
-// A nozzle pair with its layer heights, and a first layer at or above the coarse nozzle's minimum, so the coarse
-// nozzle can lay the support's bed layer itself.
-struct FirstLayerCase {
-    const char *name;
-    double      fine_nozzle, coarse_nozzle;
-    double      fine_min, fine_max, coarse_min, coarse_max;
-    double      fine, first_layer, coarse;
+enum class Verdict { Refused, Slices, Validates, Clears };
+
+// A plate and what it gets: refused with a code and setting (an empty code: refused while slicing, with no code of
+// its own; an empty setting: refused while slicing, where no setting is named), sliced to G-code, past validation, or not refused for the given code.
+struct RefusalRow {
+    std::string        name;
+    CadenceTest::Scene scene;
+    Verdict            verdict;
+    std::string        code    = {};
+    std::string        opt_key = {};
 };
 
-// The handy Benchy, whose tree roots on the bed include pieces thinner than a coarse road, with its support base
-// in PLA on the coarse nozzle, a PETG interface on the fine one and the owner project's support settings (zero top
-// gap, two bottom interface layers, wider raft first layer). Every support road must be one its own nozzle
-// can lay: no wider than 1.5 times the nozzle and no narrower than 0.75 times it.
-std::string first_layer_widths(const FirstLayerCase &c, const SupportCase &support)
+struct Refusal { std::string message, code, opt_key; };
+
+Refusal refusal_of(CadenceTest::Scene scene, bool validate_only)
 {
-    std::ostringstream what;
-    what << c.name << " / " << support.name << ": ";
-    const FilamentCase filaments{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, c.fine, c.coarse, int(std::lround(c.coarse / c.fine)),
-                                                   0., support, filaments);
-    config.set_key_value("support_bottom_z_distance", new ConfigOptionFloat(0.1));
-    config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
-    config.set_key_value("raft_first_layer_expansion", new ConfigOptionFloat(2.));
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{c.fine_nozzle, c.coarse_nozzle});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{c.fine_nozzle, c.coarse_nozzle});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{c.fine_min, c.coarse_min});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{c.fine_max, c.coarse_max});
-    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(c.first_layer));
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(1.1 * c.fine_nozzle, false));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(1.25 * c.fine_nozzle, false));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(1.1 * c.fine_nozzle, false));
-    config.set_key_value("tree_support_wall_count", new ConfigOptionInt(0));
-    set_automatic_tower(config);
-    config.set_key_value("prime_tower_width", new ConfigOptionFloat(60.));
+    Refusal out;
+    if (validate_only) {
+        fill_per_filament_values(scene.config);
+        Model model;
+        Print print;
+        print.is_BBL_printer() = scene.bambu;
+        scene.populate(model, print, scene.config);
+        const StringObjectException refused = print.validate();
+        out.message = refused.string;
+        out.opt_key = refused.opt_key;
+    } else {
+        try {
+            const CadenceTest::Facts facts = CadenceTest::slice(scene);
+            out.message = facts.refusal.string;
+            out.opt_key = facts.refusal.opt_key;
+        } catch (const std::exception &error) {
+            out.message = error.what();
+        }
+    }
+    out.code = code_of(out.message);
+    return out;
+}
+
+// The coarse-base L part with a coarse PLA base (2) and a PETG interface (3) on the fine nozzle, whose other filament
+// (1, the part's own) is soluble, or PETG. With LaysNone a plain cube that needs no support, with support on.
+enum class FineBodyCase { OnlyInterface, PetgWalls, LaysNone };
+
+CadenceTest::Scene fine_body_scene(const SupportCase &support, FineBodyCase fine_body)
+{
     CadenceTest::Scene scene;
-    scene.config   = config;
+    scene.config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., support, FilamentCase{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"});
+    set_nozzles(scene.config, 0.2, 0.6, 0.04, 0.14, 0.12, 0.42);
+    if (fine_body == FineBodyCase::PetgWalls) {
+        // Both fine filaments PETG, with the adhesion categories the printer profiles give PLA and PETG.
+        scene.config.option<ConfigOptionStrings>("filament_type")->values[0] = "PETG";
+        scene.config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts{300, 100, 300, 100});
+    } else
+        scene.config.option<ConfigOptionBools>("filament_soluble")->values[0] = true;
+    scene.populate = one_object("l-part", fine_body == FineBodyCase::LaysNone ? make_cube(20., 20., 20.) : overhang_shelf_mesh(20., 60., 40., 50.),
+                                Vec3d(80., 80., 0.));
+    return scene;
+}
+
+// Two cubes on rafts, Feature Split 0.2/0.6 at 0.10 / 0.40: one raft's base on the 0.6 (it starts on the bed at
+// the 0.6's 0.12 mm), the other's on the 0.2.
+CadenceTest::Scene two_raft_scene(double first_layer)
+{
+    CadenceTest::Scene scene;
+    scene.config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"coarse PLA base", 2, 3});
+    set_nozzles(scene.config, 0.2, 0.6, 0.04, 0.14, 0.12, 0.42);
+    scene.config.set_key_value("raft_layers", new ConfigOptionInt(2));
+    scene.config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(first_layer));
+    set_automatic_tower(scene.config);
     scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) {
-        ModelObject *object = model.add_object();
-        object->name = "benchy";
-        handy_model("3DBenchy.drc")(*object);
-        // A small tab just above the bed beside the hull, whose tree root on the bed is thinner than a coarse road.
-        TriangleMesh tab = make_cube(1.2, 1.2, 0.6);
-        tab.translate(-1.2f, 0.f, 1.2f);
-        TriangleMesh post = make_cube(4., 4., 3.);
-        post.translate(0.f, -1.4f, 0.f);
-        post.merge(tab);
-        post.translate(-12.f, 20.f, 0.f);
-        object->add_volume(std::move(post), ModelVolumeType::MODEL_PART, false);
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
+        add_object(model, "coarse-raft", make_cube(10., 10., 10.), Vec3d(60., 60., 0.));
+        add_object(model, "fine-raft", make_cube(10., 10., 10.), Vec3d(100., 60., 0.))->config.set_key_value("support_filament", new ConfigOptionInt(1));
         print.apply(model, cfg);
         print.set_status_silent();
     };
-    CadenceTest::Facts facts;
-    try {
-        facts = CadenceTest::slice(scene);
-    } catch (const std::exception &error) {
-        return what.str() + "threw " + error.what();
+    return scene;
+}
+
+// A 30 mm cube in the app project with no support: PLA walls on the 0.2, and sparse infill in PETG (slot 4, moved to
+// the 0.8) or in the project's coarse PLA.
+CadenceTest::Scene cube_in_app_project(bool petg_sparse)
+{
+    CadenceTest::Scene scene;
+    scene.config = app_three_filament_config(Mode::Feature, 0.10, 0.30, 3, k_normal);
+    scene.config.set_key_value("enable_support", new ConfigOptionBool(false));
+    if (petg_sparse) {
+        scene.config.set_key_value("filament_map", new ConfigOptionInts{1, 1, 1, 2});
+        scene.config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(4));
     }
-    if (!facts.refusal.string.empty())
-        return what.str() + "refused: " + facts.refusal.string;
-    const double nozzle[2] = {c.fine_nozzle, c.coarse_nozzle};
-    size_t roads = 0, coarse_roads = 0, wrong = 0;
-    for (const Move &move : facts.moves) {
-        if (move.type != EMoveType::Extrude ||
-            (move.extrusion_role != erSupportMaterial && move.extrusion_role != erSupportMaterialInterface))
-            continue;
-        const int tool = std::clamp(int(move.physical_tool_id), 0, 1);
-        ++roads;
-        coarse_roads += tool == 1;
-        if (double(move.width) > 1.5 * nozzle[tool] + 1e-3 || double(move.width) < 0.75 * nozzle[tool] - 1e-3) {
-            if (wrong < 3)
-                what << "[width " << move.width << " on the " << nozzle[tool] << " at Z " << move.position.z() << "] ";
-            ++wrong;
-        }
-    }
-    if (roads == 0 || coarse_roads == 0 || wrong != 0) {
-        what << roads << " support roads, " << coarse_roads << " on the coarse nozzle, " << wrong << " too wide or too narrow for their nozzle";
-        return what.str();
-    }
-    if (std::string ahead = tower_ahead_failure(facts.gcode, c.coarse_min); !ahead.empty())
-        return what.str() + ahead;
-    return {};
+    scene.populate = one_object("cube", make_cube(30., 30., 12.), Vec3d(80., 80., 0.));
+    return scene;
 }
 } // namespace
 
-TEST_CASE("With a first layer the coarse nozzle can lay, every support road stays within its own nozzle's widths", "[TestRebuild][Support]")
+TEST_CASE("Support a plate cannot print is refused by code and setting, and the plate that can is accepted", "[TestRebuild][Support][Refusal]")
 {
-    std::vector<std::string> failures;
-    for (const FirstLayerCase &c : {FirstLayerCase{"0.2/0.6, first layer 0.12", 0.2, 0.6, 0.04, 0.14, 0.12, 0.42, 0.10, 0.12, 0.40},
-                                    FirstLayerCase{"0.2/0.6, first layer 0.14", 0.2, 0.6, 0.04, 0.14, 0.12, 0.42, 0.10, 0.14, 0.40},
-                                    FirstLayerCase{"0.4/0.8, 0.12 layers, first layer 0.20", 0.4, 0.8, 0.08, 0.28, 0.16, 0.56, 0.12, 0.20, 0.36}})
-        for (const SupportCase &support : {k_normal, k_organic})
-            if (std::string failure = first_layer_widths(c, support); !failure.empty())
-                failures.push_back(failure);
-    std::ostringstream report;
-    for (const std::string &failure : failures)
-        report << failure << '\n';
-    INFO(report.str());
-    CHECK(failures.empty());
-}
-
-namespace {
-// The coarse-base L part with a coarse PLA base (2) and a PETG interface (3) on the fine nozzle, whose other filament
-// (1, the part's own) is soluble, or PETG. With LaysNone a plain cube that needs no support, with support on. Returns
-// what validation or slicing says, empty when it slices.
-enum class FineBodyCase { OnlyInterface, PetgWalls, LaysNone };
-std::string no_fine_body_filament(Mode mode, const SupportCase &support, FineBodyCase fine_body = FineBodyCase::OnlyInterface)
-{
-    const FilamentCase filaments{"coarse PLA base, PETG interface on fine", 2, 3, "PETG"};
-    DynamicPrintConfig config = h2d_support_config(mode, 0.10, 0.40, 4, 0., support, filaments);
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
-    if (fine_body == FineBodyCase::PetgWalls) {
-        // Both fine filaments PETG, with the adhesion categories the printer profiles give PLA and PETG.
-        config.option<ConfigOptionStrings>("filament_type")->values[0] = "PETG";
-        config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts{300, 100, 300, 100});
-    } else
-        config.option<ConfigOptionBools>("filament_soluble")->values[0] = true;
-    fill_per_filament_values(config);
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    ModelObject *object = model.add_object();
-    object->name = "l-part";
-    object->add_volume(fine_body == FineBodyCase::LaysNone ? make_cube(20., 20., 20.) : overhang_shelf_mesh(20., 60., 40., 50.),
-                       ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-    object->ensure_on_bed();
-    print.apply(model, config);
-    print.set_status_silent();
-    if (std::string refusal = print.validate().string; !refusal.empty())
-        return refusal;
-    try {
-        print.process();
-    } catch (const std::exception &error) {
-        return error.what();
-    }
-    return {};
-}
-} // namespace
-
-TEST_CASE("A coarse support base with no body filament on the fine nozzle is refused where the fine nozzle lays body", "[TestRebuild][Support]")
-{
-    // The fine nozzle lays part of the body (the dense layer under the PETG, thin tree parts). With only the PETG
-    // interface there it has no filament for it; with PETG walls there it printed that body in PETG beside the PLA
-    // base, which does not stick to it. Both are refused with a message saying what to map.
-    for (const SupportCase &support : {k_normal, k_organic})
-        for (const FineBodyCase fine_body : {FineBodyCase::OnlyInterface, FineBodyCase::PetgWalls}) {
-            CAPTURE(support.name, int(fine_body));
-            const std::string refusal = no_fine_body_filament(Mode::Feature, support, fine_body);
-            CHECK(refusal.find("[SRL-F15]") != std::string::npos);
-            CHECK(refusal.find("Map a PLA filament to the 0.2 mm nozzle") != std::string::npos);
-        }
-    // A plate whose support lays no body on the fine nozzle (here none at all) was refused before slicing all the same.
-    const std::string outcome = no_fine_body_filament(Mode::Feature, k_normal, FineBodyCase::LaysNone);
-    INFO(outcome);
-    CHECK(outcome.empty());
-}
-
-TEST_CASE("Slim, Strong and Hybrid trees on a nozzle that cannot lay the object's layers are refused", "[TestRebuild][Support]")
-{
-    // Both support filaments on the fine 0.2, whose thinnest layer (0.12 here) is above the 0.10 layers: an Organic
-    // tree is laid on rows that nozzle can lay; the other tree generators cannot do that.
-    const FilamentCase filaments{"base and interface on the fine nozzle", 1, 3};
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.1, k_slim, filaments);
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.12, 0.16});
-    fill_per_filament_values(config);
-    const PrintConfig resolved = [&config]() { PrintConfig c; c.apply(config, true); return c; }();
-    const PrintObjectConfig object_config = [&config]() { PrintObjectConfig c; c.apply(config, true); return c; }();
-    REQUIRE(mixed_nozzle_support_on_coarse_nozzle(resolved, object_config, true));
-    for (const SupportCase &support : {k_slim, SupportCase{"tree strong", stTreeAuto, smsTreeStrong}, k_hybrid}) {
-        CAPTURE(support.name);
-        config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(support.style));
-        Model model;
-        Print print;
-        print.is_BBL_printer() = true;
-        load_two_arm_model(model, print, config, Mode::Feature, 0.10, 0.30);
-        const std::string refusal = print.validate().string;
-        INFO(refusal);
-        CHECK(! refusal.empty());
-        if (refusal.find("[SRL-F14]") != std::string::npos)
-            CHECK(refusal.find("cannot be laid by the 0.2 mm nozzle") != std::string::npos);
-    }
-}
-
-TEST_CASE("A coarse support layer thinner than the coarse nozzle's minimum goes to the fine nozzle", "[TestRebuild][Support]")
-{
-    const Polygons square{Polygon{{0, 0}, {scaled<coord_t>(5.), 0}, {scaled<coord_t>(5.), scaled<coord_t>(5.)}, {0, scaled<coord_t>(5.)}}};
-    Polygons piece = square;
-    for (Polygon &p : piece)
-        p.translate(scaled<coord_t>(10.), 0);
-    const auto layer = [](coordf_t bottom_z, coordf_t print_z, const Polygons &polygons) {
-        SupportGeneratorLayer l;
-        l.bottom_z = bottom_z;
-        l.print_z  = print_z;
-        l.height   = print_z - bottom_z;
-        l.polygons = polygons;
-        return l;
-    };
-    SupportGeneratorLayer bed = layer(0., 0.1, square), thin = layer(0.4, 0.5, square), band = layer(0.5, 0.8, square);
-    thin.fine_body_polygons = piece;
-    thin.fine_body_height   = 0.1;
-    SupportGeneratorLayersPtr layers{&bed, &thin, &band};
-    SlicingParameters no_raft;
-    CHECK(mixed_nozzle_thin_coarse_body_to_fine(layers, 0.16, no_raft) == 1);
-    // The thin layer's body joins its fine body at its own height; the bed layer and the legal band stay.
-    CHECK(thin.polygons.empty());
-    CHECK(std::abs(area(thin.fine_body_polygons) - 2. * area(square)) < 1.);
-    CHECK_THAT(thin.fine_body_height, Catch::Matchers::WithinAbs(0.1, 1e-9));
-    CHECK(! bed.polygons.empty());
-    CHECK(! band.polygons.empty());
-    CHECK(band.fine_body_polygons.empty());
-    // Raft layers are left alone.
-    SupportGeneratorLayer raft = layer(0.1, 0.2, square);
-    SupportGeneratorLayersPtr raft_layers{&raft};
-    SlicingParameters with_raft;
-    with_raft.base_raft_layers   = 2;
-    with_raft.raft_contact_top_z = 0.3;
-    CHECK(mixed_nozzle_thin_coarse_body_to_fine(raft_layers, 0.16, with_raft) == 0);
-    CHECK(! raft.polygons.empty());
-}
-
-
-TEST_CASE("A raft with its base on the coarse nozzle is refused where it cannot be laid, saying why", "[TestRebuild][Support][Raft]")
-{
+    std::vector<RefusalRow> rows;
     const CoarseNozzle nozzles{0.6, 0.12, 0.42};
-    // On a Body Split plate the first layer is shared with the Body Split objects, which cannot follow a raised one.
-    const std::string plain = coarse_base_case(Mode::Body, nozzles, k_normal, SupportPlacement::PetgOnFine, 2);
-    INFO(plain);
-    CHECK(plain.find("refused: [SRL-A52] On a Body Split plate a raft cannot have its base on the 0.6 mm nozzle") != std::string::npos);
-    CHECK(plain.find("use Feature Split for this plate") != std::string::npos);
-    // Slim, Strong and Hybrid trees keep their own refusal on a raft.
-    const std::string slim = coarse_base_case(Mode::Feature, nozzles, k_slim, SupportPlacement::PetgOnFine, 2);
-    INFO(slim);
-    CHECK(slim.find("refused: [SRL-F14] Slim, Strong and Hybrid tree support cannot have its base on the 0.6 mm nozzle") != std::string::npos);
-
-    // Feature Split: one object's raft starts at the 0.6's 0.12 mm, the other's (base on the fine nozzle) at 0.10.
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"coarse PLA base", 2, 3});
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
-    config.set_key_value("raft_layers", new ConfigOptionInt(2));
-    set_automatic_tower(config);
-    fill_per_filament_values(config);
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    for (int i = 0; i < 2; ++ i) {
-        ModelObject *object = model.add_object();
-        object->name = i == 0 ? "coarse-raft" : "fine-raft";
-        object->add_volume(make_cube(10., 10., 10.), ModelVolumeType::MODEL_PART, false);
-        if (i == 1)
-            object->config.set_key_value("support_filament", new ConfigOptionInt(1));
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(60. + 40. * i, 60., 0.));
-        object->ensure_on_bed();
+    const auto name = [](Mode mode, const std::string &what) { return std::string(mode_name(mode)) + ": " + what; };
+    // Tree support with its base on the coarse nozzle: Slim, Strong and Hybrid for their style, and any tree with its
+    // interface on that nozzle too. Organic with a finer interface is accepted, and so are Snug and Grid, which a tree
+    // draws as Organic.
+    for (const Mode mode : {Mode::Feature, Mode::Body}) {
+        const std::string tree_code = mode == Mode::Feature ? "SRL-F14" : "SRL-A53";
+        for (const SupportCase &support : {k_slim, k_strong, k_hybrid})
+            rows.push_back({name(mode, std::string(support.name) + " on a coarse base"),
+                            coarse_base_scene(mode, nozzles, support, SupportPlacement::PetgOnFine), Verdict::Refused, tree_code, "support_style"});
+        rows.push_back({name(mode, "organic with its interface on the coarse base's nozzle"),
+                        coarse_base_scene(mode, nozzles, k_organic, SupportPlacement::AllCoarse), Verdict::Refused, tree_code,
+                        "support_interface_filament"});
+        for (const SupportCase &support : {k_organic, SupportCase{"tree snug", stTreeAuto, smsSnug}, SupportCase{"tree grid", stTreeAuto, smsGrid}})
+            rows.push_back({name(mode, std::string(support.name) + " on a coarse base, interface on the fine nozzle"),
+                            coarse_base_scene(mode, nozzles, support, SupportPlacement::PetgOnFine), Verdict::Validates});
     }
-    print.apply(model, config);
-    std::vector<StringObjectException> warnings;
-    const StringObjectException refused = print.validate(&warnings);
-    INFO(refused.string);
-    // A plate refused for its raised first layer is not also warned about it.
-    CHECK(std::none_of(warnings.begin(), warnings.end(), [](const StringObjectException &w) {
-        return w.string.find("The raft's first layer prints at") != std::string::npos; }));
-    CHECK(refused.string.find("[SRL-F16] The raft under \"coarse-raft\" starts on the bed at 0.12 mm") != std::string::npos);
-    CHECK(refused.string.find("\"fine-raft\" would start at 0.1 mm") != std::string::npos);
-    CHECK(refused.opt_key == "raft_layers");
-    // With a 0.12 mm first layer nothing is raised and both slice-check fine.
-    config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.12));
-    print.apply(model, config);
-    const StringObjectException accepted = print.validate();
-    INFO(accepted.string);
-    CHECK(accepted.string.find("SRL-F16") == std::string::npos);
-}
-
-namespace {
-// The L part on a raft, Feature Split 0.2/0.6, 0.10 / 0.40, PETG interface on the 0.2.
-DynamicPrintConfig raft_reslice_config(int support_filament)
-{
-    DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.40, 4, 0., k_normal, FilamentCase{"PETG interface", support_filament, 3, "PETG"});
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("mixed_nozzle_process_nozzle_diameters", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.12});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.42});
-    config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.1));
-    config.set_key_value("raft_contact_distance", new ConfigOptionFloat(0.1));
-    config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.25, false));
-    config.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.22, false));
-    config.set_key_value("raft_layers", new ConfigOptionInt(5));
-    set_automatic_tower(config);
-    fill_per_filament_values(config);
-    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nM1020 S[initial_extruder]\n"));
-    return config;
-}
-
-// Where the part's first road starts (bottom of its lowest model road) against the raft top plus gap, after a
-// slice of this print as it stands; empty when they agree.
-std::string part_on_raft(Print &print, const std::string &what)
-{
-    const CadenceTest::Facts facts = CadenceTest::slice(print);
-    if (! facts.refusal.string.empty())
-        return what + ": refused: " + facts.refusal.string;
-    const SlicingParameters &slicing = print.objects().front()->slicing_parameters();
-    double part = 1e9, lowest = 1e9;
-    for (const Move &move : facts.moves)
-        if (move.type == EMoveType::Extrude && move.delta_extruder > 0.f) {
-            lowest = std::min(lowest, double(move.position.z()));
-            if (CadenceTest::model_road(move))
-                part = std::min(part, double(move.position.z()) - double(move.height));
+    // A raft whose base the coarse nozzle lays: refused on a Body Split plate, whose first layer the Body Split objects
+    // share; Slim, Strong and Hybrid trees keep their own refusal on it. Two rafts that would start on the bed at
+    // different heights are refused, and accepted on a first layer that raises neither.
+    rows.push_back({name(Mode::Body, "raft on a coarse base"), coarse_base_scene(Mode::Body, nozzles, k_normal, SupportPlacement::PetgOnFine, 2),
+                    Verdict::Refused, "SRL-A52", "support_filament"});
+    rows.push_back({name(Mode::Feature, "slim tree on a coarse raft base"), coarse_base_scene(Mode::Feature, nozzles, k_slim, SupportPlacement::PetgOnFine, 2),
+                    Verdict::Refused, "SRL-F14", "support_style"});
+    rows.push_back({name(Mode::Feature, "rafts starting at 0.12 and 0.10"), two_raft_scene(0.10), Verdict::Refused, "SRL-F16", "raft_layers"});
+    rows.push_back({name(Mode::Feature, "rafts on a 0.12 mm first layer"), two_raft_scene(0.12), Verdict::Clears, "SRL-F16"});
+    // Slim, Strong and Hybrid trees with both support filaments on the fine nozzle, whose thinnest layer (0.12) is above
+    // the object's 0.10 layers: an Organic tree is laid on rows that nozzle can lay, the others cannot be.
+    {
+        DynamicPrintConfig config = h2d_support_config(Mode::Feature, 0.10, 0.30, 3, 0.1, k_slim, FilamentCase{"base and interface on the fine nozzle", 1, 3});
+        config.set_key_value("min_layer_height", new ConfigOptionFloats{0.12, 0.16});
+        for (const SupportCase &support : {k_slim, k_strong, k_hybrid}) {
+            CadenceTest::Scene scene;
+            scene.config = config;
+            scene.config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(support.style));
+            scene.populate = [](Model &model, Print &print, const DynamicPrintConfig &cfg) { load_two_arm_model(model, print, cfg, Mode::Feature, 0.10, 0.30); };
+            rows.push_back({name(Mode::Feature, std::string(support.name) + " on a nozzle that cannot lay the layers"), scene,
+                            Verdict::Refused, "SRL-F14", "support_style"});
         }
-    std::ostringstream out;
-    if (std::abs(part - slicing.raft_contact_top_z - slicing.gap_raft_object) > 1e-3 ||
-        std::abs(lowest - slicing.first_print_layer_height) > 1e-3)
-        out << what << ": part from Z " << part << " on a raft whose top is " << slicing.raft_contact_top_z << " (gap "
-            << slicing.gap_raft_object << "), first layer at Z " << lowest << " for " << slicing.first_print_layer_height;
-    return out.str();
-}
-} // namespace
-
-TEST_CASE("Changing what the raft is laid with slices the part again at the raft's new height", "[TestRebuild][Support][Raft]")
-{
-    Model model;
-    Print print;
-    print.is_BBL_printer() = true;
-    ModelObject *object = model.add_object();
-    object->name = "raft-reslice";
-    object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-    object->add_instance();
-    object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-    object->ensure_on_bed();
-    std::vector<std::string> failures;
-    // Support/raft base on the 0.2 (filament 1), then on the 0.6 (filament 2), then back: the raft's first layer
-    // and base levels change height each time, and the part has to follow.
-    for (const int base : {1, 2, 1}) {
-        print.apply(model, raft_reslice_config(base));
-        print.set_status_silent();
-        failures.push_back(part_on_raft(print, "base on filament " + std::to_string(base)));
     }
-    // The 0.6's layer height limits set the raft's first layer and base levels too.
-    DynamicPrintConfig config = raft_reslice_config(2);
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.16});
-    print.apply(model, config);
-    failures.push_back(part_on_raft(print, "0.6 minimum 0.16"));
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.14, 0.40});
-    print.apply(model, config);
-    failures.push_back(part_on_raft(print, "0.6 maximum 0.40"));
-    const std::string report = failure_report(failures);
-    INFO(report);
-    CHECK(report.empty());
+    // A coarse base whose fine nozzle lays body (the dense layer under the PETG, thin tree parts) with no PLA there:
+    // only the PETG interface, or PETG walls, which do not stick to the PLA base. Refused while slicing, once the
+    // support shows that body; a plate whose support lays no body on the fine nozzle slices.
+    for (const SupportCase &support : {k_normal, k_organic})
+        for (const FineBodyCase fine_body : {FineBodyCase::OnlyInterface, FineBodyCase::PetgWalls})
+            rows.push_back({name(Mode::Feature, std::string(support.name) + (fine_body == FineBodyCase::PetgWalls ? ", PETG walls" : ", only the interface") +
+                                 " on the fine nozzle"), fine_body_scene(support, fine_body), Verdict::Refused, "SRL-F15", ""});
+    rows.push_back({name(Mode::Feature, "support that lays no fine body"), fine_body_scene(k_normal, FineBodyCase::LaysNone), Verdict::Slices});
+    // PLA walls on the 0.2 and PETG sparse infill on the 0.8 share no material, so the tower cannot be built.
+    rows.push_back({name(Mode::Feature, "PLA walls, PETG sparse infill"), cube_in_app_project(true), Verdict::Refused});
+    rows.push_back({name(Mode::Feature, "PLA walls, PLA sparse infill"), cube_in_app_project(false), Verdict::Slices});
+
+    for (const RefusalRow &row : rows) {
+        const Refusal got = refusal_of(row.scene, row.verdict == Verdict::Validates || row.verdict == Verdict::Clears);
+        CAPTURE(row.name, got.message, got.code, got.opt_key);
+        if (row.verdict == Verdict::Clears)
+            CHECK(got.code != row.code);
+        else if (row.verdict != Verdict::Refused)
+            CHECK(got.message.empty());
+        else if (row.code.empty())
+            CHECK_FALSE(got.message.empty());
+        else {
+            CHECK(got.code == row.code);
+            CHECK(got.opt_key == row.opt_key);
+        }
+    }
 }
 
 TEST_CASE("The printer's G-code reads the nozzle diameter of the filament's own nozzle", "[TestRebuild][Support][Raft]")
@@ -3975,11 +2676,7 @@ TEST_CASE("The printer's G-code reads the nozzle diameter of the filament's own 
         Model model;
         Print print;
         print.is_BBL_printer() = true;
-        ModelObject *object = model.add_object();
-        object->add_volume(overhang_shelf_mesh(20., 60., 40., 50.), ModelVolumeType::MODEL_PART, false);
-        object->add_instance();
-        object->instances.front()->set_offset(Vec3d(80., 80., 0.));
-        object->ensure_on_bed();
+        add_object(model, "l-part", overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(80., 80., 0.));
         print.apply(model, config);
         print.set_status_silent();
         const CadenceTest::Facts facts = CadenceTest::slice(print);
@@ -3991,10 +2688,12 @@ TEST_CASE("The printer's G-code reads the nozzle diameter of the filament's own 
         REQUIRE(legacy.size() == 1);
         REQUIRE(bare.size() == 1);
         REQUIRE(! change_lines.empty());
+        // The first filament is on the 0.6. Off keeps the printer's own reading: the nozzle vector indexed by
+        // filament, as stock does.
+        CHECK(idx.front() == "; ND_IDX 0.6");
+        CHECK(legacy.front() == "; ND_LEGACY 0.6");
         if (mode) {
-            // The first filament is on the 0.6, and every change names its own nozzle.
-            CHECK(idx.front() == "; ND_IDX 0.6");
-            CHECK(legacy.front() == "; ND_LEGACY 0.6");
+            // Every change names its own nozzle.
             CHECK(bare.front() == "; ND_BARE 0.6");
             size_t to_fine = 0, to_coarse = 0;
             for (const std::string &line : change_lines) {
@@ -4007,10 +2706,172 @@ TEST_CASE("The printer's G-code reads the nozzle diameter of the filament's own 
             }
             CHECK(to_fine > 0);
             CHECK(to_coarse > 0);
-        } else {
-            // Off mode keeps the printer's own reading: the nozzle vector indexed by filament, as stock does.
-            CHECK(idx.front() == "; ND_IDX 0.6");
-            CHECK(legacy.front() == "; ND_LEGACY 0.6");
         }
     }
+}
+
+namespace {
+// The tower's stack of roads by adhesion category on a 0.5 mm grid: a category that starts a run, stops for another
+// and starts again at the same point stands on a material it does not bond with.
+struct TowerStack {
+    size_t      carrying    = 0; // points where a category other than the bottom one is laid
+    size_t      interrupted = 0; // of those, points where such a category is laid in two or more separate runs
+    std::string example;
+};
+
+TowerStack tower_material_stack(const std::vector<Move> &moves, const std::vector<int> &categories)
+{
+    struct Road { Vec2d a, b; long z; double half; int category; };
+    std::vector<Road> roads;
+    BoundingBoxf box;
+    // With no change_filament_gcode (these scenes), the first road after a tool change starts where the last tool
+    // stopped, a diagonal across the blocks the printer's own change G-code does not lay. It is left out.
+    int last_tool = -1;
+    for (size_t i = 1; i < moves.size(); ++i) {
+        const Move &move = moves[i];
+        if (move.type != EMoveType::Extrude || move.delta_extruder <= 0.f)
+            continue;
+        const bool first_after_change = last_tool != -1 && int(move.extruder_id) != last_tool;
+        last_tool = int(move.extruder_id);
+        if (move.extrusion_role != erWipeTower || first_after_change)
+            continue;
+        const int category = move.extruder_id < categories.size() ? categories[move.extruder_id] : -1;
+        roads.push_back({moves[i - 1].position.head<2>().cast<double>(), move.position.head<2>().cast<double>(),
+                         std::lround(double(move.position.z()) * 1000.), 0.5 * double(move.width), category});
+        box.merge(roads.back().a);
+        box.merge(roads.back().b);
+    }
+    TowerStack out;
+    if (roads.empty())
+        return out;
+
+    std::map<std::pair<long, long>, std::vector<size_t>> grid;
+    for (size_t r = 0; r < roads.size(); ++r) {
+        const int steps = std::max(1, int((roads[r].b - roads[r].a).norm()) + 1);
+        std::set<std::pair<long, long>> cells;
+        for (int k = 0; k <= steps; ++k) {
+            const Vec2d p = roads[r].a + (roads[r].b - roads[r].a) * (double(k) / steps);
+            cells.insert({long(std::floor(p.x())), long(std::floor(p.y()))});
+        }
+        for (const auto &cell : cells)
+            grid[cell].push_back(r);
+    }
+    for (double x = box.min.x(); x <= box.max.x(); x += 0.5)
+        for (double y = box.min.y(); y <= box.max.y(); y += 0.5) {
+            const Vec2d p(x, y);
+            const auto found = grid.find({long(std::floor(x)), long(std::floor(y))});
+            if (found == grid.end())
+                continue;
+            std::map<long, int> stack;
+            for (size_t r : found->second)
+                if (point_to_segment(p, roads[r].a, roads[r].b) <= roads[r].half)
+                    stack[roads[r].z] = roads[r].category;
+            std::vector<int> runs;
+            for (const auto &[z, category] : stack)
+                if (runs.empty() || runs.back() != category)
+                    runs.push_back(category);
+            std::map<int, int> starts;
+            for (size_t k = 1; k < runs.size(); ++k)
+                ++starts[runs[k]];
+            bool other = false, broken = false;
+            for (const auto &[category, count] : starts)
+                if (category != runs.front()) {
+                    other  = true;
+                    broken = broken || count >= 2;
+                }
+            out.carrying += other;
+            if (broken && out.interrupted++ == 0) {
+                std::ostringstream text;
+                text << "at " << x << ", " << y << ":";
+                int last = -2;
+                for (const auto &[z, category] : stack)
+                    if (category != last) {
+                        text << " Z " << double(z) / 1000. << " category " << category;
+                        last = category;
+                    }
+                out.example = text.str();
+            }
+        }
+    return out;
+}
+} // namespace
+
+// A PETG interface (adhesion category 300) beside PLA (100) on the fine nozzle over a coarse PLA base: the lagging
+// tower never lays PETG, PLA and PETG again in one block, where it could split. Off the tower PETG prints only the
+// interface under the arm, a base filament lays the support on the bed, and the tower stays on the bed.
+TEST_CASE("A PETG support interface beside PLA keeps its tower block on its own material, on every pair",
+          "[TestRebuild][Tower][MaterialMix][Pairs]")
+{
+    struct StackPair { const char *name; double fine_d, coarse_d; bool swapped; double fine_h; int ratio; };
+    const std::vector<StackPair> pairs{{"0.2/0.4", 0.2, 0.4, false, 0.10, 2}, {"0.2/0.6", 0.2, 0.6, false, 0.10, 4},
+                                       {"0.2/0.6 fine right", 0.2, 0.6, true, 0.10, 4}, {"0.2/0.8", 0.2, 0.8, false, 0.10, 5},
+                                       {"0.4/0.6", 0.4, 0.6, false, 0.20, 2}, {"0.4/0.8", 0.4, 0.8, false, 0.20, 2}};
+    const std::vector<int> categories{100, 100, 300, 100};
+    std::vector<std::string> failures;
+    size_t sliced = 0;
+    for (const Mode mode : {Mode::Feature, Mode::Body})
+        for (const SupportCase &support : {k_normal, k_organic})
+            for (const StackPair &pair : pairs) {
+                // Body Split's tower lags only where the coarse nozzle's minimum is over the fine layer height.
+                if (mode == Mode::Body && 0.2 * pair.coarse_d <= pair.fine_h + 1e-9)
+                    continue;
+                const double coarse_h = pair.fine_h * pair.ratio;
+                const FilamentCase filaments{"PETG interface on fine", mode == Mode::Feature ? 2 : 1, 3, "PETG"};
+                CadenceTest::Scene scene;
+                scene.config = h2d_support_config(mode, pair.fine_h, coarse_h, pair.ratio, 0., support, filaments);
+                const double first_d = pair.swapped ? pair.coarse_d : pair.fine_d, second_d = pair.swapped ? pair.fine_d : pair.coarse_d;
+                set_nozzles(scene.config, first_d, second_d, 0.2 * first_d, 0.7 * first_d, 0.2 * second_d, 0.7 * second_d);
+                if (pair.swapped)
+                    scene.config.set_key_value("filament_map", new ConfigOptionInts{2, 1, 2, 1});
+                scene.config.set_key_value("filament_adhesiveness_category", new ConfigOptionInts(categories));
+                scene.config.set_key_value("support_interface_top_layers", new ConfigOptionInt(3));
+                scene.config.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(2));
+                set_automatic_tower(scene.config);
+                scene.populate = [mode, pair, coarse_h](Model &model, Print &print, const DynamicPrintConfig &cfg) {
+                    ModelObject *object = add_object(model, "l-part", overhang_shelf_mesh(20., 60., 40., 50.), Vec3d(80., 80., 0.));
+                    if (mode == Mode::Body) {
+                        object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(1));
+                        object->volumes.front()->config.set_key_value("regional_layer_height", new ConfigOptionFloat(pair.fine_h));
+                        add_part(*object, make_cube(12., 12., 45.), 2, coarse_h);
+                        object->volumes.back()->set_offset(Vec3d(-14., 0., 0.));
+                    }
+                    print.apply(model, cfg);
+                    print.set_status_silent();
+                };
+                const std::string name = std::string(mode_name(mode)) + " " + support.name + " " + pair.name + ": ";
+                CadenceTest::Facts facts;
+                if (std::string failure = slice_into(scene, name, facts); !failure.empty()) {
+                    failures.push_back(failure);
+                    continue;
+                }
+                ++sliced;
+                // The L part's arm spans x 100..140 with its underside at 40 mm.
+                const BoundingBoxf bed(scene.config.option<ConfigOptionPoints>("printable_area")->values);
+                size_t petg_interface = 0, petg_tower = 0, petg_elsewhere = 0, bed_base = 0, tower_off_bed = 0;
+                for (const Move &move : facts.moves) {
+                    if (move.type != EMoveType::Extrude)
+                        continue;
+                    const double x = double(move.position.x()), z = double(move.position.z());
+                    if (move.extrusion_role == erWipeTower)
+                        tower_off_bed += !bed.contains(Vec2d(x, double(move.position.y())));
+                    bed_base += move.extrusion_role == erSupportMaterial && move.extruder_id != 2 && z < pair.fine_h + 1e-3;
+                    if (move.extruder_id != 2)
+                        continue;
+                    if (move.extrusion_role == erWipeTower)
+                        ++petg_tower;
+                    else if (move.extrusion_role == erSupportMaterialInterface && z > 39. && z < 40. + 1e-3 && x > 97. && x < 143.)
+                        ++petg_interface;
+                    else
+                        ++petg_elsewhere;
+                }
+                const TowerStack stack = tower_material_stack(facts.moves, categories);
+                std::ostringstream what;
+                what << name << "PETG interface roads " << petg_interface << ", PETG tower roads " << petg_tower << ", PETG elsewhere "
+                     << petg_elsewhere << ", support base roads on the bed " << bed_base << ", tower roads off the bed " << tower_off_bed
+                     << ", points carrying another material " << stack.carrying << ", interrupted " << stack.interrupted << " " << stack.example;
+                if (petg_interface == 0 || petg_tower == 0 || petg_elsewhere != 0 || bed_base == 0 || tower_off_bed != 0 || stack.interrupted != 0)
+                    failures.push_back(what.str());
+            }
+    check_no_failures(failures);
+    CHECK(sliced >= 18);
 }

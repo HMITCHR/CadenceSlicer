@@ -1,6 +1,14 @@
+#include "Config.hpp"
 #include "Exception.hpp"
 #include "MixedNozzleConfig.hpp"
+#include "Flow.hpp"
 #include "Print.hpp"
+#include <cstddef>
+#include "PrintConfig.hpp"
+#include "libslic3r.h"
+#include <cmath>
+#include <vector>
+#include <algorithm>
 
 namespace Slic3r {
 
@@ -49,8 +57,8 @@ Flow PrintRegion::flow(const PrintObject &object, FlowRole role, double layer_he
     if (config_width.value == 0)
         config_width = object.config().line_width;
     
-    // Off mode keeps the logical-filament lookup. Every active Mixed-Nozzle mode resolves the logical
-    // feature owner through the physical-tool resolver; a missing map is an invalid bypass of
+    // Off mode reads the nozzle as upstream does, with nozzle_diameter_for_filament. Every
+    // active Mixed-Nozzle mode resolves the logical feature owner through the physical-tool resolver; a missing map is an invalid bypass of
     // validation, not a fallback. A caller that knows which cell it is flowing overrides the region's
     // per-role owner here, and the whole cell is then resolved, width scaled and flowed as that tool.
     const unsigned int logical_filament = physical_tool_filament_override ?
@@ -102,7 +110,11 @@ Flow PrintRegion::flow(const PrintObject &object, FlowRole role, double layer_he
             config_width = *effective_width;
         }
     }
-    auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(nozzle_idx));
+    // Off: this->extruder(role) - 1 may underflow to MAX_INT; the + 1 below wraps it back to 0, and
+    // nozzle_diameter_for_filament then reads the zero'th element through get_at(), as upstream does.
+    auto nozzle_diameter = is_mixed_nozzle_slicing_enabled(print_config) ?
+        float(print_config.nozzle_diameter.get_at(nozzle_idx)) :
+        float(nozzle_diameter_for_filament(print_config, int(logical_filament + 1), object.print()->is_BBL_printer()));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 

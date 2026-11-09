@@ -5,6 +5,7 @@
 
 #include <boost/filesystem.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
@@ -91,9 +92,8 @@ MixedNozzleSliceTime mixed_nozzle_slice_time(const Model &model, const DynamicPr
         // PartPlate's Print carries its plate index; the tower spot is read per plate. Without it
         // every plate's row was timed with plate 1's tower spot.
         print.set_plate_index(plate_index);
-        // The automatic brim reads the materials and speeds from Model's process-wide tables. The
-        // plater fills them when Slice is pressed, but nothing filled them for step 3, so a row
-        // timed a different brim (none, on the tester's file) than the slice after Apply printed.
+        // The automatic brim reads the materials and speeds from Model's process-wide tables, which
+        // the plater fills only when Slice is pressed; fill them so a row times the brim Apply prints.
         // Put back afterwards, so a ranking slice leaves nothing behind for anyone else.
         const BrimInputs restore;
         mixed_nozzle_set_brim_inputs(config);
@@ -222,6 +222,92 @@ void mixed_nozzle_single_nozzle_baseline(Model &model, DynamicPrintConfig &confi
 
 namespace {
 
+// The nozzle size each material slot prints with (filament_map, else slot i on tool i), 0 when unknown.
+std::vector<double> slot_nozzle_sizes(const DynamicPrintConfig &config)
+{
+    std::vector<double> sizes;
+    const auto *diameters = config.option<ConfigOptionFloats>("nozzle_diameter");
+    const auto *map = config.option<ConfigOptionInts>("filament_map");
+    const auto *colors = config.option<ConfigOptionStrings>("filament_colour");
+    if (diameters == nullptr || diameters->values.empty())
+        return sizes;
+    std::size_t slots = map != nullptr ? map->values.size() : 0;
+    if (colors != nullptr)
+        slots = std::max(slots, colors->values.size());
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+        const int tool = map != nullptr && slot < map->values.size() ? map->values[slot] : int(slot) + 1;
+        sizes.push_back(tool >= 1 && std::size_t(tool) <= diameters->values.size() ? diameters->values[tool - 1] : 0.);
+    }
+    return sizes;
+}
+
+// One part, modifier or layer range of the color-keeping baseline: the fine height, no Body Split values, and any
+// material reference to a slot on another nozzle size moved to the fine material (features follow the part).
+void keep_colors_on_fine(ModelConfig &config, int fine_filament, double fine_height,
+                         const std::function<bool(int)> &other_size)
+{
+    if (config.has("extruder") && other_size(config.opt_int("extruder")))
+        config.set_key_value("extruder", new ConfigOptionInt(fine_filament));
+    for (const std::string &key : feature_filament_keys())
+        if (config.has(key) && other_size(config.opt_int(key)))
+            config.set_key_value(key, new ConfigOptionInt(0));
+    if (config.has("layer_height"))
+        config.set_key_value("layer_height", new ConfigOptionFloat(fine_height));
+    for (const char *key : {"regional_layer_height", "mixed_nozzle_body_fine_skins",
+                            "mixed_nozzle_body_fine_skin_layers"})
+        config.erase(key);
+}
+
+} // namespace
+
+void mixed_nozzle_color_baseline(Model &model, DynamicPrintConfig &config,
+                                 std::size_t fine_logical_filament, double fine_height)
+{
+    const int fine_filament = int(fine_logical_filament) + 1;
+    const std::vector<double> sizes = slot_nozzle_sizes(config);
+    const double fine_size = fine_logical_filament < sizes.size() ? sizes[fine_logical_filament] : 0.;
+    // A 1-based slot reference that prints on a nozzle of another size than the fine material's. 0 (follow the part)
+    // and unknown slots are left alone.
+    const auto other_size = [&sizes, fine_size](int slot) {
+        return fine_size > 0. && slot >= 1 && std::size_t(slot) <= sizes.size() && sizes[slot - 1] > 0. &&
+               !is_approx(sizes[slot - 1], fine_size);
+    };
+    config.set_key_value("mixed_nozzle_slicing_mode",
+                         new ConfigOptionEnum<MixedNozzleSlicingMode>(MixedNozzleSlicingMode::Off));
+    config.set_key_value("layer_height", new ConfigOptionFloat(fine_height));
+    // The colors still change tools, now under the stock tower rules. The Feature Split presets turn on No sparse
+    // layers, which stock refuses for a part beside the tower ("relative position of the model and the prime tower";
+    // the Argonath U1 color baseline was refused that way), so the baseline prints the stock tower.
+    config.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(false));
+    // Two nozzles: every slot on the fine nozzle (one nozzle holds several materials). A tool changer prints slot i on
+    // tool i, so its color tools stay as they are.
+    const auto *diameters = config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (const auto *map = config.option<ConfigOptionInts>("filament_map");
+        map != nullptr && diameters != nullptr && diameters->values.size() <= 2 && fine_logical_filament < map->values.size()) {
+        const int fine_tool = map->values[fine_logical_filament];
+        config.set_key_value("filament_map", new ConfigOptionInts(std::vector<int>(map->values.size(), fine_tool)));
+    }
+    for (const std::string &key : feature_filament_keys())
+        if (config.has(key) && other_size(config.opt_int(key)))
+            config.set_key_value(key, new ConfigOptionInt(0));
+    for (const char *key : {"support_filament", "support_interface_filament", "wipe_tower_filament"})
+        if (config.has(key) && other_size(config.opt_int(key)))
+            config.set_key_value(key, new ConfigOptionInt(0));
+
+    for (ModelObject *object : model.objects) {
+        if (object == nullptr)
+            continue;
+        keep_colors_on_fine(object->config, fine_filament, fine_height, other_size);
+        for (auto &[range, range_config] : object->layer_config_ranges)
+            keep_colors_on_fine(range_config, fine_filament, fine_height, other_size);
+        for (ModelVolume *volume : object->volumes)
+            if (volume != nullptr)
+                keep_colors_on_fine(volume->config, fine_filament, fine_height, other_size);
+    }
+}
+
+namespace {
+
 struct KeyHash {
     std::uint64_t value {1469598103934665603ULL};
     void add(std::size_t item) { value ^= std::uint64_t(item) + 0x9e3779b97f4a7c15ULL + (value << 6) + (value >> 2); }
@@ -254,6 +340,26 @@ struct KeyHash {
 };
 
 } // namespace
+
+std::vector<std::size_t> mixed_nozzle_model_color_slots(const std::vector<ModelObject *> &objects)
+{
+    std::vector<std::size_t> slots;
+    for (const ModelObject *object : objects) {
+        if (object == nullptr)
+            continue;
+        for (const ModelVolume *volume : object->volumes) {
+            if (volume == nullptr)
+                continue;
+            // Parts and modifiers: the part's own slot or its object's, and every painted color (1-based).
+            for (const int one_based : volume->get_extruders())
+                if (one_based >= 1)
+                    slots.push_back(std::size_t(one_based - 1));
+        }
+    }
+    std::sort(slots.begin(), slots.end());
+    slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    return slots;
+}
 
 std::string mixed_nozzle_ranking_key(std::size_t plate_id, const Model &model,
                                      const DynamicPrintConfig &config)

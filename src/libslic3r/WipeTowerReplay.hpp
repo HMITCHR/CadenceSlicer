@@ -42,6 +42,9 @@ struct WipeTowerPlanEvent {
     // Seconds the incoming nozzle sat parked before this return (planner estimate); negative when
     // unknown. Automatic primes are raised for it via mixed_nozzle_idle_reprime_volume.
     float idle_seconds { -1.f };
+    // Idle cooldown: the standby temperature the incoming tool was parked at for this return, or -1 when it was
+    // kept hot (mixed_nozzle_idle_cooldown_standby).
+    int cooled_standby { -1 };
 };
 
 struct WipeTowerReplayTiming {
@@ -53,15 +56,10 @@ struct WipeTowerReplayTiming {
     bool native_parser_replayed { false };
     bool writer_motion_complete { true };
     // Unknown firmware/custom commands are not silently treated as timed. Callers must inspect
-    // this bit before using measured_seconds for an economic comparison.
+    // this bit before using the seconds above for an economic comparison.
     bool interval_uncertain { false };
     // This adapter receives tower snippets only; native T/filament transition time is supplied by
-    // the stateful transition adapter and is never folded into this value.
-    static constexpr bool includes_native_transition_overhead = false;
-
-    double measured_seconds() const {
-        return native_parser_replayed ? native_parser_seconds : writer_motion_seconds;
-    }
+    // the stateful transition adapter and is never folded into these seconds.
 };
 
 struct WipeTowerReplayContext {

@@ -2,6 +2,10 @@
 #define slic3r_GUI_ProgressBar_hpp_
 
 #include "../CadencePalette.hpp"
+#include <wx/event.h>
+#include <wx/gdicmn.h>
+#include <wx/colour.h>
+#include <wx/string.h>
 #include <wx/window.h>
 #include "../wxExtensions.hpp"
 
@@ -57,7 +61,7 @@ protected:
     void         paintEvent(wxPaintEvent &evt);
     void         render(wxDC &dc);
     void         doRender(wxDC &dc);
-    virtual void DoSetSize(int x, int y, int width, int height, int sizeFlags = wxSIZE_AUTO);
+    virtual void DoSetSize(int x, int y, int width, int height, int sizeFlags = wxSIZE_AUTO) override;
 
 
 

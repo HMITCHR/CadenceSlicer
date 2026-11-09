@@ -4,12 +4,14 @@
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "GLToolbar.hpp"
+#include "GUI.hpp"
 #include "GUI_ObjectList.hpp"
 #include "MainFrame.hpp"
 #include "MixedNozzleSetupController.hpp"
 #include "MixedNozzleSetupDialog.hpp"
 #include "MixedNozzleSidebarPanel.hpp"
 #include "MsgDialog.hpp"
+#include "ParamsDialog.hpp"
 #include "ObjectDataViewModel.hpp"
 #include "PartPlate.hpp"
 #include "Selection.hpp"
@@ -21,6 +23,7 @@
 #include "UnsavedChangesDialog.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/ComboBox.hpp"
+#include "Widgets/SideButton.hpp"
 #include "Widgets/SpinInput.hpp"
 #include "Widgets/TextInput.hpp"
 #include "Widgets/StateColor.hpp"
@@ -95,6 +98,36 @@ json g_validations = json::array();
 std::string g_export_path;
 // The pretend printer a scenario connected; see connect_printer.
 std::unique_ptr<MachineObject> g_fake_printer;
+
+// Timing fields in the dumps are wall milliseconds since this file's statics were initialized
+// (a few ms after the process started). The steady clock and the system clock are read together once at load.
+struct StartClock
+{
+    Clock::time_point steady {Clock::now()};
+    std::chrono::system_clock::time_point system {std::chrono::system_clock::now()};
+};
+const StartClock g_start_clock;
+// When post_init handed over to test mode: the main window and the plater are up.
+std::optional<Clock::time_point> g_plater_ready;
+
+std::chrono::system_clock::time_point process_start()
+{
+    // The time this file's statics were initialized, a few ms after exec. (sys/sysctl.h cannot be used here:
+    // its struct session clashes with a name the GUI precompiled header brings in.)
+    return g_start_clock.system;
+}
+
+long long since_start_ms(Clock::time_point at)
+{
+    static const long long load_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(g_start_clock.system - process_start()).count();
+    return load_ms + std::chrono::duration_cast<std::chrono::milliseconds>(at - g_start_clock.steady).count();
+}
+
+long long between_ms(Clock::time_point from, Clock::time_point to)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count();
+}
 
 std::string bed_name(BedType type)
 {
@@ -571,6 +604,21 @@ private:
         bool returned {false};
         bool ok {true};
         std::string error;
+        Clock::time_point started_at;
+        Clock::time_point returned_at;
+    };
+    // When a step's parts happened, for the timing fields. Recording them changes no wait.
+    struct StepTiming
+    {
+        Clock::time_point posted;
+        std::optional<Clock::time_point> settling;
+        // The first tick after the action returned on which the step's wait held.
+        std::optional<Clock::time_point> wait_met;
+        // A slice step: the plate had no valid result, or was slicing, at some point since the post.
+        bool slice_pending {false};
+        std::optional<Clock::time_point> slice_done;
+        // A ranking_done step: the wizard showed step 3 with every row's time in.
+        std::optional<Clock::time_point> ranking_shown;
     };
     enum class Phase { Ready, Posted, Settling };
 
@@ -596,6 +644,8 @@ private:
     // Every dialog that opened, in order, so a scenario can check which came first.
     json m_dialog_history = json::array();
     std::set<wxTopLevelWindow *> m_dialogs_shown;
+    StepTiming m_timing;
+    std::optional<Clock::time_point> m_first_tick;
 
     const json &step() const { return m_steps[m_index]; }
     long long elapsed_ms() const
@@ -619,6 +669,10 @@ private:
 
     void do_tick()
     {
+        if (!m_first_tick)
+            m_first_tick = Clock::now();
+        if (m_phase != Phase::Ready)
+            observe_timing();
         if (Clock::now() - m_started > m_timeout) {
             m_failures++;
             m_results.push_back({{"index", m_index}, {"ok", false}, {"error", "scenario timeout"}});
@@ -720,6 +774,93 @@ private:
         m_blocked_in_modal = blocked;
         m_phase = Phase::Settling;
         m_phase_start = Clock::now();
+        m_timing.settling = m_phase_start;
+    }
+
+    // The current plate has a valid slice result and nothing is slicing: what slice_done waits for.
+    static bool slice_finished()
+    {
+        Plater *plater = wxGetApp().plater();
+        if (plater->is_background_process_slicing())
+            return false;
+        const PartPlate *plate = plater->get_partplate_list().get_curr_plate();
+        return plate != nullptr && plate->is_slice_result_valid();
+    }
+
+    // Notes, on every tick of a step, when its wait first holds and when the slice or the wizard
+    // ranking it started is done. Only reads state, so the waits and the steps run as before.
+    void observe_timing()
+    {
+        if (!m_action || !m_action->returned)
+            return;
+        const Clock::time_point now = Clock::now();
+        const std::string what = step().value("do", std::string());
+        const std::string wait = step().value("wait", std::string());
+        if (what == "slice" && !m_timing.slice_done) {
+            if (!slice_finished())
+                m_timing.slice_pending = true;
+            else if (m_timing.slice_pending)
+                m_timing.slice_done = now;
+        }
+        MixedNozzleWizardDialog *dialog = shown_wizard();
+        if (wait == "ranking_done" && !m_timing.ranking_shown && dialog != nullptr &&
+            TestModeWizardAccess::ranking_shown(*dialog))
+            m_timing.ranking_shown = now;
+        if (m_timing.wait_met || wait.empty())
+            return;
+        bool met = false;
+        if (wait == "slice_done")
+            met = slice_finished();
+        else if (wait == "no_dialog")
+            met = shown_modal_dialogs().empty();
+        else if (wait == "wizard")
+            met = dialog != nullptr;
+        else if (wait == "ranking_done")
+            met = dialog == nullptr || !TestModeWizardAccess::ranking_busy(*dialog);
+        // export_done needs the file to stop growing between ticks; its wait keeps that record,
+        // so it is timed by the step's end only.
+        if (met)
+            m_timing.wait_met = now;
+    }
+
+    // The timing fields of the current step, ending now. All times are ms since process start.
+    json step_timing(Clock::time_point end) const
+    {
+        json t {{"clock", "ms_since_load"},
+                {"plater_ready_ms", g_plater_ready ? json(since_start_ms(*g_plater_ready)) : json()},
+                {"step_start_ms", since_start_ms(m_timing.posted)},
+                {"step_end_ms", since_start_ms(end)},
+                {"step_ms", between_ms(m_timing.posted, end)}};
+        if (!m_action)
+            return t;
+        const std::string what = step().value("do", std::string());
+        const std::string wait = step().value("wait", std::string());
+        if (m_action->started)
+            t["action_start_ms"] = since_start_ms(m_action->started_at);
+        if (m_action->returned) {
+            t["action_end_ms"] = since_start_ms(m_action->returned_at);
+            t["action_ms"] = between_ms(m_action->started_at, m_action->returned_at);
+        }
+        if (m_timing.settling)
+            t["settle_start_ms"] = since_start_ms(*m_timing.settling);
+        if (!wait.empty()) {
+            t["wait"] = wait;
+            t["wait_met_ms"] = m_timing.wait_met ? json(since_start_ms(*m_timing.wait_met)) : json();
+        }
+        // The durations plan 6.5 compares, from the action's start. Open and plate switch run
+        // inside the action; slice and ranking finish later and are seen on a 100 ms tick.
+        const auto from_action = [&](const std::optional<Clock::time_point> &done) {
+            return m_action->started && done ? json(between_ms(m_action->started_at, *done)) : json();
+        };
+        if (what == "open_3mf")
+            t["open_3mf_ms"] = m_action->returned ? from_action(m_action->returned_at) : json();
+        if (what == "select_plate")
+            t["plate_switch_ms"] = m_action->returned ? from_action(m_action->returned_at) : json();
+        if (what == "slice")
+            t["slice_to_preview_ms"] = from_action(m_timing.slice_done);
+        if (wait == "ranking_done")
+            t["wizard_ranking_ms"] = from_action(m_timing.ranking_shown);
+        return t;
     }
 
     bool wait_satisfied(const std::string &wait)
@@ -802,16 +943,22 @@ private:
         m_action = std::make_shared<Action>();
         m_phase = Phase::Posted;
         m_phase_start = Clock::now();
+        m_timing = StepTiming();
+        m_timing.posted = m_phase_start;
+        if (step().value("do", std::string()) == "slice")
+            m_timing.slice_pending = !slice_finished();
         std::shared_ptr<Action> action = m_action;
         const json current = step();
         wxGetApp().CallAfter([this, action, current] {
             action->started = true;
+            action->started_at = Clock::now();
             try {
                 action->ok = run(current, action->error);
             } catch (const std::exception &ex) {
                 action->ok = false;
                 action->error = std::string("exception: ") + ex.what();
             }
+            action->returned_at = Clock::now();
             action->returned = true;
         });
     }
@@ -829,6 +976,9 @@ private:
             found = find_descendant(wxGetApp().mainframe, [](wxWindow *w) {
                 return dynamic_cast<MixedNozzleSidebarPanel *>(w) != nullptr && visible(w);
             });
+        else if (in == "settings")
+            found = wxGetApp().params_dialog() != nullptr && wxGetApp().params_dialog()->IsShown() ?
+                        wxGetApp().params_dialog() : nullptr;
         else if (in == "main" || in.empty())
             found = wxGetApp().mainframe;
         if (found == nullptr)
@@ -1106,6 +1256,29 @@ private:
             plate->set_filament_map_mode(fmmManual);
             plate->set_filament_maps(s.at("maps").get<std::vector<int>>());
             plater->update();
+            return true;
+        }
+        // The Printer, Material or Process settings window on one page, as its edit button opens it:
+        // {"tab": "printer", "page": "Extruder 9"} (page = the title in its page list).
+        if (what == "open_settings") {
+            const std::string name = s.value("tab", std::string("printer"));
+            const Preset::Type type = name == "filament" ? Preset::TYPE_FILAMENT :
+                                      name == "process"  ? Preset::TYPE_PRINT : Preset::TYPE_PRINTER;
+            Tab *tab = wxGetApp().get_tab(type);
+            if (tab == nullptr || wxGetApp().params_dialog() == nullptr) {
+                error = "no settings tab \"" + name + "\"";
+                return false;
+            }
+            wxGetApp().params_dialog()->Popup();
+            tab->restore_last_select_item();
+            const std::string page = s.value("page", std::string());
+            if (!page.empty() || s.contains("option"))
+                tab->activate_option(s.value("option", std::string()), from_u8(page));
+            return true;
+        }
+        if (what == "close_settings") {
+            if (wxGetApp().params_dialog() != nullptr)
+                wxGetApp().params_dialog()->Hide();
             return true;
         }
         if (what == "load_file") {
@@ -1390,6 +1563,7 @@ private:
 
     void record_step()
     {
+        const Clock::time_point end = Clock::now();
         const json &s = step();
         char prefix[8];
         std::snprintf(prefix, sizeof(prefix), "%02zu", m_index);
@@ -1453,7 +1627,9 @@ private:
         st["overflow"] = overflow;
         st["overflow_sidebar"] = sidebar_overflow;
         st["step"] = result;
+        st["timing"] = step_timing(end);
         std::ofstream((m_out / (base + ".json")).string()) << st.dump(2);
+        result["timing"] = st["timing"];
         result["state_file"] = base + ".json";
         result["overflow"] = overflow.size();
         m_results.push_back(result);
@@ -1468,8 +1644,11 @@ private:
             st = state();
         } catch (...) {
         }
+        json timing;
+        if (m_index < m_steps.size() && m_phase != Phase::Ready)
+            timing = step_timing(Clock::now());
         m_results.push_back({{"index", m_index}, {"step", m_index < m_steps.size() ? m_steps[m_index] : json()},
-                             {"ok", false}, {"error", error}, {"state", st}});
+                             {"ok", false}, {"error", error}, {"state", st}, {"timing", timing}});
         // A step that cannot finish leaves the app in an unknown state; stop here.
         finish(2);
     }
@@ -1479,6 +1658,10 @@ private:
         json summary {{"scenario", m_script.value("name", std::string())}, {"steps", m_results},
                       {"auto_dismissed", m_dismissed}, {"failures", m_failures}, {"exit_code", exit_code},
                       {"finished", exit_code >= 0}};
+        summary["timing"] = {{"clock", "ms_since_load"},
+                             {"plater_ready_ms", g_plater_ready ? json(since_start_ms(*g_plater_ready)) : json()},
+                             {"first_tick_ms", m_first_tick ? json(since_start_ms(*m_first_tick)) : json()},
+                             {"now_ms", since_start_ms(Clock::now())}};
         std::ofstream((m_out / "result.json").string()) << summary.dump(2);
     }
 
@@ -1507,6 +1690,7 @@ void start()
 {
     if (!active() || g_runner != nullptr)
         return;
+    g_plater_ready = Clock::now();
     const std::string script_path = env("CADENCE_TEST_SCRIPT");
     std::string out = env("CADENCE_TEST_OUT");
     if (out.empty())
@@ -1637,6 +1821,23 @@ bool TestModeWizardAccess::pick_row(MixedNozzleWizardDialog &dialog, std::size_t
     return true;
 }
 
+// Busy while any row is slicing or has no time yet, not only during a slice.
+bool TestModeWizardAccess::ranking_busy(MixedNozzleWizardDialog &dialog)
+{
+    bool busy = false;
+    for (const auto &row : dialog.m_cadence_page.rows)
+        busy = busy || row.slicing ||
+               (dialog.m_ranking && (!row.estimate || row.estimate->status == WizardEstimateStatus::Pending));
+    return busy;
+}
+
+// Step 3 is showing its rows, each with its time.
+bool TestModeWizardAccess::ranking_shown(MixedNozzleWizardDialog &dialog)
+{
+    return dialog.m_pages->GetSelection() == int(MixedNozzleWizardPage::Speed) && !dialog.m_cadence_page.rows.empty() &&
+           !ranking_busy(dialog);
+}
+
 void TestModeWizardAccess::dump(MixedNozzleWizardDialog &dialog, json &out)
 {
     const int page = dialog.m_pages->GetSelection();
@@ -1669,12 +1870,7 @@ void TestModeWizardAccess::dump(MixedNozzleWizardDialog &dialog, json &out)
                         {"selected", dialog.m_speed_buttons[i]->GetValue()}});
     out["coarse_rows"] = rows;
     out["cadence_time"] = dialog.m_cadence_time != nullptr ? into_u8(dialog.m_cadence_time->GetLabel()) : std::string();
-    // Busy while any row is slicing or has no time yet, not only during a slice.
-    bool busy = false;
-    for (const auto &row : dialog.m_cadence_page.rows)
-        busy = busy || row.slicing ||
-               (dialog.m_ranking && (!row.estimate || row.estimate->status == WizardEstimateStatus::Pending));
-    out["ranking_busy"] = busy;
+    out["ranking_busy"] = ranking_busy(dialog);
     out["ready_line"] = dialog.m_ready_line != nullptr ? into_u8(dialog.m_ready_line->GetLabel()) : std::string();
     out["can_apply"] = dialog.m_review.can_apply;
     json buttons;

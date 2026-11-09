@@ -161,9 +161,6 @@ inline void load_body_pair(Model &model, Print &print, const DynamicPrintConfig 
 
 const OtherPrinterProfile snapmaker_j1 {"Snapmaker", "Snapmaker J1 (0.2 nozzle)", "0.10 Standard @Snapmaker J1 (0.2 nozzle)",
                                        {"Snapmaker J1 PLA", "Snapmaker J1 PLA"}};
-const OtherPrinterProfile prusa_xl_5t {"Prusa", "Prusa XL 5T 0.25 nozzle", "0.07mm Detail @Prusa XL 5T 0.25",
-                                      {"Prusa Generic PLA @XL 5T", "Prusa Generic PLA @XL 5T", "Prusa Generic PLA @XL 5T",
-                                       "Prusa Generic PLA @XL 5T", "Prusa Generic PLA @XL 5T"}};
 const OtherPrinterProfile snapmaker_u1 {"Snapmaker", "Snapmaker U1 (0.4+0.6 nozzle)", "0.20 Standard @Snapmaker U1 (0.4+0.6 nozzle)",
                                        {"Snapmaker PLA SnapSpeed @U1", "Snapmaker PLA SnapSpeed @U1",
                                         "Snapmaker PLA SnapSpeed @U1", "Snapmaker PLA SnapSpeed @U1"}};
@@ -177,15 +174,44 @@ inline DynamicPrintConfig j1_config()
     return config;
 }
 
-inline DynamicPrintConfig xl_config()
+// Refits a tool changer's tools to `nozzles`, each with the layer height range setup gives its size, and maps
+// filament n to tool n.
+inline void refit_tool_changer(DynamicPrintConfig &config, const std::vector<double> &nozzles, const Vec2d &tower_xy)
 {
-    DynamicPrintConfig config = compose_profile(prusa_xl_5t);
-    install_nozzles(config, {{0, 0.25}, {1, 0.6}}, {{0, {0.05, 0.15}}, {1, {0.15, 0.45}}});
+    std::map<size_t, double> installed;
+    std::map<size_t, std::pair<double, double>> limits;
+    for (size_t tool = 0; tool < nozzles.size(); ++tool) {
+        installed[tool] = nozzles[tool];
+        limits[tool] = nozzles[tool] < .3 ? std::pair{.04, .14} : nozzles[tool] < .5 ? std::pair{.08, .32} : std::pair{.12, .48};
+    }
+    install_nozzles(config, installed, limits);
     identity_filament_map(config);
-    apply_other_printer_setup(config, Vec2d(300., 300.));
+    apply_other_printer_setup(config, tower_xy);
+}
+
+// The public Snapmaker U1 0.4+0.6 profile (tools 1-2 at 0.4, tools 3-4 at 0.6), set up the way setup sets up
+// a tool changer. nozzles refits the tools. The mixed variant sets no tool change time, so the scene takes the
+// 5 s the single-size U1 profiles ship (Snapmaker U1 (0.4 nozzle).json).
+inline DynamicPrintConfig u1_config(const std::vector<double> &nozzles = {.4, .4, .6, .6})
+{
+    DynamicPrintConfig config = compose_profile(snapmaker_u1);
+    refit_tool_changer(config, nozzles, Vec2d(215., 200.));
+    config.set_key_value("machine_tool_change_time", new ConfigOptionFloat(5.));
     return config;
 }
 
+// The generic five-tool changer (Custom "MyToolChanger") the nine-tool test printer is built from, refitted to
+// `nozzles`, with that printer's tool change time and its public H2D heating and cooling rates.
+inline DynamicPrintConfig generic_tool_changer_config(const std::vector<double> &nozzles)
+{
+    DynamicPrintConfig config = compose_profile({"Custom", "MyToolChanger 0.4 nozzle", "0.20mm Standard @MyToolChanger",
+                                                 std::vector<std::string>(5, "Generic PLA @MyToolChanger")});
+    refit_tool_changer(config, nozzles, Vec2d(100., 140.));
+    config.set_key_value("machine_tool_change_time", new ConfigOptionFloat(6.));
+    config.set_key_value("hotend_heating_rate", new ConfigOptionFloatsNullable(std::vector<double>(5, 3.6)));
+    config.set_key_value("hotend_cooling_rate", new ConfigOptionFloatsNullable(std::vector<double>(5, 2.)));
+    return config;
+}
 
 struct ToolChange
 {

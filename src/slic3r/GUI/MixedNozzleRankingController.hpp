@@ -102,10 +102,12 @@ WizardEstimate wizard_ranking_estimate(const MixedNozzleSliceTime &time);
 // The one-nozzle baseline step 3 times, made from the lowest-ratio row's slice: mode Off, the fine
 // material at `fine_height` everywhere. A row setup refused has no model and keeps its diagnostic;
 // a row only the engine would refuse at Slice still gets a baseline, since those checks are for
-// two nozzles. `fine_logical_filament` is zero based.
+// two nozzles. `fine_logical_filament` is zero based. `keep_colors` (app setting
+// cadence_setup_baseline_keep_colors, on by default) times mixed_nozzle_color_baseline: painting and each
+// part's color kept, each color on its own tool on a tool changer. False times the one-color baseline.
 MixedNozzleRankingSlice wizard_baseline_ranking_slice(MixedNozzleRankingSlice row,
                                                       std::optional<std::size_t> fine_logical_filament,
-                                                      double fine_height);
+                                                      double fine_height, bool keep_colors = true);
 
 } // namespace Slic3r::GUI
 

@@ -3,6 +3,8 @@
 #include "Model.hpp"
 #include "Slicing.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cassert>
 #include <cmath>
 #include <algorithm>
@@ -301,6 +303,23 @@ NozzleVolumeType mixed_nozzle_filament_volume_type(const PrintConfig &config, si
     return nvtStandard;
 }
 
+bool filament_printable_mask_applies(int mask, size_t tool, bool mixed_nozzle_mode)
+{
+    // With the mode off the check stays stock.
+    return !(mixed_nozzle_mode && tool >= 2 && mask <= 3);
+}
+
+bool mixed_nozzle_tool_keeps_filament(const PrintConfig &config, size_t extruder_id)
+{
+    const size_t tools = config.nozzle_diameter.values.size();
+    if (tools < 2 || extruder_id >= tools)
+        return false;
+    // A two-nozzle printer is the hand-off Cadence was built on. With more tools, each must have its own
+    // extruder: a profile that shares one nozzle between its extruders (single_extruder_multi_material)
+    // unloads a filament at every change.
+    return tools == 2 || !config.single_extruder_multi_material.value;
+}
+
 bool mixed_nozzle_tool_handoff_applies(const PrintConfig &config, size_t extruder_id, bool mounted_hotend_stays)
 {
     const auto &counts = config.extruder_max_nozzle_count;
@@ -324,7 +343,7 @@ std::optional<float> mixed_nozzle_conditioned_extruder_change_prime(const PrintC
         return std::nullopt;
     if (!is_mixed_nozzle_slicing_enabled(config))
         return std::nullopt;
-    if (config.nozzle_diameter.values.size() != 2 || destination_extruder >= 2)
+    if (!mixed_nozzle_tool_keeps_filament(config, destination_extruder))
         return std::nullopt;
     // A hotend swap on a rack keeps the vendor nozzle-change route; the other tool is not affected.
     if (!mixed_nozzle_tool_handoff_applies(config, destination_extruder, mounted_hotend_stays))
@@ -337,9 +356,13 @@ std::optional<float> mixed_nozzle_conditioned_extruder_change_prime(const PrintC
     const MixedNozzleLedger ledger = mixed_nozzle_read_ledger(config.mixed_nozzle_filament_explicit_keys.values,
                                                               config.mixed_nozzle_filament_provenance.values,
                                                               num_filaments);
-    if (!ledger.qualified || ledger.is_legacy(filament_id) ||
-        filament_id >= ledger.provenance.size() ||
-        ledger.provenance[filament_id] != MixedNozzleProvenance::Bound ||
+    // On a tool changer the materials come from the printer's own profiles, which setup does not
+    // rebind, so the app loads them as legacy. The re-prime is Cadence's own deposit there, not a
+    // vendor value a legacy project might have tuned, so legacy does not turn it off.
+    const bool tool_changer = config.nozzle_diameter.values.size() > 2 && !config.single_extruder_multi_material.value;
+    if (!ledger.qualified || filament_id >= ledger.provenance.size() ||
+        (!tool_changer && (ledger.is_legacy(filament_id) ||
+                           ledger.provenance[filament_id] != MixedNozzleProvenance::Bound)) ||
         mixed_nozzle_deposit_key_is_intent(config, ledger, filament_id, num_filaments, "filament_prime_volume"))
         return std::nullopt;
     const auto &conditioning = config.mixed_nozzle_extruder_change_prime_volume;
@@ -368,7 +391,7 @@ std::optional<MixedNozzleHandoffDeposits> mixed_nozzle_handoff_deposits(const Pr
 {
     if (!is_mixed_nozzle_slicing_enabled(config))
         return std::nullopt;
-    if (config.nozzle_diameter.values.size() != 2 || extruder_id >= 2)
+    if (!mixed_nozzle_tool_keeps_filament(config, extruder_id))
         return std::nullopt;
     // A hotend swap on a rack keeps the vendor route; single-nozzle setups are untouched.
     if (!mixed_nozzle_tool_handoff_applies(config, extruder_id, mounted_hotend_stays))
@@ -476,6 +499,78 @@ float mixed_nozzle_idle_reprime_volume(const PrintConfig &config, size_t filamen
     const double share = std::min(1., (idle_seconds - kMixedNozzleReprimeIdleStartSeconds) /
                                           (kMixedNozzleReprimeIdleFullSeconds - kMixedNozzleReprimeIdleStartSeconds));
     return floor_mm3 + float(double(vendor_mm3 - floor_mm3) * share);
+}
+
+bool mixed_nozzle_idle_cooldown_enabled(const PrintConfig &config)
+{
+    return config.tool_changer_idle_cooldown.value && is_mixed_nozzle_slicing_enabled(config) &&
+           config.nozzle_diameter.size() > 2 && !config.single_extruder_multi_material.value;
+}
+
+static double mixed_nozzle_hotend_rate(const ConfigOptionFloatsNullable &rates, size_t extruder_id)
+{
+    if (rates.values.empty())
+        return 0.;
+    const size_t index = std::min(extruder_id, rates.values.size() - 1);
+    if (rates.is_nil(index))
+        return 0.;
+    const double rate = rates.get_at(index);
+    return std::isfinite(rate) && rate > 0. ? rate : 0.;
+}
+
+double mixed_nozzle_hotend_heating_rate(const PrintConfig &config, size_t extruder_id)
+{
+    return mixed_nozzle_hotend_rate(config.hotend_heating_rate, extruder_id);
+}
+
+double mixed_nozzle_hotend_cooling_rate(const PrintConfig &config, size_t extruder_id)
+{
+    return mixed_nozzle_hotend_rate(config.hotend_cooling_rate, extruder_id);
+}
+
+int mixed_nozzle_standby_temperature(const PrintConfig &config, size_t filament_id)
+{
+    const int print = config.nozzle_temperature.get_at(filament_id);
+    if (print <= 0)
+        return -1;
+    const int idle = config.idle_temperature.values.empty() ? 0 : config.idle_temperature.get_at(filament_id);
+    const int standby = idle > 0 ? idle : print + config.standby_temperature_delta.value;
+    return standby >= 0 && standby < print ? standby : -1;
+}
+
+double mixed_nozzle_idle_cooldown_threshold(const PrintConfig &config, size_t filament_id, size_t extruder_id)
+{
+    const int standby = mixed_nozzle_standby_temperature(config, filament_id);
+    const double heat = mixed_nozzle_hotend_heating_rate(config, extruder_id);
+    const double cool = mixed_nozzle_hotend_cooling_rate(config, extruder_id);
+    if (standby < 0 || heat <= 0. || cool <= 0.)
+        return std::numeric_limits<double>::infinity();
+    const int print = config.nozzle_temperature.get_at(filament_id);
+    const int lowest = config.nozzle_temperature_range_low.values.empty() ? 0 : config.nozzle_temperature_range_low.get_at(filament_id);
+    // Degrees from the print temperature down to the filament's lowest print temperature, never more than the
+    // park can drop. Going down and coming back across that band takes drop/cool + drop/heat; the park must be at
+    // least twice that, so half of it is spent below.
+    const double drop = std::clamp(double(print - lowest), 1., double(print - standby));
+    return 2. * drop * (1. / cool + 1. / heat);
+}
+
+int mixed_nozzle_idle_cooldown_standby(const PrintConfig &config, size_t filament_id, int extruder_id,
+                                       double idle_seconds)
+{
+    if (extruder_id < 0 || !std::isfinite(idle_seconds) || idle_seconds <= 0. ||
+        !mixed_nozzle_idle_cooldown_enabled(config))
+        return -1;
+    if (idle_seconds < mixed_nozzle_idle_cooldown_threshold(config, filament_id, size_t(extruder_id)))
+        return -1;
+    return mixed_nozzle_standby_temperature(config, filament_id);
+}
+
+float mixed_nozzle_cooled_reprime_volume(const PrintConfig &config, float floor_mm3, float idle_reprime_mm3)
+{
+    if (!std::isfinite(floor_mm3) || !std::isfinite(idle_reprime_mm3) || idle_reprime_mm3 <= floor_mm3)
+        return idle_reprime_mm3;
+    const double share = std::clamp(config.mixed_nozzle_cooled_reprime.value / 100., 0., 1.);
+    return floor_mm3 + float(double(idle_reprime_mm3 - floor_mm3) * share);
 }
 
 MixedNozzleLedger mixed_nozzle_read_ledger(const std::vector<std::string> &explicit_keys,
@@ -869,7 +964,73 @@ bool clear_mixed_nozzle_nozzle_override(DynamicPrintConfig &project)
     return changed;
 }
 
-const std::vector<std::string> &mixed_nozzle_new_project_reset_keys()
+bool release_stale_mixed_nozzle_tower(DynamicPrintConfig &project, DynamicPrintConfig &process,
+                                      bool any_plate_uses_a_mode, bool stock_offers_no_sparse)
+{
+    if (any_plate_uses_a_mode)
+        return false;
+    const auto *payload = project.option<ConfigOptionString>("mixed_nozzle_tower_policy_state");
+    if (payload == nullptr || payload->value.empty())
+        return false;
+    nlohmann::json ledger;
+    try {
+        ledger = nlohmann::json::parse(payload->value);
+    } catch (...) {
+        return false; // A payload this build cannot read is kept as it is.
+    }
+    const auto consumers = ledger.find("consumers");
+    if (!ledger.is_object() || consumers == ledger.end() || !consumers->is_array() || consumers->empty())
+        return false;
+    const auto row_value = [&ledger](const char *rows, const std::string &key) -> std::optional<std::string> {
+        const auto it = ledger.find(rows);
+        if (it != ledger.end() && it->is_array())
+            for (const auto &row : *it)
+                if (row.is_object() && row.value("key", std::string()) == key && row.contains("value") && row["value"].is_string())
+                    return row["value"].get<std::string>();
+        return std::nullopt;
+    };
+    std::set<std::string> manual;
+    if (const auto it = ledger.find("manual"); it != ledger.end() && it->is_array())
+        for (const auto &key : *it)
+            if (key.is_string())
+                manual.insert(key.get<std::string>());
+    if (const auto it = ledger.find("managed"); it != ledger.end() && it->is_array())
+        for (const auto &entry : *it) {
+            if (!entry.is_string())
+                continue;
+            const std::string key     = entry.get<std::string>();
+            const auto        applied = row_value("applied", key);
+            const auto        before  = row_value("before", key);
+            const ConfigOption *current = process.option(key);
+            if (current != nullptr && applied && before && current->serialize() == *applied) {
+                if (*before == "absent")
+                    process.erase(key);
+                else {
+                    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+                    process.set_deserialize_nothrow(key, *before, substitutions);
+                }
+            } else {
+                manual.insert(key);
+            }
+        }
+    if (manual.empty()) {
+        project.erase("mixed_nozzle_tower_policy_state");
+    } else {
+        ledger["managed"]   = nlohmann::json::array();
+        ledger["before"]    = nlohmann::json::array();
+        ledger["applied"]   = nlohmann::json::array();
+        ledger["consumers"] = nlohmann::json::array();
+        ledger["manual"]    = manual;
+        project.set_key_value("mixed_nozzle_tower_policy_state", new ConfigOptionString(ledger.dump()));
+    }
+    if (!stock_offers_no_sparse) {
+        if (const auto *no_sparse = process.option<ConfigOptionBool>("wipe_tower_no_sparse_layers"); no_sparse != nullptr && no_sparse->value)
+            process.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(false));
+    }
+    return true;
+}
+
+static const std::vector<std::string> &mixed_nozzle_new_project_reset_keys()
 {
     // Everything setup (the wizard and the sidebar) writes into the project as setup state:
     // the mode, the automatic tower ownership ledger and its fresh marker, and the per-filament
@@ -1750,6 +1911,7 @@ PrintConfig mixed_nozzle_tower_config_as_off(const PrintConfig &config)
     // first filament change, then drops the nozzle beside the printed part to lay it. The stock
     // tower stands from the first layer.
     off.wipe_tower_no_sparse_layers.value = false;
+    off.wipe_tower_sparse_layers_combination.value = false;
     return off;
 }
 

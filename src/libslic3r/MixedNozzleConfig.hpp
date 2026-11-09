@@ -149,7 +149,7 @@ MixedNozzleCadenceResolution resolve_mixed_nozzle_cadence(
     const PrintConfig &config, double fine_height, double coarse_height,
     size_t fine_logical_filament, size_t coarse_logical_filament);
 
-// Feature Split refuses a region whose outer walls and sparse infill land on one nozzle (MNS-CAD-A05).
+// Feature Split refuses a region whose outer walls and sparse infill land on one nozzle.
 // The words say which nozzle and what to set back. Filaments are 1-based; the default ones are the
 // plate's split as setup wrote it.
 std::string mixed_nozzle_feature_roles_one_nozzle_message(const PrintConfig &config, int outer_wall_filament,
@@ -161,14 +161,22 @@ std::string mixed_nozzle_feature_roles_one_nozzle_message(const PrintConfig &con
 bool restore_loaded_mixed_nozzle_nozzle_override(DynamicPrintConfig &project,
                                                  const DynamicPrintConfig &loaded);
 bool clear_mixed_nozzle_nozzle_override(DynamicPrintConfig &project);
+// A project loaded with every plate Off whose tower ledger still lists plates (a file edited by hand or
+// left by an older Turn off) is released the way Turn off releases it: each tower setting the ledger
+// manages and the user left at the value Automatic applied goes back to its value from before setup,
+// the others become the user's, the ledger keeps only those, and No sparse layers is turned off unless
+// stock OrcaSlicer offers it (a Type 2 tower on a non-Bambu printer). The tower settings live in
+// `process`, the ledger in `project` (the same config on the command line). Returns whether anything
+// changed.
+bool release_stale_mixed_nozzle_tower(DynamicPrintConfig &project, DynamicPrintConfig &process,
+                                      bool any_plate_uses_a_mode, bool stock_offers_no_sparse);
 // The per-filament ledger options a new project starts empty.
 inline constexpr const char *MIXED_NOZZLE_FILAMENT_LEDGER_KEYS[] = {
     "mixed_nozzle_filament_explicit_keys", "mixed_nozzle_filament_provenance", "mixed_nozzle_filament_binding"};
 
-// File > New: mixed-nozzle setup is per project. The reset keys return to a new project's state
+// File > New: mixed-nozzle setup is per project. The setup keys return to a new project's state
 // and any other project-level mixed_nozzle_ key is erased; printer hardware and loaded filaments
 // are untouched. Not used when opening a saved project.
-const std::vector<std::string> &mixed_nozzle_new_project_reset_keys();
 // Resets the setup keys and erases stray mixed_nozzle_ keys. Returns true when anything changed.
 bool reset_mixed_nozzle_setup_for_new_project(DynamicPrintConfig &project);
 // File > New, after the ordinary project reset: restore the installed nozzle pair and its
@@ -176,7 +184,7 @@ bool reset_mixed_nozzle_setup_for_new_project(DynamicPrintConfig &project);
 bool apply_mixed_nozzle_new_project(DynamicPrintConfig &project, const DynamicPrintConfig &previous);
 
 // Writes a painted (1-based) filament into the six feature filament ids of a painted region copied
-// from its parent. Outside Feature Split all six take it, as in stock. Under Feature Split (MC-6)
+// from its parent. Outside Feature Split all six take it, as in stock. Under Feature Split
 // only the features the fine nozzle prints take it: outer and inner walls, top and bottom surfaces
 // and internal solid infill, each only when the parent's filament for it is not on the coarse
 // (widest) nozzle. Sparse infill always keeps the parent's filament; the coarse core is the point
@@ -207,7 +215,7 @@ size_t mixed_nozzle_mask_index_filament(size_t logical_filament);
 size_t mixed_nozzle_mask_length(size_t num_filaments);
 
 // The keys the composite mask records for one logical filament, unescaped. Out-of-range or
-// short vectors yield an empty set rather than reading a neighbour's entry.
+// short vectors yield an empty set rather than reading a neighbor's entry.
 std::set<std::string> mixed_nozzle_mask_keys_for_filament(const std::vector<std::string> &different_settings,
                                                           size_t logical_filament, size_t num_filaments);
 
@@ -260,7 +268,7 @@ MixedNozzlePrimeVolumes mixed_nozzle_vendor_prime_volumes(const PrintConfig &con
 
 // Conditioning prime for a switch back to a tool that already holds this filament. Returns the
 // per-tool mixed_nozzle_extruder_change_prime_volume (unset: the Saving prime, 15 mm^3), or
-// nullopt to keep vendor behaviour. Requires mixed-nozzle slicing, two tools, a real tool switch,
+// nullopt to keep vendor behavior. Requires mixed-nozzle slicing, two tools, a real tool switch,
 // Default prime mode and a bound filament without explicit filament_prime_volume.
 std::optional<float> mixed_nozzle_conditioned_extruder_change_prime(const PrintConfig &config,
                                                                     size_t filament_id,
@@ -293,6 +301,17 @@ std::optional<MixedNozzleHandoffDeposits> mixed_nozzle_handoff_deposits(const Pr
                                                                         // On a tool with a hotend rack, true when the mounted hotend stays in place.
                                                                         bool mounted_hotend_stays = false);
 
+// Whether physical tool extruder_id keeps its own filament while parked, so a change back to it needs only
+// a re-prime: either nozzle of a two-nozzle printer, or any tool of a tool changer whose tools each have
+// their own extruder (the Snapmaker U1, the Prusa XL).
+bool mixed_nozzle_tool_keeps_filament(const PrintConfig &config, size_t extruder_id);
+
+// Whether a filament's printable mask is checked on physical tool `tool` (0-based) with a manual filament map. The
+// mask is the two-extruder printers' left/right pair (default 3); a mask with no bit above the second says nothing
+// about a tool changer's third or later tool (the Snapmaker U1 profiles ship 3 on all four tools), so under a
+// mixed-nozzle mode such a mask is not checked there. With the mode off the check stays stock.
+bool filament_printable_mask_applies(int mask, size_t tool, bool mixed_nozzle_mode);
+
 // Whether the mixed-nozzle hand-off applies to extruder_id. A single-hotend tool always qualifies;
 // a tool with a hotend rack only when its mounted hotend stays (a rack swap keeps the vendor route).
 bool mixed_nozzle_tool_handoff_applies(const PrintConfig &config, size_t extruder_id, bool mounted_hotend_stays);
@@ -306,6 +325,27 @@ NozzleVolumeType mixed_nozzle_filament_volume_type(const PrintConfig &config, si
 // prime), ramping towards the vendor prime. An unknown wait keeps the floor.
 float mixed_nozzle_idle_reprime_volume(const PrintConfig &config, size_t filament_id, float floor_mm3,
                                        double idle_seconds);
+
+// Idle cooldown on a tool changer (tool_changer_idle_cooldown): under Feature Split or Body Split, on a printer with
+// more than two tools that each keep their own filament (the re-prime path), a tool parked long enough cools to its
+// standby temperature and is reheated in time for its next use. Two-nozzle printers never.
+bool mixed_nozzle_idle_cooldown_enabled(const PrintConfig &config);
+// Heating and cooling rate (C/s) of a tool, from the machine's hotend_heating_rate / hotend_cooling_rate.
+double mixed_nozzle_hotend_heating_rate(const PrintConfig &config, size_t extruder_id);
+double mixed_nozzle_hotend_cooling_rate(const PrintConfig &config, size_t extruder_id);
+// The temperature a parked filament cools to: its idle_temperature, else its print temperature plus
+// standby_temperature_delta (the stock ooze prevention rule). -1 when that is not below the print temperature.
+int mixed_nozzle_standby_temperature(const PrintConfig &config, size_t filament_id);
+// Shortest planned park that cools: long enough for the tool to spend half the park below the filament's lowest
+// print temperature (nozzle_temperature_range_low) at its own cooling and heating rates. Infinite when the filament
+// never cools.
+double mixed_nozzle_idle_cooldown_threshold(const PrintConfig &config, size_t filament_id, size_t extruder_id);
+// The standby temperature a park of idle_seconds (planner estimate) cools to, or -1 when it stays hot.
+int mixed_nozzle_idle_cooldown_standby(const PrintConfig &config, size_t filament_id, int extruder_id,
+                                       double idle_seconds);
+// The re-prime of a tool returning from a cooled park: mixed_nozzle_cooled_reprime of the idle re-prime above
+// the hand-off prime.
+float mixed_nozzle_cooled_reprime_volume(const PrintConfig &config, float floor_mm3, float idle_reprime_mm3);
 
 // Read and validate the persisted vectors. Both empty means a fresh project (all bound); any
 // length mismatch, unknown token or unknown key makes the project unqualified.

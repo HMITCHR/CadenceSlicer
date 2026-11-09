@@ -2,30 +2,14 @@
 
 #include "mixed_nozzle_harness.hpp"
 #include "mixed_nozzle_fixtures.hpp"
-#include "libslic3r/MixedNozzleConfig.hpp"
 
 #include <algorithm>
 #include <array>
-#include <limits>
 
 using namespace Slic3r;
 using namespace mixed_nozzle_fixtures;
 
 namespace {
-
-struct TowerBounds {
-    double min_x {std::numeric_limits<double>::max()}, min_y {std::numeric_limits<double>::max()};
-    double max_x {std::numeric_limits<double>::lowest()}, max_y {std::numeric_limits<double>::lowest()};
-    size_t roads {0};
-    void add(const GCodeProcessorResult::MoveVertex &move) {
-        min_x = std::min(min_x, double(move.position.x()));
-        min_y = std::min(min_y, double(move.position.y()));
-        max_x = std::max(max_x, double(move.position.x()));
-        max_y = std::max(max_y, double(move.position.y()));
-        ++roads;
-    }
-    double width() const { return std::max(max_x - min_x, max_y - min_y); }
-};
 
 struct PadRun {
     CadenceTest::Facts facts;
@@ -59,12 +43,13 @@ PadRun reprime_pad_run(double wall_speed, double width_cap)
     REQUIRE(print.has_wipe_tower());
     const WipeTowerData &tower = print.wipe_tower_data();
     REQUIRE(tower.width > 0.f);
-    TowerBounds bounds;
+    BoundingBoxf bounds;
     for (const auto &move : facts.moves)
         if (move.type == EMoveType::Extrude && move.extrusion_role == erWipeTower)
-            bounds.add(move);
-    REQUIRE(bounds.roads > 0);
-    REQUIRE(bounds.width() > 0.);
+            bounds.merge(Vec2d(move.position.x(), move.position.y()));
+    REQUIRE(bounds.defined);
+    const double emitted_width = std::max(bounds.size().x(), bounds.size().y());
+    REQUIRE(emitted_width > 0.);
     const double generated_footprint_width = std::max(
         double(tower.bbx.max.x() - tower.bbx.min.x()),
         double(tower.bbx.max.y() - tower.bbx.min.y()));
@@ -72,9 +57,9 @@ PadRun reprime_pad_run(double wall_speed, double width_cap)
     // The generator's bbx includes its rib and brim. Check it against the independently measured
     // exported road bounds so this scenario reports the actual printed footprint as well as the
     // nominal width that prime_tower_width caps.
-    CHECK_THAT(bounds.width(), Catch::Matchers::WithinAbs(generated_footprint_width, .5));
+    CHECK_THAT(emitted_width, Catch::Matchers::WithinAbs(generated_footprint_width, .5));
     const PrintConfig config = print.config();
-    return {facts, config, double(tower.width), generated_footprint_width, bounds.width()};
+    return {facts, config, double(tower.width), generated_footprint_width, emitted_width};
 }
 
 void check_tower_safety(const PadRun &run)
@@ -105,26 +90,6 @@ void check_tower_safety(const PadRun &run)
     CHECK(exit.crossings == 0);
 }
 
-void check_warm_return_floors(const PadRun &run)
-{
-    constexpr double rounding_mm3 = .02;
-    const auto purges = scan_arriving_purges(run.facts.gcode, run.config.filament_diameter.values);
-    size_t warm_returns = 0;
-    for (const auto &purge : purges) {
-        if (!purge.warm_return)
-            continue;
-        ++warm_returns;
-        REQUIRE(purge.new_filament >= 0);
-        REQUIRE(purge.new_nozzle >= 0);
-        const auto floor = mixed_nozzle_handoff_deposits(run.config, size_t(purge.new_filament),
-                                                          size_t(purge.new_nozzle), run.nominal_width);
-        REQUIRE(floor.has_value());
-        CAPTURE(purge.new_filament, purge.new_nozzle, purge.volume_mm3, floor->prime_volume_mm3);
-        CHECK(purge.volume_mm3 + rounding_mm3 >= floor->prime_volume_mm3);
-    }
-    CHECK(warm_returns > 0);
-}
-
 } // namespace
 
 TEST_CASE("Reprime: Body Split auto pad converges between short and full re-prime footprints",
@@ -143,5 +108,6 @@ TEST_CASE("Reprime: Body Split auto pad converges between short and full re-prim
     CHECK(tight.nominal_width <= cap + .05);
     CHECK(tight.emitted_width < slow.emitted_width - 1.);
     check_tower_safety(tight);
-    check_warm_return_floors(tight);
+    // Every warm return lays at least its hand-off prime at the capped tower width.
+    CHECK(check_warm_returns(tight.facts.gcode, tight.config, tight.nominal_width, false).count > 0);
 }

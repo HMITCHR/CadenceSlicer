@@ -17,17 +17,20 @@
 
 #include <wx/timer.h>
 
+#include "fff_print/mixed_nozzle_harness.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"
-#include "slic3r/GUI/DeviceCore/DevExtruderSystem.h"
+#include "slic3r/GUI/DeviceCore/DevNozzleRack.h"
 #include "slic3r/GUI/DeviceCore/DevNozzleSystem.h"
-#include "slic3r/GUI/DeviceCore/DevUtil.h"
 #include "slic3r/GUI/ProjectNozzleFlowState.hpp"
-#include "slic3r/GUI/TestModePrinter.hpp"
+#include "slic3r/GUI/SelectMachine.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <cmath>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -95,93 +98,109 @@ TEST_CASE("The H2D's report of a 0.6 \"HS01\" right nozzle never replaces the pr
     const AdoptedFlowPlan same = plan_adopted_flows(project, {nvtStandard, DevNozzle::ToNozzleVolumeType(right)}, true);
     CHECK(same.writes.empty());
     CHECK_FALSE(same.ask);
-}
 
-TEST_CASE("A printer sync offers the filament sync before setup opens", "[TestRebuild][SyncOrder]")
-{
-    // Sync button or auto sync, printer with an AMS: the filament offer comes before setup.
-    CHECK(sync_filaments_before_setup(true, true, false));
-    // A nozzle picked by hand in the sidebar: setup opens at once, with or without a printer online.
-    CHECK_FALSE(sync_filaments_before_setup(false, true, false));
-    CHECK_FALSE(sync_filaments_before_setup(false, false, false));
-    // No AMS: setup opens as before and the stock offer follows the sync.
-    CHECK_FALSE(sync_filaments_before_setup(true, false, false));
-    // One sync asks once, also when the project pair and the nozzle prompt both lead to setup.
-    CHECK_FALSE(sync_filaments_before_setup(true, true, true));
-}
-
-TEST_CASE("The test mode printer reports its nozzles and AMS as an H2D does", "[TestRebuild][DeviceSync][TestMode]")
-{
-    std::string error;
-    const json spec = json::parse(R"({
-        "left":  { "diameter": 0.2, "flow": "Standard" },
-        "right": { "diameter": 0.6, "flow": "High Flow" },
-        "ams": [ { "extruder": "left", "trays": [
-            { "type": "PLA", "color": "FFFFFFFF", "filament_id": "GFA00" },
-            { "type": "PETG", "color": "000000FF", "filament_id": "GFG02" },
-            {} ] } ]
-    })");
-    const json reports = TestMode::fake_printer_reports(spec, error);
-    REQUIRE(error.empty());
-    REQUIRE(reports.size() == 2);
-    CHECK(reports[0]["info"]["command"] == "get_version");
-    const json &print = reports[1]["print"];
-    CHECK(print["command"] == "push_status");
-
-    // The device block goes through the same parsers a real report does.
-    MachineObject obj(nullptr, nullptr, "test", "test_dev", "");
-    DevNozzleSystemParser::ParseV2_0(print["device"], obj.GetNozzleSystem());
-    ExtderSystemParser::ParseV2_0(print["device"]["extruder"], obj.GetExtderSystem());
-    REQUIRE(obj.GetExtderSystem()->GetTotalExtderCount() == 2);
-    // Device extruder 0 is the right nozzle.
-    CHECK_THAT(obj.GetExtderSystem()->GetNozzleDiameter(0), Catch::Matchers::WithinAbs(0.6, 1e-6));
-    CHECK(obj.GetExtderSystem()->GetNozzleFlowType(0) == NozzleFlowType::H_FLOW);
-    CHECK_THAT(obj.GetExtderSystem()->GetNozzleDiameter(1), Catch::Matchers::WithinAbs(0.2, 1e-6));
-    CHECK(obj.GetExtderSystem()->GetNozzleFlowType(1) == NozzleFlowType::S_FLOW);
-
-    // What a sync of that report writes, in config order: left Standard, right High Flow.
-    std::vector<std::optional<NozzleVolumeType>> flows;
-    for (int device = 0; device < 2; ++device)
-        flows.emplace_back(DevNozzle::ToNozzleVolumeType(obj.GetExtderSystem()->GetNozzleFlowType(device)));
-    CHECK(device_sync_nozzle_volume_types({1, 0}, {0.6, 0.2}, flows, {}) ==
+    // What a sync writes in config order (left, right) from the device order (right first). A 0.2 mm
+    // nozzle stays Standard whatever it reports; a selection from the printer's stats wins; without
+    // flow support every nozzle is Standard, as upstream.
+    const std::vector<double> device_pair{0.6, 0.2};
+    const std::vector<std::optional<NozzleVolumeType>> device_flows{nvtHighFlow, nvtStandard};
+    CHECK(device_sync_nozzle_volume_types(mapping, device_pair, device_flows, {{}, {}}) ==
           std::vector<NozzleVolumeType>{nvtStandard, nvtHighFlow});
-
-    // One AMS 2 Pro on the left extruder (device 1) with two loaded trays and an empty one.
-    const json &ams = print["ams"];
-    REQUIRE(ams["ams"].size() == 1);
-    const std::string info = ams["ams"][0]["info"].get<std::string>();
-    CHECK(DevUtil::get_flag_bits(info, 0, 4) == 3);
-    CHECK(DevUtil::get_flag_bits(info, 8, 4) == 1);
-    CHECK(ams["ams_exist_bits"] == "1");
-    CHECK(ams["tray_exist_bits"] == "3");
-    const json &trays = ams["ams"][0]["tray"];
-    REQUIRE(trays.size() == 3);
-    CHECK(trays[1]["tray_type"] == "PETG");
-    CHECK(trays[1]["tray_info_idx"] == "GFG02");
-    CHECK(trays[1]["tray_color"] == "000000FF");
-    CHECK_FALSE(trays[2].contains("tray_type"));
-
-    // A nozzle type string as the printer sends it wins over the flow name.
-    json reported = spec;
-    reported["right"] = {{"diameter", 0.6}, {"type", "HS01"}, {"flow", "High Flow"}};
-    const json standard = TestMode::fake_printer_reports(reported, error);
-    REQUIRE(error.empty());
-    CHECK(standard[1]["print"]["device"]["nozzle"]["info"][0]["type"] == "HS01");
-    CHECK(TestMode::fake_nozzle_type("TPU High Flow") == "HU01");
+    CHECK(device_sync_nozzle_volume_types(mapping, device_pair, {nvtHighFlow, nvtHighFlow}, {{}, {}}) ==
+          std::vector<NozzleVolumeType>{nvtStandard, nvtHighFlow});
+    CHECK(device_sync_nozzle_volume_types(mapping, device_pair, device_flows, {std::nullopt, nvtHybrid}) ==
+          std::vector<NozzleVolumeType>{nvtHybrid, nvtHighFlow});
+    CHECK(device_sync_nozzle_volume_types(mapping, device_pair, {{}, {}}, {{}, {}}) ==
+          std::vector<NozzleVolumeType>{nvtStandard, nvtStandard});
 }
 
-TEST_CASE("The test mode printer refuses a description it cannot report", "[TestRebuild][DeviceSync][TestMode]")
+// The send check for a hotend rack printer: before a print starts, the right extruder's sliced size and
+// flow must be held by the mounted hotend or a rack hotend, or Send is blocked with "The printer has no
+// nozzle matching the slicing file" (SelectMachineDialog::CheckErrorExtruderNozzleWithSlicing). Stock
+// code, kept as it is. This slices an H2C plan (left 0.4, rack 0.2, fine on the rack side) in both modes
+// and runs the sizes the dialog reads through the inventory lookup it uses.
+TEST_CASE("An H2C plan whose right size is not in the hotend rack is held back by the send check",
+          "[TestRebuild][H2C][RackCheck][SendDialog]")
 {
-    std::string error;
-    CHECK(TestMode::fake_printer_reports(json::parse(R"({"left": {"flow": "Fast"}})"), error).empty());
-    CHECK(error.find("Fast") != std::string::npos);
-    error.clear();
-    CHECK(TestMode::fake_printer_reports(json::parse(R"({"right": {"diameter": -1}})"), error).empty());
-    CHECK_FALSE(error.empty());
-    error.clear();
-    CHECK(TestMode::fake_printer_reports(json::parse(R"({"ams": [{"trays": [{}, {}, {}, {}, {}]}]})"), error).empty());
-    CHECK_FALSE(error.empty());
-    error.clear();
-    CHECK(TestMode::fake_printer_reports(json::parse(R"({"ams": [{"extruder": "middle"}]})"), error).empty());
-    CHECK_FALSE(error.empty());
+    using namespace mixed_nozzle_fixtures;
+    const bool body_split = GENERATE(false, true);
+    CAPTURE(body_split);
+    DynamicPrintConfig config = body_split ? body_split_pad_config(.20, .40, .10, .20, true, true, 60., wtwRib)
+                                           : feature_split_tower_config(.20, .40, true);
+    config.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({1, 6}));
+    config.set_key_value("physical_extruder_map", new ConfigOptionInts({1, 0}));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nM1020 S[initial_extruder]\n"));
+    Model model;
+    Print print;
+    print.is_BBL_printer() = true;
+    if (body_split)
+        init_body_split_pad_coupon(model, print, config, true, 4.0, .10, .20);
+    else
+        init_tower_coupon(model, print, config);
+    const CadenceTest::Facts facts = CadenceTest::slice(print);
+    INFO(facts.refusal.string);
+    REQUIRE(facts.refusal.string.empty());
+    REQUIRE_FALSE(facts.gcode.empty());
+
+    // Body Split prints a body on each side and changes tools. The Feature Split coupon is priced all fine.
+    std::set<unsigned> printing_tools;
+    for (const auto &move : facts.moves)
+        if (CadenceTest::model_road(move))
+            printing_tools.insert(move.physical_tool_id);
+    if (body_split) {
+        CHECK_FALSE(facts.emitted.tool_changes.empty());
+        CHECK(printing_tools == std::set<unsigned>{0, 1});
+    } else
+        CHECK(printing_tools.size() == 1);
+
+    // The sizes the dialog reads for the right extruder (s_get_slicing_extuder_nozzles): the grouping's
+    // used nozzles when the map is dynamic, otherwise each used filament's extruder in the sliced config.
+    const auto group = print.get_nozzle_group_result();
+    REQUIRE(group);
+    std::vector<float> right_sizes;
+    if (group->is_support_dynamic_nozzle_map()) {
+        for (const auto &nozzle : group->get_used_nozzles_in_extruder(1))
+            right_sizes.push_back(std::stof(nozzle.diameter));
+    } else {
+        for (unsigned int filament : group->get_used_filaments()) {
+            const auto nozzle = GUI::slicing_extruder_nozzle(config, print.config().filament_map.values, int(filament) + 1);
+            REQUIRE(nozzle.has_value());
+            if (nozzle->physical_extruder == MAIN_EXTRUDER_ID)
+                right_sizes.push_back(nozzle->diameter);
+        }
+    }
+    REQUIRE_FALSE(right_sizes.empty());
+    for (float size : right_sizes)
+        CHECK_THAT(size, Catch::Matchers::WithinAbs(0.2, 1e-6));
+
+    // An H2C with 0.4 hotends mounted on both sides and a 0.4 and a 0.6 in the rack: no 0.2 anywhere.
+    MachineObject obj(nullptr, nullptr, "test", "test_dev", "");
+    obj.GetNozzleSystem()->SetSupportNozzleRack(true);
+    json report = json::parse(R"({
+        "nozzle": {
+            "info": [
+                { "id": 0,  "diameter": 0.4, "type": "HS00" },
+                { "id": 1,  "diameter": 0.4, "type": "HS00" },
+                { "id": 16, "diameter": 0.4, "type": "HS00" },
+                { "id": 17, "diameter": 0.6, "type": "HS00" }
+            ]
+        }
+    })");
+    DevNozzleSystemParser::ParseV2_0(report, obj.GetNozzleSystem());
+    REQUIRE(obj.GetNozzleSystem()->GetNozzleRack()->IsSupported());
+    REQUIRE(obj.GetNozzleSystem()->GetRackNozzles().size() == 2);
+    for (float size : right_sizes)
+        CHECK(obj.GetNozzleSystem()->CollectNozzles(MAIN_EXTRUDER_ID, NozzleFlowType::S_FLOW, size).empty());
+
+    // A 0.2 in the rack passes. On a printer that reports flow types, a 0.2 High Flow does not stand in
+    // for a Standard one.
+    report["nozzle"]["info"].push_back(json::parse(R"({ "id": 18, "diameter": 0.2, "type": "HH00" })"));
+    DevNozzleSystemParser::ParseV2_0(report, obj.GetNozzleSystem());
+    if (obj.is_nozzle_flow_type_supported())
+        for (float size : right_sizes)
+            CHECK(obj.GetNozzleSystem()->CollectNozzles(MAIN_EXTRUDER_ID, NozzleFlowType::S_FLOW, size).empty());
+    report["nozzle"]["info"].push_back(json::parse(R"({ "id": 19, "diameter": 0.2, "type": "HS00" })"));
+    DevNozzleSystemParser::ParseV2_0(report, obj.GetNozzleSystem());
+    for (float size : right_sizes)
+        CHECK_FALSE(obj.GetNozzleSystem()->CollectNozzles(MAIN_EXTRUDER_ID, NozzleFlowType::S_FLOW, size).empty());
 }

@@ -1,16 +1,29 @@
 #include "slic3r/GUI/CadencePalette.hpp"
 #include "PurgeModeDialog.hpp"
 
+#include <wx/colour.h>
+#include "slic3r/GUI/GUI_Utils.hpp"
+#include <wx/event.h>
+#include <wx/gdicmn.h>
+#include <wx/dialog.h>
+#include <string>
+#include <wx/panel.h>
+#include "libslic3r/Config.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "slic3r/GUI/Widgets/Label.hpp"
+#include "slic3r/GUI/Widgets/StateColor.hpp"
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/statbmp.h>
 #include <wx/dcbuffer.h>
 #include <wx/graphics.h>
+#include <wx/window.h>
 
 #include "I18N.hpp"
 #include "GUI_App.hpp"
 #include "wxExtensions.hpp"
 #include "Widgets/Button.hpp"
+#include "Widgets/DialogButtons.hpp"
 #include "libslic3r/Utils.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -46,7 +59,7 @@ PurgeModeDialog::PurgeModeDialog(wxWindow *parent, PurgeModeDialogType dialog_ty
 
     bool is_fast_mode = (m_dialog_type == PurgeModeDialogType::FastMode);
 
-    m_standard_panel = new PurgeModeBtnPanel(options_panel, _L("Standard"), _L("Perform full purging with speed and temperature transition for the best print quality."),
+    m_standard_panel = new PurgeModeBtnPanel(options_panel, _L_CONTEXT("Standard", "Mode"), _L("Perform full purging with speed and temperature transition for the best print quality."),
                                              "shield");
     m_standard_panel->SetMinSize(wxSize(FromDIP(200), FromDIP(150)));
     m_standard_panel->Select(mode == pvmDefault);
@@ -76,18 +89,10 @@ PurgeModeDialog::PurgeModeDialog(wxWindow *parent, PurgeModeDialogType dialog_ty
     auto btn_sizer = new wxBoxSizer(wxHORIZONTAL);
     btn_sizer->AddStretchSpacer();
 
-    auto ok_btn = new Button(this, _L("Confirm"));
-    ok_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Compact);
-    ok_btn->SetId(wxID_OK);
+    auto dlg_btns = new DialogButtons(this, {"OK", "Cancel"});
+    dlg_btns->GetOK()->SetLabel(_L("Confirm"));
 
-    auto cancel_btn = new Button(this, _L("Cancel"));
-    cancel_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
-    cancel_btn->SetId(wxID_CANCEL);
-
-    btn_sizer->Add(ok_btn, 0, wxRIGHT, FromDIP(12));
-    btn_sizer->Add(cancel_btn, 0);
-
-    main_sizer->Add(btn_sizer, 0, wxEXPAND | wxALL, FromDIP(20));
+    main_sizer->Add(dlg_btns, 0, wxEXPAND);
 
     SetSizer(main_sizer);
     Fit();
@@ -117,7 +122,7 @@ void PurgeModeDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
     const int &em = em_unit();
 
-    msw_buttons_rescale(this, em, {wxID_OK, wxID_CANCEL});
+    //msw_buttons_rescale(this, em, {wxID_OK, wxID_CANCEL});
 
     const wxSize &size = wxSize(70 * em, 32 * em);
     SetMinSize(size);

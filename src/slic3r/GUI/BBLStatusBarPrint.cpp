@@ -1,6 +1,16 @@
 #include "slic3r/GUI/CadencePalette.hpp"
 #include "BBLStatusBarPrint.hpp"
 
+#include <wx/event.h>
+#include <wx/panel.h>
+#include <wx/sizer.h>
+#include <wx/string.h>
+#include "slic3r/GUI/Widgets/Label.hpp"
+#include "slic3r/GUI/Widgets/StateColor.hpp"
+#include <utility>
+#include "slic3r/GUI/Widgets/Button.hpp"
+#include "slic3r/GUI/wxExtensions.hpp"
+#include <cstddef>
 #include <wx/timer.h>
 #include <wx/gauge.h>
 #include <wx/button.h>
@@ -8,7 +18,6 @@
 #include <wx/frame.h>
 #include "wx/evtloop.h"
 #include <wx/gdicmn.h>
-#include "GUI_App.hpp"
 
 #include "I18N.hpp"
 

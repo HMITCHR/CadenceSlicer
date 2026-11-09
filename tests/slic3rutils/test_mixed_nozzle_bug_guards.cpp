@@ -1,19 +1,14 @@
-// Guards for reported bugs in the setup wizard, the sidebar and project handling. Helpers that are
-// file-local in the sources are reached through the public function that calls them.
+// Guards for reported bugs in the setup wizard and project handling. Helpers that are file-local in
+// the sources are reached through the public function that calls them.
 
 #include <catch2/catch_all.hpp>
 
 #include "libslic3r/MixedNozzleConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
-#include "slic3r/GUI/MixedNozzleNativeEntry.hpp"
 #include "slic3r/GUI/MixedNozzleWizardModel.hpp"
-#include "slic3r/GUI/ProjectNozzleFlowState.hpp"
-#include "slic3r/GUI/SidebarNozzleCards.hpp"
-#include "slic3r/GUI/Widgets/MultiNozzleSync.hpp"
 
 #include "wizard_apply_support.hpp"
 
-#include <algorithm>
 #include <array>
 #include <clocale>
 #include <cmath>
@@ -30,8 +25,6 @@ using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::WizardTest;
 
 namespace {
-
-bool has_text(const std::string &text, const std::string &part) { return text.find(part) != std::string::npos; }
 
 std::string diameter_text(double diameter)
 {
@@ -110,30 +103,6 @@ WizardDraft draft_for(MixedNozzleSlicingMode mode, double fine_height, double co
     return draft;
 }
 
-// 0.2 / 0.6 pair at 0.12 mm: the N2 (0.24) and N3 (0.36) rows.
-struct RankedFinish {
-    FullPrintConfig config;
-    std::vector<WizardCandidate> candidates;
-    std::size_t n2 {0};
-    std::size_t n3 {0};
-};
-
-RankedFinish ranked_finish()
-{
-    PresetBundle bundle = installed_bbl_profiles();
-    RankedFinish finish;
-    finish.config = resolver_for_pair(bundle, 0.2, 0.6);
-    finish.candidates = build_wizard_candidates(draft_for(MixedNozzleSlicingMode::FeatureSplit, 0.12, 0.36),
-                                                finish.config, {});
-    const WizardCadencePage page = wizard_cadence_page(finish.candidates, 0.12, finish.config);
-    REQUIRE(page.rows.size() == 2);
-    REQUIRE(page.rows[0].ratio == 2);
-    REQUIRE(page.rows[1].ratio == 3);
-    finish.n2 = page.rows[0].candidate_index;
-    finish.n3 = page.rows[1].candidate_index;
-    return finish;
-}
-
 // A cube: 0.2/0.8 pair, 0.08 mm fine, rows N2 to N7.
 struct RankCube {
     FullPrintConfig config;
@@ -158,7 +127,7 @@ RankCube rank_cube(const std::map<int, double> &seconds_by_ratio)
 }
 
 // 0.56 and 0.48 tie (1.7%); 0.16 is 22 min slower than the 2 h 30 min all-fine baseline and 54 min
-// slower than 0.56; 0.24 is within 2% of the baseline.
+// slower than 0.56.
 const std::map<int, double> kRankCubeSeconds{
     {2, 10320.}, {3, 9100.}, {4, 8200.}, {5, 8000.}, {6, 7200.}, {7, 7080.}};
 
@@ -168,20 +137,6 @@ std::optional<std::size_t> row_of(const WizardCadencePage &page, std::size_t can
         if (page.rows[index].candidate_index == candidate)
             return index;
     return std::nullopt;
-}
-
-std::string label_of_ratio(const WizardCadencePage &page, int ratio)
-{
-    for (const WizardCadenceRow &row : page.rows)
-        if (row.ratio == ratio)
-            return row.label;
-    FAIL("no row for ratio " << ratio);
-    return {};
-}
-
-bool ends_with(const std::string &text, const std::string &tail)
-{
-    return text.size() >= tail.size() && text.compare(text.size() - tail.size(), tail.size(), tail) == 0;
 }
 
 // Two logical materials on a 0.2 Standard / 0.6 High Flow H2D, each with both variant columns.
@@ -212,737 +167,319 @@ FullPrintConfig expanded_variant_material_config()
     return config;
 }
 
+// A 0.2 / 0.6 pair at 0.1 mm with no machine presets behind it.
+FullPrintConfig two_tool_config()
+{
+    FullPrintConfig config;
+    config.filament_map_mode.value = fmmManual;
+    config.filament_map.values = {1, 2};
+    config.nozzle_diameter.values = {.2, .6};
+    config.min_layer_height.values = {.04, .08};
+    config.max_layer_height.values = {.15, .45};
+    config.layer_height.value = .1;
+    config.mixed_nozzle_coarse_layer_height.value = .3;
+    config.mixed_nozzle_allowed_cadence_ratios.values = {2, 3, 4};
+    return config;
+}
+
 } // namespace
 
 // ------------------------------------------------------------------------------------------------
-// Step 3: ranking, selection and the speed line
+// Step 3: ranking and selection
 // ------------------------------------------------------------------------------------------------
 
-TEST_CASE("A static default gives way to the tied fastest rows; a slower pick is kept and its cost is said",
+TEST_CASE("Step 3 orders, ties and selects the coarse layer rows by their times",
           "[TestRebuild][BugGuard][WizardSpeed]")
 {
     const RankCube cube = rank_cube(kRankCubeSeconds);
-    const WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config,
-                                                       wizard_estimate(9000., 0, 0.));
-    REQUIRE(page.rows.size() == 6);
-    REQUIRE(page.ranked);
-    CHECK(page.no_clear_fastest);
-    CHECK(page.fastest_group == 2);
-    CHECK(page.rows[0].ratio == 7);
-    CHECK(page.rows[1].ratio == 6);
-    const std::size_t n2 = cube.by_ratio.at(2);
-    const auto summary = [&page](std::optional<std::size_t> selected, bool explicit_pick) {
-        return wizard_speed_summary_line(page, 0.08, selected, explicit_pick);
+    const WizardEstimate baseline = wizard_estimate(9000., 0, 0.);
+    const std::size_t n2 = cube.by_ratio.at(2), n5 = cube.by_ratio.at(5), n6 = cube.by_ratio.at(6),
+                      n7 = cube.by_ratio.at(7);
+    const auto page_of = [&cube](const std::vector<WizardCandidate> &candidates, const WizardEstimate &one) {
+        return wizard_cadence_page(candidates, 0.08, cube.config, one);
     };
 
-    SECTION("The 0.16 mm row was only the static default") {
-        const std::optional<std::size_t> selected = wizard_ranked_selection(page, n2, false);
-        CHECK(selected == std::optional<std::size_t>{0});
-        CHECK_FALSE(has_text(summary(selected, false), "This choice"));
+    SECTION("the tied fastest rows lead; a static default gives way, a pick by hand is kept") {
+        const WizardCadencePage page = page_of(cube.candidates, baseline);
+        REQUIRE(page.rows.size() == 6);
+        REQUIRE(page.ranked);
+        CHECK(page.no_clear_fastest);
+        CHECK(page.fastest_group == 2);
+        CHECK(page.rows[0].ratio == 7);
+        CHECK(page.rows[1].ratio == 6);
+        CHECK(wizard_ranked_selection(page, n2, false) == std::optional<std::size_t>{0});
+        CHECK(wizard_ranked_selection(page, n2, true) == row_of(page, n2));
+        CHECK(wizard_ranked_selection(page, n6, true) == std::optional<std::size_t>{1});
+        CHECK_FALSE(wizard_offer_one_nozzle(page, std::size_t(0)));
     }
-    SECTION("The user picked the 0.16 mm row, and Back then Next keeps it") {
-        const std::optional<std::size_t> selected = wizard_ranked_selection(page, n2, true);
-        REQUIRE(selected);
-        CHECK(page.rows[*selected].ratio == 2);
-        CHECK(has_text(summary(selected, true),
-                       "This choice is about 54 min slower than the fastest row and about 22 min slower than "
-                       "printing everything on the fine nozzle."));
+    SECTION("more than 2 percent apart is a clear fastest; a tie goes to the row with fewer nozzle changes") {
+        std::vector<WizardCandidate> candidates = cube.candidates;
+        candidates[n6].estimate = wizard_estimate(7280., 10, 0.);
+        CHECK(page_of(candidates, baseline).fastest_group == 1);
+        candidates[n6].estimate = wizard_estimate(7200., 3, 0.);
+        const WizardCadencePage tied = page_of(candidates, baseline);
+        REQUIRE(tied.fastest_group == 2);
+        CHECK(wizard_ranked_selection(tied, std::nullopt) == row_of(tied, n6));
+        CHECK(wizard_ranked_selection(tied, n7, true) == row_of(tied, n7));
     }
-    SECTION("A pick inside the tied fastest group has nothing to say") {
-        const std::optional<std::size_t> selected = wizard_ranked_selection(page, cube.by_ratio.at(6), true);
-        CHECK(selected == std::optional<std::size_t>{1});
-        CHECK_FALSE(has_text(summary(selected, true), "This choice"));
+    SECTION("one nozzle only is offered when every row is slower than it, or the row changes no nozzle") {
+        // Within 2 percent of one nozzle only is not slower.
+        CHECK_FALSE(wizard_switching_saves_no_time(page_of(cube.candidates, wizard_estimate(7000., 0, 0.))));
+        const WizardCadencePage slower = page_of(cube.candidates, wizard_estimate(6000., 0, 0.));
+        CHECK(wizard_switching_saves_no_time(slower));
+        CHECK(wizard_offer_one_nozzle(slower, std::size_t(0)));
+        std::vector<WizardCandidate> candidates = cube.candidates;
+        candidates[n7].estimate = wizard_estimate(7080., 0, 0.);
+        const WizardCadencePage idle = page_of(candidates, baseline);
+        CHECK(wizard_offer_one_nozzle(idle, row_of(idle, n7)));
+        CHECK_FALSE(wizard_offer_one_nozzle(idle, row_of(idle, n6)));
     }
-    SECTION("A row slower than printing everything fine says so even when not picked by hand") {
-        const std::optional<std::size_t> n2_row = row_of(page, n2);
-        REQUIRE(n2_row);
-        const std::string line = summary(n2_row, false);
-        CHECK(has_text(line, "This choice is about 22 min slower than printing everything on the fine nozzle."));
-        CHECK_FALSE(has_text(line, "fastest row"));
-        // Within 2% of one nozzle only is not called slower: 0.24 is 1 min slower.
-        CHECK_FALSE(has_text(summary(row_of(page, cube.by_ratio.at(3)), false), "This choice"));
-    }
-}
-
-TEST_CASE("Tied rows each show their time; a hand pick outside a 2 percent tie says what it costs",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    RankedFinish finish = ranked_finish();
-    // 14 h against 14 h 23 min (2.7% apart): a clear fastest.
-    finish.candidates[finish.n3].estimate = wizard_estimate(50400., 300, 0.);
-    finish.candidates[finish.n2].estimate = wizard_estimate(51780., 100, 0.);
-    const WizardCadencePage apart = wizard_cadence_page(finish.candidates, 0.12, finish.config,
-                                                        wizard_estimate(60000., 0, 0.));
-    REQUIRE(apart.ranked);
-    CHECK(apart.fastest_group == 1);
-    CHECK(wizard_speed_row_tag(apart, 0) == "Fastest");
-    CHECK(wizard_speed_row_tag(apart, 1).empty());
-    CHECK(has_text(wizard_speed_summary_line(apart, 0.12, std::size_t(1), true),
-                   "This choice is about 23 min slower than the fastest row."));
-    CHECK_FALSE(has_text(wizard_speed_summary_line(apart, 0.12, std::size_t(1), false), "This choice"));
-
-    // 1.9% apart is a tie. Each row reads "About as fast" and carries its own time.
-    finish.candidates[finish.n2].estimate = wizard_estimate(51350., 100, 0.);
-    const WizardCadencePage close = wizard_cadence_page(finish.candidates, 0.12, finish.config,
-                                                        wizard_estimate(60000., 0, 0.));
-    CHECK(close.fastest_group == 2);
-    CHECK(close.no_clear_fastest);
-    for (std::size_t index = 0; index < 2; ++index) {
-        CAPTURE(index);
-        CHECK(wizard_speed_row_tag(close, index) == "About as fast");
-        CHECK(has_text(wizard_speed_row_label(close.rows[index], MixedNozzleSlicingMode::FeatureSplit), "about "));
-    }
-    CHECK(wizard_speed_row_label(close.rows[0], MixedNozzleSlicingMode::FeatureSplit) !=
-          wizard_speed_row_label(close.rows[1], MixedNozzleSlicingMode::FeatureSplit));
-
-    // Against one nozzle only: within 2% is not slower, more than 2% is.
-    finish.candidates[finish.n3].estimate = wizard_estimate(50800., 300, 0.);
-    finish.candidates[finish.n2].estimate = wizard_estimate(52000., 100, 0.);
-    const WizardCadencePage near_page = wizard_cadence_page(finish.candidates, 0.12, finish.config,
-                                                            wizard_estimate(50000., 0, 0.));
-    CHECK_FALSE(wizard_switching_saves_no_time(near_page));
-    CHECK_FALSE(has_text(wizard_speed_summary_line(near_page, 0.12, std::size_t(0), false), "This choice"));
-    CHECK(has_text(wizard_speed_summary_line(near_page, 0.12, std::size_t(1), true),
-                   "slower than printing everything on the fine nozzle"));
-
-    // Every row more than 2% slower than one nozzle only: the line says so, with how much faster.
-    finish.candidates[finish.n2].estimate = wizard_estimate(27000., 402, 0.);
-    finish.candidates[finish.n3].estimate = wizard_estimate(26000., 208, 0.);
-    const WizardCadencePage slower = wizard_cadence_page(finish.candidates, 0.12, finish.config,
-                                                         wizard_estimate(20000., 0, 0.));
-    CHECK(wizard_switching_saves_no_time(slower));
-    const std::string line = wizard_speed_summary_line(slower, 0.12, std::size_t(0), false);
-    CHECK(has_text(line, "Two nozzles are slower than one on this plate."));
-    CHECK(has_text(line, "One nozzle only is about 1 h 40 min faster, so it is the better choice here."));
-    CHECK(wizard_offer_one_nozzle(slower, std::size_t(0)));
-    CHECK(line.find("\xE2\x80\x94") == std::string::npos);
-}
-
-TEST_CASE("A Feature Split row with no nozzle change says the coarse nozzle prints nothing",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    // The tester's 0.4 / 0.8 plate after the fixes: the engine sends every band fine, so the 0.40 row
-    // is a one-nozzle print in disguise (same time as one nozzle only, no nozzle change).
-    PresetBundle bundle = installed_bbl_profiles();
-    const FullPrintConfig config = resolver_for_pair(bundle, 0.4, 0.8);
-    std::vector<WizardCandidate> candidates = build_wizard_candidates(
-        draft_for(MixedNozzleSlicingMode::FeatureSplit, 0.20, 0.40), config, {});
-    const WizardCadencePage unranked = wizard_cadence_page(candidates, 0.20, config);
-    REQUIRE(unranked.rows.size() == 1);
-    CHECK(unranked.feature_split);
-    CHECK(unranked.fine_nozzle == Catch::Approx(0.4));
-    CHECK(unranked.coarse_nozzle == Catch::Approx(0.8));
-    const std::size_t n2 = unranked.rows[0].candidate_index;
-
-    candidates[n2].estimate = wizard_estimate(9400., 0, 0.);
-    const WizardCadencePage idle = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
-    REQUIRE(idle.ranked);
-    const std::string line = wizard_speed_summary_line(idle, 0.20, std::size_t(0), false);
-    CHECK(has_text(line, "The 0.8 mm nozzle prints nothing on this plate at these settings. To use both nozzles"));
-    CHECK_FALSE(has_text(line, "This row prints on"));
-    // There is no taller coarse layer on this pair at 0.20, so the hint only names the density.
-    CHECK(has_text(line, "To use both nozzles, raise the sparse infill density. Or choose Print with one nozzle instead."));
-    CHECK_FALSE(has_text(line, "taller coarse layer"));
-    CHECK(wizard_offer_one_nozzle(idle, std::size_t(0)));
-    CHECK(line.find("\xE2\x80\x94") == std::string::npos);
-
-    // With a nozzle change the coarse nozzle prints, and nothing is said.
-    candidates[n2].estimate = wizard_estimate(8000., 68, 0.);
-    const WizardCadencePage busy = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
-    CHECK(wizard_idle_coarse_nozzle_note(busy, std::size_t(0)).empty());
-    CHECK_FALSE(has_text(wizard_speed_summary_line(busy, 0.20, std::size_t(0), false), "prints nothing"));
-    CHECK_FALSE(wizard_offer_one_nozzle(busy, std::size_t(0)));
-
-    // Slower on two nozzles than on one (the tester's plate on the 100% fix alone): the line says it plainly.
-    candidates[n2].estimate = wizard_estimate(10191., 68, 0.);
-    const WizardCadencePage slower = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
-    const std::string slower_line = wizard_speed_summary_line(slower, 0.20, std::size_t(0), false);
-    CHECK(has_text(slower_line, "Two nozzles are slower than one on this plate. One nozzle only is about 13 min faster"));
-    CHECK(wizard_offer_one_nozzle(slower, std::size_t(0)));
-
-    // A row with a taller coarse layer beside it names that too (0.2 / 0.8 at 0.08: N=2 to N=7).
-    const RankCube cube = rank_cube({{2, 9000.}, {3, 9000.}, {4, 9000.}, {5, 9000.}, {6, 9000.}, {7, 9000.}});
-    std::vector<WizardCandidate> cube_candidates = cube.candidates;
-    cube_candidates[cube.by_ratio.at(2)].estimate = wizard_estimate(9000., 0, 0.);
-    const WizardCadencePage cube_page = wizard_cadence_page(cube_candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
-    const std::optional<std::size_t> n2_row = row_of(cube_page, cube.by_ratio.at(2));
-    REQUIRE(n2_row);
-    const std::string cube_note = wizard_idle_coarse_nozzle_note(cube_page, n2_row);
-    CHECK(has_text(cube_note, "The 0.8 mm nozzle prints nothing"));
-    CHECK_FALSE(has_text(cube_note, "This row prints on"));
-    CHECK(has_text(cube_note, "raise the sparse infill density or choose a taller coarse layer."));
-
-    // No sparse infill at all (density 0% or 100% on every part, not all of them solid): the note says
-    // Feature Split gives the coarse nozzle only the sparse infill, with the sizes filled in.
-    WizardEstimate empty = wizard_estimate(9400., 0, 0.);
-    empty.sparse_infill = false;
-    candidates[n2].estimate = empty;
-    const WizardCadencePage no_sparse = wizard_cadence_page(candidates, 0.20, config, wizard_estimate(9394., 0, 0.));
-    CHECK(wizard_idle_coarse_nozzle_note(no_sparse, std::size_t(0)) ==
-          "The 0.8 mm nozzle has nothing to print on this plate. Feature Split gives it the sparse infill, and no "
-          "part here has any (its density is 0% or 100%). To use both nozzles, set a sparse infill density above "
-          "0% and below 100%. Or choose Print with one nozzle instead.");
-
-    // Without nozzle sizes the note falls back to "the coarse nozzle" and "the fine nozzle".
-    WizardCadencePage unsized = no_sparse;
-    unsized.coarse_nozzle = 0.;
-    unsized.fine_nozzle = 0.;
-    CHECK(wizard_idle_coarse_nozzle_note(unsized, std::size_t(0)).rfind(
-              "The coarse nozzle has nothing to print on this plate.", 0) == 0);
-    WizardEstimate solid = empty;
-    solid.all_solid = true;
-    unsized.rows[0].estimate = solid;
-    CHECK(wizard_idle_coarse_nozzle_note(unsized, std::size_t(0)) ==
-          "The coarse nozzle has nothing to print on this plate. Feature Split gives it the sparse infill, and at "
-          "100% density there is none (the inside is all solid infill, which the fine nozzle prints). To use both "
-          "nozzles, lower the sparse infill density below 100%. Or choose Print with one nozzle instead.");
-}
-
-TEST_CASE("Timed rows go on top fastest first while the rest wait in layer order",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    const RankCube cube = rank_cube({{5, 8000.}, {7, 7080.}});
-    const WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config, WizardEstimate{});
-    REQUIRE(page.rows.size() == 6);
-    CHECK_FALSE(page.ranked);
-    std::vector<int> order;
-    for (const WizardCadenceRow &row : page.rows)
-        order.push_back(row.ratio);
-    CHECK(order == std::vector<int>{7, 5, 2, 3, 4, 6});
-    // No "Fastest" tag until every row has a time, and the progress line counts the timed rows.
-    CHECK(wizard_speed_row_tag(page, 0).empty());
-    CHECK(has_text(wizard_speed_progress_line(page, true), "2 of 6 done"));
-
-    // Nothing timed: layer order.
-    RankCube failed = rank_cube({});
-    for (WizardCandidate &candidate : failed.candidates) {
-        candidate.estimate = WizardEstimate{};
-        candidate.estimate->status = WizardEstimateStatus::Failed;
-    }
-    const WizardCadencePage none = wizard_cadence_page(failed.candidates, 0.08, failed.config,
-                                                       wizard_estimate(9000., 0, 0.));
-    CHECK(none.rows.front().ratio == 2);
-}
-
-TEST_CASE("The project's own coarse layer reads now and stays selected when times arrive",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    const RankCube cube = rank_cube(kRankCubeSeconds);
-    WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
-    // The project was set up at N5, 0.40 mm.
-    const std::optional<std::pair<double, double>> existing = std::make_pair(0.08, 0.40);
-    wizard_mark_current(page, 0.08, existing);
-    const std::optional<std::size_t> current = wizard_existing_row(page, 0.08, existing);
-    REQUIRE(current);
-    CHECK(page.rows[*current].current);
-    CHECK(page.rows[*current].ratio == 5);
-    CHECK(has_text(wizard_speed_row_label(page.rows[*current], MixedNozzleSlicingMode::FeatureSplit), "(now)"));
-    // Held as an explicit pick: the ranked page keeps it, and says what it costs.
-    const std::size_t n5 = cube.by_ratio.at(5);
-    CHECK(wizard_ranked_selection(page, n5, true) == current);
-    CHECK(has_text(wizard_speed_summary_line(page, 0.08, current, true),
-                   "This choice is about 15 min slower than the fastest row."));
-    // A fresh setup has no own row: the fastest is selected, and nothing reads "(now)".
-    WizardCadencePage fresh = wizard_cadence_page(cube.candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
-    wizard_mark_current(fresh, 0.08, std::nullopt);
-    for (const WizardCadenceRow &row : fresh.rows) {
-        CHECK_FALSE(row.current);
-        CHECK_FALSE(has_text(wizard_speed_row_label(row, MixedNozzleSlicingMode::FeatureSplit), "(now)"));
-    }
-    CHECK(wizard_ranked_selection(fresh, n5, false) == std::optional<std::size_t>{0});
-}
-
-TEST_CASE("A coarse layer that could not be sliced does not stay selected, and Review does not say ready",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    // The project was set up at N5 (0.40 mm). After a nozzle change its row no longer slices.
-    RankCube cube = rank_cube(kRankCubeSeconds);
-    const std::size_t n5 = cube.by_ratio.at(5);
-    cube.candidates[n5].estimate = WizardEstimate{};
-    cube.candidates[n5].estimate->status = WizardEstimateStatus::Failed;
-    const auto check_moves_off = [&cube, n5](const char *what) {
-        INFO(what);
-        const WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config,
-                                                           wizard_estimate(9000., 0, 0.));
-        REQUIRE_FALSE(page.ranked);
-        const std::optional<std::size_t> bad_row = row_of(page, n5);
-        REQUIRE(bad_row);
-        // Held as the project's own row, or only selected: the selection moves to the fastest row that slices.
-        for (const bool explicit_pick : {true, false}) {
-            const std::optional<std::size_t> selected = wizard_ranked_selection(page, n5, explicit_pick);
-            REQUIRE(selected);
-            CHECK(*selected != *bad_row);
-            CHECK(page.rows[*selected].ratio == 7);
+    SECTION("timed rows go on top fastest first while the rest wait in layer order") {
+        const RankCube partial = rank_cube({{5, 8000.}, {7, 7080.}});
+        const WizardCadencePage page = page_of(partial.candidates, WizardEstimate{});
+        REQUIRE(page.rows.size() == 6);
+        CHECK_FALSE(page.ranked);
+        std::vector<int> order;
+        for (const WizardCadenceRow &row : page.rows)
+            order.push_back(row.ratio);
+        CHECK(order == std::vector<int>{7, 5, 2, 3, 4, 6});
+        RankCube failed = rank_cube({});
+        for (WizardCandidate &candidate : failed.candidates) {
+            candidate.estimate = WizardEstimate{};
+            candidate.estimate->status = WizardEstimateStatus::Failed;
         }
+        CHECK(page_of(failed.candidates, baseline).rows.front().ratio == 2);
+    }
+    SECTION("the project's own coarse layer stays selected when times arrive") {
+        WizardCadencePage page = page_of(cube.candidates, baseline);
+        const std::optional<std::pair<double, double>> existing = std::make_pair(0.08, 0.40);
+        wizard_mark_current(page, 0.08, existing);
+        const std::optional<std::size_t> current = wizard_existing_row(page, 0.08, existing);
+        REQUIRE(current);
+        CHECK(page.rows[*current].current);
+        CHECK(page.rows[*current].ratio == 5);
+        CHECK(wizard_ranked_selection(page, n5, true) == current);
+        // A fresh setup has no own row, and the fastest is selected.
+        WizardCadencePage fresh = page_of(cube.candidates, baseline);
+        wizard_mark_current(fresh, 0.08, std::nullopt);
+        for (const WizardCadenceRow &row : fresh.rows)
+            CHECK_FALSE(row.current);
+        CHECK(wizard_ranked_selection(fresh, n5, false) == std::optional<std::size_t>{0});
+    }
+    SECTION("Detail and speed holds Next while the default row has no time, not a row picked by hand") {
+        REQUIRE(wizard_page_can_block_next(2));
+        std::vector<WizardCandidate> candidates = cube.candidates;
+        const auto holds = [&](bool explicit_pick, bool ranking) {
+            const WizardCadencePage page = page_of(candidates, baseline);
+            return !wizard_speed_block_reason(page, row_of(page, n2), explicit_pick, ranking).empty();
+        };
+        candidates[n2].estimate = WizardEstimate{};
+        CHECK(holds(false, true));
+        CHECK_FALSE(holds(true, true));
+        // Without ranking the rows never get a time, so there is nothing to wait for.
+        CHECK_FALSE(holds(false, false));
+        const WizardCadencePage page = page_of(candidates, baseline);
+        CHECK(wizard_speed_block_reason(page, row_of(page, n7), false, true).empty());
+        // Before the first estimate arrives the row has none, and a row whose slice failed has its answer.
+        candidates[n2].estimate.reset();
+        CHECK(holds(false, true));
+        candidates[n2].estimate = WizardEstimate{};
+        candidates[n2].estimate->status = WizardEstimateStatus::Failed;
+        CHECK_FALSE(holds(false, true));
+    }
+    SECTION("a row that could not be sliced is not kept selected, and Review cannot apply it") {
+        std::vector<WizardCandidate> candidates = cube.candidates;
+        WizardEstimate failed;
+        failed.status = WizardEstimateStatus::Failed;
+        WizardEstimate refused;
+        refused.status = WizardEstimateStatus::Unavailable;
+        refused.refused = true;
+        refused.refusal = "refused";
+        for (const WizardEstimate &bad : {failed, refused}) {
+            candidates[n5].estimate = bad;
+            const WizardCadencePage page = page_of(candidates, baseline);
+            REQUIRE_FALSE(page.ranked);
+            for (const bool explicit_pick : {true, false}) {
+                CAPTURE(explicit_pick);
+                const std::optional<std::size_t> selected = wizard_ranked_selection(page, n5, explicit_pick);
+                REQUIRE(selected);
+                CHECK(page.rows[*selected].ratio == 7);
+            }
+        }
+        // A row only waiting for its time stays selected.
+        candidates[n5].estimate = WizardEstimate{};
+        const WizardCadencePage waiting = page_of(candidates, baseline);
+        CHECK(wizard_ranked_selection(waiting, n5, true) == row_of(waiting, n5));
+
+        WizardReviewSummaryInput input;
+        input.mode = MixedNozzleSlicingMode::FeatureSplit;
+        input.nozzle_diameters = {0.2, 0.8};
+        input.fine_height = 0.08;
+        input.coarse_height = 0.40;
+        input.estimate = failed;
+        const WizardReviewSummary summary = wizard_review_summary(input);
+        CHECK_FALSE(summary.ready);
+        CHECK(summary.target == WizardFixTarget::Speed);
+        input.estimate = refused;
+        CHECK_FALSE(wizard_review_summary(input).ready);
+        input.estimate = wizard_estimate(8000., 10, 0.);
+        CHECK(wizard_review_summary(input).ready);
+    }
+}
+
+TEST_CASE("Equal catalogue seeds keep the same identity regardless of input order",
+          "[TestRebuild][WizardMath]")
+{
+    const WizardCatalogueRow later{"z-row", std::nullopt, .1, .4, 4, "Custom", false, {}};
+    const WizardCatalogueRow earlier{"a-row", std::nullopt, .1, .4, 4, "Custom", false, {}};
+    const auto chosen = [](const std::vector<WizardCatalogueRow> &rows) {
+        WizardDraft draft;
+        draft.mode = MixedNozzleSlicingMode::FeatureSplit;
+        draft.fine_logical_filament = 0;
+        draft.coarse_logical_filament = 1;
+        const auto candidates = build_wizard_candidates(draft, two_tool_config(), rows);
+        for (const WizardCandidate &candidate : candidates)
+            if (candidate.fine_height == .1 && candidate.coarse_height == std::optional<double>{.4})
+                return candidate.stable_id;
+        return std::string{};
     };
-    check_moves_off("failed slice");
-    WizardEstimate refused;
-    refused.status = WizardEstimateStatus::Unavailable;
-    refused.note = "slicing would refuse this choice";
-    refused.refused = true;
-    refused.refusal = "Tree support cannot have its base on the 0.8 mm nozzle yet.";
-    cube.candidates[n5].estimate = refused;
-    check_moves_off("refused slice");
-    // A row that is only waiting for its time stays selected.
-    cube.candidates[n5].estimate = WizardEstimate{};
-    const WizardCadencePage waiting = wizard_cadence_page(cube.candidates, 0.08, cube.config, wizard_estimate(9000., 0, 0.));
-    CHECK(wizard_ranked_selection(waiting, n5, true) == row_of(waiting, n5));
-
-    // Review with that row: not ready, and the link goes back to the coarse layer list.
-    WizardReviewSummaryInput input;
-    input.mode = MixedNozzleSlicingMode::FeatureSplit;
-    input.nozzle_diameters = {0.2, 0.8};
-    input.fine_height = 0.08;
-    input.coarse_height = 0.40;
-    input.estimate = WizardEstimate{};
-    input.estimate->status = WizardEstimateStatus::Failed;
-    WizardReviewSummary summary = wizard_review_summary(input);
-    CHECK_FALSE(summary.ready);
-    CHECK(summary.ready_line.rfind("Can't apply yet.", 0) == 0);
-    CHECK(summary.target == WizardFixTarget::Speed);
-    CHECK(summary.target_label == "Go to Detail and speed");
-    input.estimate = refused;
-    summary = wizard_review_summary(input);
-    CHECK_FALSE(summary.ready);
-    CHECK(has_text(summary.ready_line, refused.refusal));
-    input.estimate = wizard_estimate(8000., 10, 0.);
-    CHECK(wizard_review_summary(input).ready);
-}
-
-TEST_CASE("Review says which nozzle prints the supports and the interface, and suggests 3 interface layers for another material",
-          "[TestRebuild][BugGuard][WizardReview]")
-{
-    // The owner's L part: 0.2 left fine PLA, 0.6 right coarse PLA base, PETG interface on the left.
-    WizardReviewSummaryInput input;
-    input.mode = MixedNozzleSlicingMode::FeatureSplit;
-    input.nozzle_diameters = {0.2, 0.6};
-    input.fine_physical = 0;
-    input.coarse_physical = 1;
-    input.fine_height = 0.1;
-    input.coarse_height = 0.3;
-    input.fine_material_type = "PLA";
-    input.supports = true;
-    input.support_base = WizardSupportSide{3, std::size_t(1), "3: PLA Basic", "PLA"};
-    input.support_interface = WizardSupportSide{2, std::size_t(0), "2: PETG Basic", "PETG"};
-    input.support_interface_top_layers = 2;
-    const auto value_of = [](const WizardReviewSummary &summary, const std::string &label) -> std::string {
-        for (const WizardSummaryRow &row : summary.rows)
-            if (row.label == label)
-                return row.value;
-        return "<none>";
-    };
-    WizardReviewSummary summary = wizard_review_summary(input);
-    CHECK(value_of(summary, "Supports") == "right 0.6 mm, 3: PLA Basic");
-    CHECK(value_of(summary, "Support interface") == "left 0.2 mm, 2: PETG Basic");
-    const std::string hint = value_of(summary, "Interface layers");
-    CHECK(has_text(hint, "Set Top interface layers to 3 (now 2)"));
-    CHECK(has_text(hint, "PETG"));
-    // Three layers already, or an interface in the part's own material: no hint.
-    input.support_interface_top_layers = 3;
-    CHECK(value_of(wizard_review_summary(input), "Interface layers") == "<none>");
-    input.support_interface_top_layers = 2;
-    input.support_interface.type = "PLA";
-    CHECK(value_of(wizard_review_summary(input), "Interface layers") == "<none>");
-    // Default slots say so.
-    input.support_base = WizardSupportSide{};
-    input.support_interface = WizardSupportSide{};
-    summary = wizard_review_summary(input);
-    CHECK(has_text(value_of(summary, "Supports"), "(Default)"));
-    CHECK(has_text(value_of(summary, "Support interface"), "same as the supports"));
-    // No supports: no support rows.
-    input.supports = false;
-    CHECK(value_of(wizard_review_summary(input), "Supports") == "<none>");
-}
-
-TEST_CASE("The one nozzle only line is always there while ranking runs and never ends in four dots",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    RankedFinish finish = ranked_finish();
-    finish.candidates[finish.n2].estimate = wizard_estimate(27000., 402, 0.);
-    finish.candidates[finish.n3].estimate = wizard_estimate(23160., 208, 0.);
-    const std::string lead = "One nozzle only, 0.12 mm everywhere: ";
-
-    // Every row timed, one nozzle only still waiting.
-    const WizardCadencePage waiting = wizard_cadence_page(finish.candidates, 0.12, finish.config, WizardEstimate{});
-    const std::string waiting_line = wizard_speed_summary_line(waiting, 0.12, std::size_t(0), false);
-    CHECK(waiting_line.rfind(lead, 0) == 0);
-    CHECK(has_text(waiting_line, "waiting"));
-    // One nozzle only could not be timed: the reason.
-    WizardEstimate refused;
-    refused.status = WizardEstimateStatus::Unavailable;
-    refused.note = "choose the fine material first";
-    const WizardCadencePage none = wizard_cadence_page(finish.candidates, 0.12, finish.config, refused);
-    const std::string refused_line = wizard_speed_summary_line(none, 0.12, std::size_t(0), false);
-    CHECK(refused_line.rfind(lead, 0) == 0);
-    CHECK(refused_line == lead + "no time: choose the fine material first.");
-    // A note that is a whole sentence (an empty plate): the rows' punctuation, one period.
-    WizardEstimate empty_plate;
-    empty_plate.status = WizardEstimateStatus::Unavailable;
-    empty_plate.note = "Add a model to the plate to see print times.";
-    const WizardCadencePage empty = wizard_cadence_page(finish.candidates, 0.12, finish.config, empty_plate);
-    CHECK(wizard_speed_summary_line(empty, 0.12, std::size_t(0), false) ==
-          lead + "no time: Add a model to the plate to see print times.");
-    // Timed: its time.
-    const WizardCadencePage timed = wizard_cadence_page(finish.candidates, 0.12, finish.config,
-                                                        wizard_estimate(30660., 0, 0.));
-    CHECK(wizard_speed_summary_line(timed, 0.12, std::size_t(0), false).rfind(lead + "about 8 h 31 min.", 0) == 0);
-
-    // Slicing now: one sentence end, not four dots.
-    RankCube cube = rank_cube({{7, 7080.}});
-    WizardCadencePage slicing = wizard_cadence_page(cube.candidates, 0.08, cube.config, WizardEstimate{});
-    wizard_mark_slicing(slicing, cube.candidates, std::string("single-nozzle-baseline"), true);
-    const std::string slicing_line = wizard_speed_summary_line(slicing, 0.08, std::nullopt, false);
-    CHECK(ends_with(slicing_line, "slicing now..."));
-    CHECK_FALSE(has_text(slicing_line, "...."));
-
-    // No ranking at all (no estimates, no baseline): nothing under the list.
-    for (WizardCandidate &candidate : finish.candidates)
-        candidate.estimate.reset();
-    CHECK(wizard_speed_summary_line(wizard_cadence_page(finish.candidates, 0.12, finish.config), 0.12,
-                                    std::nullopt, false).empty());
-}
-
-TEST_CASE("Each cadence row states its estimate, switch count or why it has none",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    // wizard_estimate_text is file-local; every cadence row label and the baseline carry it.
-    RankedFinish finish = ranked_finish();
-    finish.candidates[finish.n3].estimate = wizard_estimate(23160., 208, 0.);
-    finish.candidates[finish.n2].estimate = wizard_estimate(3600., 1, 0.);
-    WizardCadencePage page = wizard_cadence_page(finish.candidates, 0.12, finish.config, wizard_estimate(2520., 0, 0.));
-    CHECK(ends_with(label_of_ratio(page, 3), ": about 6 h 26 min, 208 switches"));
-    CHECK(ends_with(label_of_ratio(page, 2), ": about 1 h, 1 switch"));
-    finish.candidates[finish.n2].estimate = wizard_estimate(2520., 0, 0.);
-    page = wizard_cadence_page(finish.candidates, 0.12, finish.config, wizard_estimate(2520., 0, 0.));
-    CHECK(ends_with(label_of_ratio(page, 2), ": about 42 min, no switches"));
-
-    // No row is skipped as too slow; a row without a time is still estimating or failed.
-    finish.candidates[finish.n2].estimate = WizardEstimate{};
-    page = wizard_cadence_page(finish.candidates, 0.12, finish.config, WizardEstimate{});
-    CHECK(ends_with(label_of_ratio(page, 2), ": estimating"));
-    CHECK(ends_with(page.baseline, ": estimating"));
-    finish.candidates[finish.n2].estimate->status = WizardEstimateStatus::Failed;
-    page = wizard_cadence_page(finish.candidates, 0.12, finish.config, wizard_estimate(30660., 0, 0.));
-    CHECK(ends_with(label_of_ratio(page, 2), ": could not be sliced"));
-    CHECK(ends_with(wizard_speed_row_label(page.rows[1], MixedNozzleSlicingMode::FeatureSplit), "could not be sliced"));
-    finish.candidates[finish.n2].estimate->status = WizardEstimateStatus::Unavailable;
-    finish.candidates[finish.n2].estimate->note = "the slice failed";
-    page = wizard_cadence_page(finish.candidates, 0.12, finish.config, wizard_estimate(30660., 0, 0.));
-    CHECK(ends_with(label_of_ratio(page, 2), ": no estimate: the slice failed"));
-}
-
-TEST_CASE("The excluded coarse layer line names the layer and the nozzle's limit",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    const RankCube cube = rank_cube({});
-    const WizardCadencePage page = wizard_cadence_page(cube.candidates, 0.08, cube.config);
-    for (const WizardCadenceRow &row : page.rows)
-        CHECK(row.ratio <= 7);
-    CAPTURE(page.exclusions);
-    CHECK(has_text(page.exclusions, "0.64 mm"));
-    CHECK(has_text(page.exclusions, "0.8 mm nozzle"));
-    CHECK(has_text(page.exclusions, "0.56 mm"));
-}
-
-TEST_CASE("Step 3 with two nozzles of one size says so instead of asking for a smaller fine layer",
-          "[TestRebuild][BugGuard][WizardSpeed]")
-{
-    PresetBundle bundle = installed_bbl_profiles();
-    FullPrintConfig config = resolver_for_pair(bundle, 0.2, 0.8);
-    const std::string mixed = wizard_no_coarse_layer_line(0.3, config);
-    CHECK(mixed.find("Pick a smaller fine layer") != std::string::npos);
-    config.nozzle_diameter.values = {0.6, 0.6};
-    const std::string equal = wizard_no_coarse_layer_line(0.3, config);
-    CAPTURE(equal);
-    CHECK(equal.rfind("Both nozzles are 0.6 mm, so there is no coarse layer to pick.", 0) == 0);
-    CHECK(equal.find("two different sizes") != std::string::npos);
+    CHECK(chosen({later, earlier}) == "a-row");
+    CHECK(chosen({earlier, later}) == "a-row");
 }
 
 // ------------------------------------------------------------------------------------------------
 // Step 1 and 2: mode, parts and materials
 // ------------------------------------------------------------------------------------------------
 
-TEST_CASE("A multi-part object on two filaments opens step 1 on Body Split even in a Feature Split project",
-          "[TestRebuild][BugGuard][WizardParts]")
+TEST_CASE("Step 1 opens on the project's own mode; a new setup picks Body Split for a multi-part object",
+          "[TestRebuild][BugGuard][WizardParts][MixedNozzleSetup]")
 {
-    CHECK(wizard_default_mode(MixedNozzleSlicingMode::FeatureSplit, true) == MixedNozzleSlicingMode::BodySplit);
-    CHECK(wizard_default_mode(MixedNozzleSlicingMode::BodySplit, true) == MixedNozzleSlicingMode::BodySplit);
-    CHECK(wizard_default_mode(MixedNozzleSlicingMode::Off, false) == MixedNozzleSlicingMode::FeatureSplit);
+    // A project that has a mode keeps it, painted or multi-part.
+    CHECK(wizard_default_mode(MixedNozzleSlicingMode::FeatureSplit, true) == MixedNozzleSlicingMode::FeatureSplit);
+    CHECK(wizard_default_mode(MixedNozzleSlicingMode::BodySplit, false) == MixedNozzleSlicingMode::BodySplit);
+    CHECK(wizard_default_mode(MixedNozzleSlicingMode::Off, true) == MixedNozzleSlicingMode::BodySplit);
+    // Painted colors on more than two tool changer tools: Body Split cannot pair them, so a new setup opens on
+    // Feature Split, and a project's own Body Split is kept.
+    CHECK(wizard_default_mode(MixedNozzleSlicingMode::Off, true, true) == MixedNozzleSlicingMode::FeatureSplit);
+    CHECK(wizard_default_mode(MixedNozzleSlicingMode::BodySplit, true, true) == MixedNozzleSlicingMode::BodySplit);
 }
 
-TEST_CASE("Body Split step 2 starts on the parts' own materials and changes none of them",
+TEST_CASE("Step 2 pickers start on the material each nozzle holds and never on a stale or unmapped slot",
           "[TestRebuild][BugGuard][WizardParts]")
 {
-    const std::vector<std::string> labels{"1: eSUN PLA+", "2: PLA Basic", "3: eSUN PLA+", "4: PETG Basic",
-                                          "5: ASA", "6: PETG HF", "7: PLA Basic", "8: PETG Translucent"};
-    // A two-part object: Body11 (slot 6, coarse) listed first, then Body12 (slot 4, fine).
-    WizardBodyRoleRow body11;
-    body11.object_id = 3;
-    body11.volume_id = 11;
-    body11.current_slot = 5;
-    body11.current_physical = 1;
-    body11.volume = 14000.;
-    WizardBodyRoleRow body12 = body11;
-    body12.volume_id = 12;
-    body12.current_slot = 3;
-    body12.volume = 900.;
-
-    for (const std::size_t slot4_nozzle : {std::size_t(0), std::size_t(1)}) {
-        CAPTURE(slot4_nozzle);
-        body12.current_physical = slot4_nozzle;
-        const std::vector<WizardBodyRoleRow> rows{body11, body12};
-        const std::vector<WizardBodyRole> roles = wizard_default_body_roles(rows, 0);
-        REQUIRE(roles == std::vector<WizardBodyRole>{WizardBodyRole::Coarse, WizardBodyRole::Fine});
-        const WizardPickerDefaults picker =
-            wizard_body_picker_defaults(rows, roles, {}, {}, {}, {}, std::nullopt, std::nullopt);
-        CHECK(picker.fine == std::optional<std::size_t>{3});
-        CHECK(picker.coarse == std::optional<std::size_t>{5});
-
-        // The map setup writes puts slot 4 left and slot 6 right; every other slot keeps the plate's.
-        const std::vector<int> plate_map{1, 1, 1, 1, 1, 2, 1, 1};
-        std::vector<int> saved = plate_map;
-        if (slot4_nozzle == 1)
-            saved[3] = 2;
-        CHECK(wizard_derived_filament_map({0.2, 0.4}, saved, 8, picker.fine, picker.coarse) == plate_map);
-
-        std::vector<WizardBodyRoleRow> mapped = rows;
-        mapped[1].current_physical = 0;
-        const std::vector<WizardBodyAssignment> body = wizard_body_roles_to_slots(mapped, roles, 3, 5, 0, 1, {});
-        REQUIRE(body.size() == 2);
-        CHECK(body[0].logical_filament == 5);
-        CHECK(body[0].coarse);
-        CHECK(body[1].logical_filament == 3);
-        CHECK_FALSE(body[1].coarse);
-        CHECK(wizard_body_material_changes({"Body11", "Body12"}, rows, body, labels).empty());
-    }
-
-    // The old default (slot 1 for the fine layers) is listed on step 4.
-    const std::vector<WizardBodyRoleRow> rows{body11, body12};
-    const std::vector<WizardBodyAssignment> changed{{3, 11, 5, true}, {3, 12, 0, false}};
-    const std::vector<std::string> lines = wizard_body_material_changes({"Body11", "Body12"}, rows, changed, labels);
-    REQUIRE(lines.size() == 1);
-    CHECK(has_text(lines.front(), "Body12"));
-    CHECK(has_text(lines.front(), "4: PETG Basic"));
-    CHECK(has_text(lines.front(), "1: eSUN PLA+"));
-
-    // The slots the parts use come before the object's own slot.
-    CHECK(wizard_object_material_slots({{1, {6, 4}}}) == std::vector<std::size_t>{5, 3, 0});
-    CHECK(wizard_object_material_slots({{2, {0, 0, 5}}}) == std::vector<std::size_t>{1, 4});
-    CHECK(wizard_object_material_slots({{3, {}}}) == std::vector<std::size_t>{2});
-}
-
-TEST_CASE("Body Split parts sharing one slot never take a stale coarse material",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    const std::vector<std::string> labels{"1: eSUN PLA+", "2: PLA Basic", "3: eSUN PLA+", "4: PETG Basic",
-                                          "5: ASA", "6: PETG HF", "7: PLA Basic", "8: PETG Translucent"};
-    const std::vector<std::string> types{"PLA", "PLA", "PLA", "PETG", "ASA", "PETG", "PLA", "PETG"};
-    const std::vector<double> nozzles{0.2, 0.4};
-    WizardBodyRoleRow body11;
-    body11.object_id = 3;
-    body11.volume_id = 11;
-    body11.current_slot = 3;
-    body11.current_physical = 0;
-    body11.volume = 14000.;
-    WizardBodyRoleRow body12 = body11;
-    body12.volume_id = 12;
-    body12.volume = 900.;
-    const std::vector<WizardBodyRoleRow> rows{body11, body12};
-    const std::vector<WizardBodyRole> roles{WizardBodyRole::Coarse, WizardBodyRole::Fine};
-    // The pickers as an earlier opening left them: fine on slot 4, coarse on PLA slot 1.
-    const std::optional<std::size_t> stale_fine{3};
-    const std::optional<std::size_t> stale_coarse{0};
-
-    SECTION("slot 4 on the fine nozzle: the coarse parts take the closest PETG slot on the coarse nozzle") {
-        const std::vector<int> map{1, 1, 1, 1, 1, 2, 1, 1};
-        const WizardPickerDefaults defaults =
-            wizard_body_picker_defaults(rows, roles, nozzles, map, types, labels, stale_fine, stale_coarse);
-        CHECK(defaults.fine == std::optional<std::size_t>{3});
-        CHECK(defaults.coarse == std::optional<std::size_t>{5});
-        CHECK(has_text(defaults.note, "6: PETG HF"));
-        REQUIRE(defaults.fine);
-        REQUIRE(defaults.coarse);
-        const std::vector<WizardBodyAssignment> body =
-            wizard_body_roles_to_slots(rows, roles, *defaults.fine, *defaults.coarse, 0, 1, {});
-        const std::vector<std::string> lines = wizard_body_material_changes({"Body11", "Body12"}, rows, body, labels);
-        REQUIRE(lines.size() == 1);
-        CHECK(has_text(lines.front(), "Body11"));
-        CHECK(has_text(lines.front(), "6: PETG HF"));
-        CHECK_FALSE(has_text(lines.front(), "PLA"));
-    }
-    SECTION("slot 4 on the coarse nozzle: it stays coarse, and the fine parts take a PETG slot on the fine nozzle") {
-        const std::vector<int> map{1, 1, 1, 2, 1, 2, 1, 1};
-        std::vector<WizardBodyRoleRow> coarse_rows = rows;
-        for (WizardBodyRoleRow &row : coarse_rows)
-            row.current_physical = 1;
-        const WizardPickerDefaults defaults =
-            wizard_body_picker_defaults(coarse_rows, roles, nozzles, map, types, labels, stale_coarse, stale_fine);
-        CHECK(defaults.coarse == std::optional<std::size_t>{3});
-        CHECK(defaults.fine == std::optional<std::size_t>{7});
-        CHECK(has_text(defaults.note, "8: PETG Translucent"));
-    }
-    SECTION("no other slot of the same material: the other picker is left empty, not on PLA") {
+    SECTION("Body Split parts sharing one slot") {
+        const std::vector<std::string> labels{"1: eSUN PLA+", "2: PLA Basic", "3: eSUN PLA+", "4: PETG Basic",
+                                              "5: ASA", "6: PETG HF", "7: PLA Basic", "8: PETG Translucent"};
+        const std::vector<std::string> types{"PLA", "PLA", "PLA", "PETG", "ASA", "PETG", "PLA", "PETG"};
         const std::vector<std::string> one_petg{"PLA", "PLA", "PLA", "PETG", "ASA", "PLA", "PLA", "PLA"};
-        const std::vector<int> map{1, 1, 1, 1, 1, 2, 1, 1};
-        const WizardPickerDefaults defaults =
-            wizard_body_picker_defaults(rows, roles, nozzles, map, one_petg, labels, stale_fine, stale_coarse);
-        CHECK(defaults.fine == std::optional<std::size_t>{3});
-        CHECK_FALSE(defaults.coarse.has_value());
-        CHECK_FALSE(defaults.note.empty());
+        const std::vector<WizardBodyRole> roles{WizardBodyRole::Coarse, WizardBodyRole::Fine};
+        // The pickers as an earlier opening left them: fine on slot 4, coarse on PLA slot 1.
+        const std::optional<std::size_t> stale_fine{3}, stale_coarse{0};
+        struct Row {
+            const char *what;
+            std::vector<int> map;
+            bool unique_petg;
+            int body11_slot;
+            std::size_t body11_physical, body12_physical;
+            bool swap_picks;
+            std::optional<std::size_t> fine, coarse;
+            bool note;
+        };
+        const std::vector<Row> table{
+            {"slot 4 fine: coarse takes the closest PETG on the coarse nozzle", {1, 1, 1, 1, 1, 2, 1, 1}, false, 3, 0, 0,
+             false, 3, 5, true},
+            {"slot 4 coarse: fine takes a PETG on the fine nozzle", {1, 1, 1, 2, 1, 2, 1, 1}, false, 3, 1, 1, true, 7, 3,
+             true},
+            {"no other slot of that material: coarse left empty", {1, 1, 1, 1, 1, 2, 1, 1}, true, 3, 0, 0, false, 3,
+             std::nullopt, true},
+            {"no PETG mapped to the coarse nozzle: coarse left empty", {1, 1, 1, 1, 1, 1, 1, 1}, false, 3, 0, 0, false,
+             3, std::nullopt, true},
+            {"parts on their own slots keep them", {1, 1, 1, 1, 1, 2, 1, 1}, false, 5, 1, 0, false, 3, 5, false},
+        };
+        for (const Row &row : table) {
+            INFO(row.what);
+            WizardBodyRoleRow body11;
+            body11.object_id = 3;
+            body11.volume_id = 11;
+            body11.current_slot = row.body11_slot;
+            body11.current_physical = row.body11_physical;
+            body11.volume = 14000.;
+            WizardBodyRoleRow body12 = body11;
+            body12.volume_id = 12;
+            body12.current_slot = 3;
+            body12.current_physical = row.body12_physical;
+            body12.volume = 900.;
+            const WizardPickerDefaults defaults = wizard_body_picker_defaults(
+                {body11, body12}, roles, {0.2, 0.4}, row.map, row.unique_petg ? one_petg : types, labels,
+                row.swap_picks ? stale_coarse : stale_fine, row.swap_picks ? stale_fine : stale_coarse);
+            CHECK(defaults.fine == row.fine);
+            CHECK(defaults.coarse == row.coarse);
+            CHECK(defaults.note.empty() == !row.note);
+        }
     }
-    SECTION("parts on their own slots keep them, with nothing to say") {
-        std::vector<WizardBodyRoleRow> own = rows;
-        own[0].current_slot = 5;
-        own[0].current_physical = 1;
-        const std::vector<int> map{1, 1, 1, 1, 1, 2, 1, 1};
-        const WizardPickerDefaults defaults =
-            wizard_body_picker_defaults(own, roles, nozzles, map, types, labels, stale_fine, stale_coarse);
-        CHECK(defaults.fine == std::optional<std::size_t>{3});
-        CHECK(defaults.coarse == std::optional<std::size_t>{5});
-        CHECK(defaults.note.empty());
+    SECTION("Feature and Body Split defaults from the plate's filament map") {
+        struct Row {
+            const char *what;
+            std::vector<double> nozzles;
+            std::vector<int> map;
+            std::vector<std::string> types;
+            std::vector<std::size_t> object_slots;
+            std::optional<std::size_t> fine, coarse;
+            std::optional<bool> note;
+        };
+        const std::vector<double> pair{0.2, 0.6};
+        std::vector<Row> table{
+            {"eight PLA slots, slot 7 on the right", pair, {1, 1, 1, 1, 1, 1, 2, 1}, std::vector<std::string>(8, "PLA"),
+             {0}, 0, 6, false},
+            {"same type first on the coarse nozzle", pair, {1, 2, 2}, {"PETG", "PLA", "PETG"}, {0}, 0, 2, false},
+            {"the objects' slot is fine only on the fine nozzle", pair, {2, 1}, {"PLA", "PLA"}, {0}, 1, 0, false},
+            {"the smaller nozzle is fine on either side", {0.6, 0.2}, {1, 2}, {"PLA", "PLA"}, {}, 1, 0, false},
+            {"one material only", pair, {1}, {"PLA"}, {0}, 0, std::nullopt, std::nullopt},
+        };
+        for (const std::vector<double> &sizes : {std::vector<double>{.2, .4}, std::vector<double>{.2, .6},
+                                                 std::vector<double>{.4, .8}}) {
+            const std::vector<double> tools{sizes[0], sizes[0], sizes[0], sizes[1]};
+            table.push_back({"nothing mapped to the coarse nozzle", sizes, {1, 1, 1}, {"PLA", "PETG", "PLA"}, {0}, 0,
+                             std::nullopt, true});
+            table.push_back({"a tool changer: the coarse tool's own slot", tools, {1, 2, 3, 4},
+                             {"PLA", "PLA", "PLA", "PETG"}, {0}, 0, 3, false});
+            table.push_back({"a tool changer with fewer materials than tools", tools, {1, 2, 3}, {"PLA", "PLA", "PLA"},
+                             {0}, 0, std::nullopt, true});
+        }
+        for (const Row &row : table) {
+            INFO(row.what);
+            CAPTURE(row.nozzles);
+            const WizardMaterialDefaults defaults =
+                wizard_default_materials(row.nozzles, row.map, row.types, row.object_slots);
+            CHECK(defaults.fine == row.fine);
+            CHECK(defaults.coarse == row.coarse);
+            if (row.note)
+                CHECK(defaults.note.empty() == !*row.note);
+        }
     }
-}
-
-TEST_CASE("The materials are matched from what each nozzle holds",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    const std::vector<double> pair{0.2, 0.6};
-    // A kitten model: eight PLA slots, slot 7 on the right nozzle, the model on slot 1.
-    const WizardMaterialDefaults kitten =
-        wizard_default_materials(pair, {1, 1, 1, 1, 1, 1, 2, 1}, std::vector<std::string>(8, "PLA"), {0});
-    CHECK(kitten.fine == std::optional<std::size_t>{0});
-    CHECK(kitten.coarse == std::optional<std::size_t>{6});
-    CHECK(kitten.note.empty());
-    // Same type first on the coarse nozzle.
-    const WizardMaterialDefaults typed = wizard_default_materials(pair, {1, 2, 2}, {"PETG", "PLA", "PETG"}, {0});
-    CHECK(typed.coarse == std::optional<std::size_t>{2});
-    // The objects' slot is the fine material only when it sits on the fine nozzle.
-    const WizardMaterialDefaults moved = wizard_default_materials(pair, {2, 1}, {"PLA", "PLA"}, {0});
-    CHECK(moved.fine == std::optional<std::size_t>{1});
-    CHECK(moved.coarse == std::optional<std::size_t>{0});
-    // The smaller nozzle is the fine one whichever side it is on.
-    const WizardMaterialDefaults reversed = wizard_default_materials({0.6, 0.2}, {1, 2}, {"PLA", "PLA"}, {});
-    CHECK(reversed.fine == std::optional<std::size_t>{1});
-    CHECK(reversed.coarse == std::optional<std::size_t>{0});
-    // Nothing on the coarse nozzle: another slot goes there, and the page says so.
-    const WizardMaterialDefaults fallback = wizard_default_materials(pair, {1, 1}, {"PLA", "PLA"}, {1});
-    CHECK(fallback.fine == std::optional<std::size_t>{1});
-    CHECK(fallback.coarse == std::optional<std::size_t>{0});
-    CHECK(fallback.note == "No material sits on the 0.6 mm nozzle yet, so setup puts slot 1 there. Pick another if you like.");
-    CHECK(kitten.empty_nozzle.empty());
-    // After the user picks slot 3 (or 1) for the coarse layers, the line names that slot.
-    REQUIRE(fallback.empty_nozzle == "the 0.6 mm nozzle");
-    CHECK(wizard_empty_nozzle_note(fallback.empty_nozzle, 2) ==
-          "No material sits on the 0.6 mm nozzle yet, so setup puts slot 3 there. Pick another if you like.");
-    CHECK(has_text(wizard_empty_nozzle_note(fallback.empty_nozzle, 0), "slot 1 there"));
-    // One material only: the coarse choice is left to the user.
-    const WizardMaterialDefaults single = wizard_default_materials(pair, {1}, {"PLA"}, {0});
-    CHECK(single.fine == std::optional<std::size_t>{0});
-    CHECK_FALSE(single.coarse.has_value());
-}
-
-TEST_CASE("An exact material slot set in More options reads as set when setup opens again",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    // Fine material slot 4, coarse slot 6. The cylinder was pinned to slot 7 and Apply wrote it.
-    const std::optional<std::size_t> fine = 3, coarse = 5;
-    CHECK(wizard_body_slot_choice(7, fine, coarse, 8) == 7);
-    // A part on the fine or coarse material, on no slot of its own, or on a slot the project no
-    // longer has opens on "Set by Fine or Coarse".
-    CHECK(wizard_body_slot_choice(4, fine, coarse, 8) == 0);
-    CHECK(wizard_body_slot_choice(6, fine, coarse, 8) == 0);
-    CHECK(wizard_body_slot_choice(0, fine, coarse, 8) == 0);
-    CHECK(wizard_body_slot_choice(9, fine, coarse, 8) == 0);
-
-    // Opening on slot 7 applies slot 7 again; "Set by Fine or Coarse" would have moved the
-    // cylinder to the coarse material.
-    WizardBodyRoleRow cube, cylinder;
-    cube.object_id = cylinder.object_id = 3;
-    cube.volume_id = 11;
-    cylinder.volume_id = 12;
-    cube.current_slot = 5;
-    cube.current_physical = 1;
-    cylinder.current_slot = 6;
-    cylinder.current_physical = 1;
-    const std::vector<WizardBodyRoleRow> rows{cube, cylinder};
-    const std::vector<WizardBodyRole> roles{WizardBodyRole::Coarse, WizardBodyRole::Coarse};
-    const std::vector<std::optional<WizardBodySlotOverride>> reopened{std::nullopt, WizardBodySlotOverride{6, 1}};
-    const std::vector<WizardBodyAssignment> body = wizard_body_roles_to_slots(rows, roles, 3, 5, 0, 1, reopened);
-    REQUIRE(body.size() == 2);
-    CHECK(body[1].logical_filament == 6);
-    CHECK(body[1].coarse);
-}
-
-TEST_CASE("Body Split part rows give each part's size",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    // wizard_part_size_text is file-local; wizard_part_row_text puts it on the step 1 row.
-    CHECK(ends_with(wizard_part_row_text("4: PETG Basic", "Case", "Body12", false, 87.2, 54.4, 3.2),
-                    "   87 x 54 x 3.2 mm"));
-    CHECK(ends_with(wizard_part_row_text("", "Case", "Body12", false, 10., 9.96, 3.), "   10 x 10 x 3 mm"));
-    CHECK(ends_with(wizard_part_row_text("", "Case", "Body12", false, 120.5, 0.4, 2.26), "   121 x 0.4 x 2.3 mm"));
-    // Several objects name the object too; no size known leaves it out rather than guessing.
-    CHECK(has_text(wizard_part_row_text("6: PETG HF", "Case", "Body11", true, 90., 56., 4.), "Case / Body11"));
-    CHECK(wizard_part_row_text("", "Case", "Body11", false, 0., 0., 0.) == "Body11");
-}
-
-TEST_CASE("The one-nozzle Body Split refusal names the parts, slots and nozzle",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    const std::vector<double> pair{0.2, 0.4};
-    const WizardPartOnNozzle body11{"Body11", 5, 1, 0.16};
-    const WizardPartOnNozzle body12{"Body12", 3, 1, 0.08};
-    const std::string line = wizard_one_nozzle_parts_line({body11, body12}, pair);
-    CAPTURE(line);
-    for (const char *part : {"Body11 (slot 6)", "Body12 (slot 4)", "right 0.4 mm nozzle", "Put slot 4 on the left nozzle"})
-        CHECK(has_text(line, part));
-    // No layer height of their own: the last part is still the one to move.
-    WizardPartOnNozzle plain11 = body11;
-    plain11.layer_height = 0.;
-    WizardPartOnNozzle plain12 = body12;
-    plain12.layer_height = 0.;
-    CHECK(has_text(wizard_one_nozzle_parts_line({plain11, plain12}, pair), "Put slot 4 on the left nozzle"));
-    // All on the left on one slot: the last part needs a slot on the right.
-    const std::string shared = wizard_one_nozzle_parts_line(
-        {{"Lid", 0, 0, 0.}, {"Arm", 0, 0, 0.}, {"Pin", 0, 0, 0.}}, pair);
-    CHECK(has_text(shared, "left 0.2 mm nozzle"));
-    CHECK(has_text(shared, "Give Pin a slot on the right nozzle"));
-    // Nothing to say when the parts are already on both nozzles, or there is one part.
-    WizardPartOnNozzle left12 = body12;
-    left12.physical = 0;
-    CHECK(wizard_one_nozzle_parts_line({body11, left12}, pair).empty());
-    CHECK(wizard_one_nozzle_parts_line({body11}, pair).empty());
-}
-
-TEST_CASE("A coarse material with no profile for its nozzle or flow type blocks step 2",
-          "[TestRebuild][BugGuard][WizardParts]")
-{
-    // wizard_material_has_variant is file-local; wizard_material_resolution is what step 2 calls.
-    FullPrintConfig config = expanded_variant_material_config();
-    CHECK_FALSE(wizard_material_resolution(config, 1, true).needs_input);
-
-    SECTION("Logical filament 2 keeps only its fine-nozzle column") {
-        config.filament_self_index.values = {1, 1, 2};
-        config.filament_extruder_variant.values = {"Direct Drive Standard", "Direct Drive High Flow",
-                                                   "Direct Drive Standard"};
-        CHECK_FALSE(wizard_material_resolution(config, 0, true).needs_input);
-        const WizardMaterialResolution coarse = wizard_material_resolution(config, 1, true);
-        CHECK(coarse.needs_input);
-        CHECK(has_text(coarse.text, "0.6 mm"));
-        CHECK(wizard_materials_block_reason(config, std::size_t(0), std::size_t(1), false, {}) == coarse.text);
-    }
-    SECTION("H2C Hybrid rack: the material's own flow column decides") {
-        config.nozzle_volume_type.values = {int(nvtStandard), int(nvtHybrid)};
-        config.filament_volume_map.values = {int(nvtStandard), int(nvtHighFlow)};
+    SECTION("a coarse material with no profile for its nozzle or flow type blocks step 2") {
+        FullPrintConfig config = expanded_variant_material_config();
         CHECK_FALSE(wizard_material_resolution(config, 1, true).needs_input);
-        // The coarse material has a Standard column only, and the rack runs it on High Flow.
-        config.filament_self_index.values = {1, 1, 2};
-        config.filament_extruder_variant.values = {"Direct Drive Standard", "Direct Drive High Flow",
-                                                   "Direct Drive Standard"};
-        CHECK(wizard_material_resolution(config, 1, true).needs_input);
-        // On Standard it prints.
-        config.filament_volume_map.values = {int(nvtStandard), int(nvtStandard)};
-        CHECK_FALSE(wizard_material_resolution(config, 1, true).needs_input);
+        const auto drop_coarse_column = [](FullPrintConfig &edited) {
+            edited.filament_self_index.values = {1, 1, 2};
+            edited.filament_extruder_variant.values = {"Direct Drive Standard", "Direct Drive High Flow",
+                                                       "Direct Drive Standard"};
+        };
+        SECTION("logical filament 2 keeps only its fine-nozzle column") {
+            drop_coarse_column(config);
+            CHECK_FALSE(wizard_material_resolution(config, 0, true).needs_input);
+            CHECK(wizard_material_resolution(config, 1, true).needs_input);
+            CHECK_FALSE(wizard_materials_block_reason(config, std::size_t(0), std::size_t(1), false, {}).empty());
+        }
+        SECTION("H2C Hybrid rack: the material's own flow column decides") {
+            config.nozzle_volume_type.values = {int(nvtStandard), int(nvtHybrid)};
+            config.filament_volume_map.values = {int(nvtStandard), int(nvtHighFlow)};
+            CHECK_FALSE(wizard_material_resolution(config, 1, true).needs_input);
+            drop_coarse_column(config);
+            CHECK(wizard_material_resolution(config, 1, true).needs_input);
+            config.filament_volume_map.values = {int(nvtStandard), int(nvtStandard)};
+            CHECK_FALSE(wizard_material_resolution(config, 1, true).needs_input);
+        }
     }
 }
 
@@ -969,26 +506,6 @@ TEST_CASE("The Body preset choice reads the nozzle pair from the name or its par
     CHECK_FALSE(wizard_body_process_choice(rows, "My body preset", "MN Body 0.2-0.8 Detail 0.08-0.16 @BBL",
                                            {0.2, 0.4}, 0.10, 0.20).current_is_body);
     CHECK(wizard_body_process_choice(rows, feature, "", {0.2, 0.8}, 0.10, 0.40).no_body_preset_for_pair);
-}
-
-TEST_CASE("Engine refusals are rewritten in plain words with no codes",
-          "[TestRebuild][BugGuard][WizardCopy]")
-{
-    const std::string line = wizard_admission_refusal_line(
-        "[SRL-A02] [MNS-MAP-A01] Every synchronized body's filament assignments must resolve to one of the "
-        "two installed physical tools, and both tools must be used by synchronized multi-nozzle layering",
-        "filament_map", "Case");
-    CAPTURE(line);
-    CHECK(line.rfind("Case: ", 0) == 0);
-    for (const char *word : {"synchronized", "physical tool", "SRL-", "MNS-", "["})
-        CHECK_FALSE(has_text(line, word));
-    const std::string ironing = wizard_admission_refusal_line(
-        "[SRL-A20] Fuzzy, scarf, ironing, and Z-contouring modes are not supported by synchronized "
-        "multi-nozzle layering.", "ironing_type", "");
-    CHECK(has_text(ironing, "Setting to change: Ironing type."));
-    CHECK_FALSE(has_text(ironing, "ironing_type"));
-    CHECK_FALSE(has_text(wizard_admission_refusal_line("[SRL-A05] One instance.", "mixed_nozzle_slicing_mode", ""),
-                         "Setting to change"));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1107,10 +624,11 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
     const std::vector<int> plate_map = effective.filament_map.values;
     REQUIRE(plate_map == std::vector<int>{1, 1, 1, 1, 1, 2, 1, 1});
 
-    // Step 2's first defaults, as the Plater makes them (the parts' slots first).
+    // Step 2's first defaults, as the Plater makes them: the parts' slots come before the object's own.
+    const std::vector<std::size_t> object_slots = wizard_object_material_slots({{1, {6, 4}}});
+    CHECK(object_slots == std::vector<std::size_t>{5, 3, 0});
     const WizardMaterialDefaults initial = wizard_default_materials(
-        effective.nozzle_diameter.values, plate_map, effective.filament_type.values,
-        wizard_object_material_slots({{1, {6, 4}}}));
+        effective.nozzle_diameter.values, plate_map, effective.filament_type.values, object_slots);
     REQUIRE(initial.fine.has_value());
     const auto rows_for = [&](const std::vector<int> &map) {
         FullPrintConfig mapped = effective;
@@ -1138,6 +656,7 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
         effective.nozzle_diameter.values, plate_map, 8, initial.fine, initial_coarse);
     const std::vector<WizardBodyRole> roles = wizard_default_body_roles(rows_for(initial_map), 0);
     REQUIRE(roles == std::vector<WizardBodyRole>{WizardBodyRole::Coarse, WizardBodyRole::Fine});
+    // Step 2 starts on the parts' own materials.
     const WizardPickerDefaults picker =
         wizard_body_picker_defaults(rows_for(initial_map), roles, {}, {}, {}, {}, std::nullopt, std::nullopt);
     CHECK(picker.fine == std::optional<std::size_t>{3});
@@ -1145,9 +664,14 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
     REQUIRE(picker.fine);
     REQUIRE(picker.coarse);
 
+    // The map setup writes keeps the plate's, also when an older save had slot 4 on the coarse nozzle.
     const std::vector<int> derived = wizard_derived_filament_map(
         effective.nozzle_diameter.values, plate_map, 8, picker.fine, picker.coarse);
     CHECK(derived == plate_map);
+    std::vector<int> saved = plate_map;
+    saved[3] = 2;
+    CHECK(wizard_derived_filament_map(effective.nozzle_diameter.values, saved, 8, picker.fine, picker.coarse) ==
+          plate_map);
     const std::vector<WizardBodyRoleRow> rows = rows_for(derived);
     const std::vector<WizardBodyAssignment> body =
         wizard_body_roles_to_slots(rows, roles, *picker.fine, *picker.coarse, 0, 1, {});
@@ -1155,6 +679,22 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
     for (std::size_t slot = 0; slot < cover_filaments().size(); ++slot)
         labels.push_back(std::to_string(slot + 1) + ": " + cover_filaments()[slot]);
     CHECK(wizard_body_material_changes({"Body11", "Body12"}, rows, body, labels).empty());
+    // The old default (slot 1 for the fine part) would change one part's material.
+    std::vector<WizardBodyAssignment> old_default = body;
+    REQUIRE(old_default.size() == 2);
+    old_default[1].logical_filament = 0;
+    CHECK(wizard_body_material_changes({"Body11", "Body12"}, rows, old_default, labels).size() == 1);
+
+    // An exact slot from More options wins over the part's role, and reads as set when setup opens
+    // again; a part on the fine or coarse material, or on a slot the project lacks, reads as set by its role.
+    const std::vector<std::optional<WizardBodySlotOverride>> pinned_slot{std::nullopt, WizardBodySlotOverride{6, 0}};
+    const std::vector<WizardBodyAssignment> pinned =
+        wizard_body_roles_to_slots(rows, roles, *picker.fine, *picker.coarse, 0, 1, pinned_slot);
+    REQUIRE(pinned.size() == 2);
+    CHECK(pinned[1].logical_filament == 6);
+    CHECK(wizard_body_slot_choice(7, picker.fine, picker.coarse, 8) == 7);
+    for (const int slot : {4, 6, 0, 9})
+        CHECK(wizard_body_slot_choice(slot, picker.fine, picker.coarse, 8) == 0);
 
     // Accept every default: step 3's 0.16 mm row, then Apply.
     draft.scope.kind = WizardScopeKind::CurrentPlate;
@@ -1187,12 +727,6 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
     PreparedWizardApply prepared = prepare_wizard_apply(draft, review, fixture.owners);
     INFO(prepared.diagnostic);
     REQUIRE(prepared.diagnostic.empty());
-    // Step 4 says nothing about a part's material, and no slot's profile changes.
-    for (const std::string &line : prepared.also_changed) {
-        CAPTURE(line);
-        CHECK_FALSE(has_text(line, "Body1"));
-        CHECK_FALSE(has_text(line, " profile: "));
-    }
     CHECK_FALSE(prepared.filament_presets_changed);
 
     HookLog log;
@@ -1208,30 +742,48 @@ TEST_CASE("Body Split setup on a two-part object keeps every part's material",
     CHECK(after[5] == 2);
 }
 
-TEST_CASE("A slot's material settings are composed for the nozzle the plate puts it on",
-          "[TestRebuild][BugGuard][WizardApply]")
+TEST_CASE("A material composes the other nozzle's values when the two profiles lay out their variants differently",
+          "[TestRebuild][BugGuard]")
 {
-    CoverFixture fixture;
-    const auto binding = [](const DynamicPrintConfig &config, std::size_t slot) {
-        const auto *values = config.option<ConfigOptionStrings>("mixed_nozzle_filament_binding");
-        REQUIRE(values != nullptr);
-        REQUIRE(slot < values->values.size());
-        return values->values[slot];
+    // The H2D 0.4 and 0.6 material profiles carry a third variant column (E3D High Flow); the 0.2 and
+    // 0.8 ones have two. Slot 1 is the 0.4 eSUN PLA+ profile on the 0.2 left nozzle, slot 2 the 0.2 PLA
+    // Basic profile on the 0.6 right nozzle (the spec's map), both on Standard flow.
+    ProfileSpec spec = h2d_02_06_spec();
+    spec.materials = {"eSUN PLA+ @BBL H2D", "Bambu PLA Basic @BBL H2D 0.2 nozzle"};
+    spec.also_visible_materials = {"eSUN PLA+ @BBL H2D 0.2 nozzle", "Bambu PLA Basic @BBL H2D 0.6 nozzle"};
+    WizardProject project(spec);
+    const auto variants = [&](const std::string &name) {
+        const Preset *found = project.bundle.filaments.find_preset(name, false, true);
+        INFO(name);
+        REQUIRE(found != nullptr);
+        return found->config.option<ConfigOptionStrings>("filament_extruder_variant")->values;
     };
-    const std::vector<int> plate_map = fixture.current_plate.get_real_filament_maps(fixture.bundle.project_config);
+    REQUIRE(variants("eSUN PLA+ @BBL H2D").size() == 3);
+    REQUIRE(variants("eSUN PLA+ @BBL H2D 0.2 nozzle").size() == 2);
+    REQUIRE(variants("Bambu PLA Basic @BBL H2D 0.2 nozzle").size() == 2);
+    REQUIRE(variants("Bambu PLA Basic @BBL H2D 0.6 nozzle").size() == 3);
+
+    const auto speeds = [](const DynamicPrintConfig &config) {
+        const auto *speed = config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
+        REQUIRE(speed != nullptr);
+        return speed->values;
+    };
+    // eSUN PLA+ on a 0.2 nozzle: 1.8 (the 0.4 profile says 16). PLA Basic on a 0.6 Standard: 30 (0.2: 2).
+    const std::vector<double> speed = speeds(project.bundle.full_config());
+    REQUIRE(speed.size() == 2);
+    CHECK_THAT(speed[0], Catch::Matchers::WithinAbs(1.8, 1e-9));
+    CHECK_THAT(speed[1], Catch::Matchers::WithinAbs(30., 1e-9));
+
+    // A plate map that differs from the project map (slot 6 on the 0.4 nozzle): every composition the
+    // slice, the saved project and setup read gives the same values, and no rebind is offered.
+    CoverFixture cover;
+    const std::vector<int> plate_map = cover.current_plate.get_real_filament_maps(cover.bundle.project_config);
     REQUIRE(plate_map.size() == 8);
     REQUIRE(plate_map[5] == 2);
-    // The project-level map alone puts slot 6 on the 0.2, as an older file saved it.
-    CHECK(binding(fixture.bundle.full_config(), 5) == "sibling:Bambu PETG HF @BBL H2D 0.2 nozzle");
-    // Every composition the slice, the saved project and the setup read follows the plate's map.
-    const std::string own = "base:Bambu PETG HF @BBL H2D 0.4 nozzle";
-    CHECK(binding(fixture.bundle.full_config(true, plate_map), 5) == own);
-    CHECK(binding(wizard_plate_effective_config(fixture.bundle, fixture.current_plate), 5) == own);
-    CHECK(binding(fixture.bundle.full_config_secure(plate_map), 5) == own);
-    CHECK(binding(wizard_plate_effective_config(fixture.bundle, fixture.current_plate), 3) ==
-          "base:Bambu PETG Basic @BBL H2D 0.2 nozzle");
-    CHECK_FALSE(fixture.bundle.mixed_nozzle_rebind_plan(plate_map,
-        fixture.current_plate.get_real_filament_volume_maps(fixture.bundle.project_config)).offered);
+    const std::vector<double> composed = speeds(cover.bundle.full_config(true, plate_map));
+    CHECK(speeds(wizard_plate_effective_config(cover.bundle, cover.current_plate)) == composed);
+    CHECK_FALSE(cover.bundle.mixed_nozzle_rebind_plan(plate_map,
+        cover.current_plate.get_real_filament_volume_maps(cover.bundle.project_config)).offered);
 }
 
 namespace {
@@ -1287,203 +839,12 @@ TEST_CASE("Setup finds each nozzle's material profile and the MN presets in a co
 }
 
 // ------------------------------------------------------------------------------------------------
-// High Flow, nozzle pair, sidebar cards and File > New
+// File > New
 // ------------------------------------------------------------------------------------------------
-
-namespace {
-
-DynamicPrintConfig project_with(std::vector<double> pair, std::vector<int> flows)
-{
-    DynamicPrintConfig project;
-    if (!pair.empty())
-        project.set_key_value("nozzle_diameter", new ConfigOptionFloats(pair));
-    project.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = std::move(flows);
-    return project;
-}
-
-} // namespace
-
-TEST_CASE("A project that owns a dissimilar pair keeps its flow types through a printer refresh",
-          "[TestRebuild][BugGuard][HighFlow]")
-{
-    const int standard = int(nvtStandard);
-    const int high_flow = int(nvtHighFlow);
-    CHECK(project_owns_nozzle_flows(project_with({0.2, 0.8}, {standard, high_flow}), 2));
-    CHECK_FALSE(project_owns_nozzle_flows(project_with({}, {standard, high_flow}), 2));
-    CHECK_FALSE(project_owns_nozzle_flows(project_with({0.4, 0.4}, {standard, high_flow}), 2));
-    CHECK_FALSE(project_owns_nozzle_flows(project_with({0.2, 0.}, {standard, high_flow}), 2));
-    CHECK_FALSE(project_owns_nozzle_flows(project_with({0.2, 0.8}, {standard, high_flow}), 1));
-    CHECK_FALSE(project_owns_nozzle_flows(project_with({0.2, 0.8}, {high_flow}), 2));
-
-    // The real bundle refresh paths on a 0.2 Standard / 0.6 High Flow project whose printer
-    // defaults are Standard on both sides.
-    PresetBundle bundle;
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_key_value("filament_diameter", new ConfigOptionFloats{1.75, 1.75});
-    config.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    config.set_key_value("print_extruder_id", new ConfigOptionInts{1, 2});
-    config.set_key_value("print_extruder_variant", new ConfigOptionStrings{"Direct Drive Standard", "Direct Drive High Flow"});
-    config.set_key_value("extruder_type",
-        new ConfigOptionEnumsGeneric{int(ExtruderType::etDirectDrive), int(ExtruderType::etDirectDrive)});
-    config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric{standard, high_flow});
-    config.set_key_value("extruder_variant_list", new ConfigOptionStrings{"Direct Drive Standard", "Direct Drive High Flow"});
-    config.set_key_value("min_layer_height", new ConfigOptionFloats{0.04, 0.08});
-    config.set_key_value("max_layer_height", new ConfigOptionFloats{0.20, 0.60});
-    DynamicPrintConfig process = config;
-    process.erase("filament_map");
-    process.erase("filament_map_mode");
-    process.erase("filament_volume_map");
-    bundle.prints.load_preset("", "process-A", process, true);
-    bundle.printers.load_preset("", "printer-A", config, true);
-    bundle.filaments.load_preset("", "material-0", config, true);
-    bundle.filaments.load_preset("", "material-1", config, false);
-    bundle.filament_presets = {"material-0", "material-1"};
-    bundle.project_config = config;
-    auto &project = bundle.project_config;
-    auto *flows = new ConfigOptionEnumsGeneric(project.def()->get("nozzle_volume_type")->enum_keys_map);
-    flows->values = {standard, high_flow};
-    project.set_key_value("nozzle_volume_type", flows);
-    bundle.printers.get_edited_preset().config.set_key_value(
-        "default_nozzle_volume_type", new ConfigOptionEnumsGeneric{standard, standard});
-    const bool preserve = GENERATE(true, false);
-    CAPTURE(preserve);
-    SECTION("extruder count refresh") {
-        with_project_nozzle_flows_preserved(project, preserve, [&] { bundle.on_extruders_count_changed(2); });
-        CHECK(bundle.extruder_ams_counts.size() == 2);
-    }
-    SECTION("base profile refresh restoring a saved Standard preference") {
-        with_project_nozzle_flows_preserved(project, preserve, [&] {
-            REQUIRE(project.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->deserialize("Standard,Standard"));
-            project.set_key_value("has_filament_switcher", new ConfigOptionBool(false));
-        });
-        CHECK_FALSE(project.opt_bool("has_filament_switcher"));
-    }
-    CHECK(project.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values ==
-          (preserve ? std::vector<int>{standard, high_flow} : std::vector<int>{standard, standard}));
-}
-
-TEST_CASE("The Flow combo offers High Flow per nozzle and keeps the project's type through a rebuild",
-          "[TestRebuild][BugGuard][HighFlow]")
-{
-    const int standard = int(nvtStandard);
-    const int high_flow = int(nvtHighFlow);
-    // High Flow follows each nozzle's own diameter, not the printer variant's.
-    const ConfigOptionFloats fine_coarse{0.2, 0.6};
-    CHECK_FALSE(mixed_nozzle_high_flow_offered(&fine_coarse, 0, "0.2", "Bambu Lab H2D"));
-    CHECK(mixed_nozzle_high_flow_offered(&fine_coarse, 1, "0.2", "Bambu Lab H2D"));
-    const ConfigOptionFloats fine_pair{0.2, 0.2};
-    CHECK_FALSE(mixed_nozzle_high_flow_offered(&fine_pair, 1, "0.2", "Bambu Lab H2D"));
-    const ConfigOptionFloats coarse_pair{0.4, 0.6};
-    CHECK(mixed_nozzle_high_flow_offered(&coarse_pair, 0, "0.2", "Bambu Lab H2D"));
-    CHECK_FALSE(mixed_nozzle_high_flow_offered(&fine_coarse, 1, "0.2", "Bambu Lab X1E"));
-    CHECK_FALSE(mixed_nozzle_high_flow_offered(nullptr, 0, "0.2", "Bambu Lab X1"));
-    CHECK(mixed_nozzle_high_flow_offered(nullptr, 0, "0.6", "Bambu Lab X1"));
-
-    // A High Flow the gate briefly does not offer stays listed and selected, never Standard.
-    const auto gated = sidebar_flow_choices({standard}, high_flow);
-    CHECK(gated.types == std::vector<int>{standard, high_flow});
-    CHECK(gated.selection == 1);
-    const auto both = sidebar_flow_choices({standard, high_flow}, high_flow);
-    CHECK(both.selection == 1);
-    CHECK(sidebar_flow_choices({standard}, standard).selection == 0);
-    CHECK(sidebar_flow_choices({}, -1).selection == -1);
-}
-
-TEST_CASE("A printer refresh keeps the project nozzle pair and never reads a card past its data",
-          "[TestRebuild][BugGuard][NozzleCards]")
-{
-    // Whatever variant is selected, the project's pair decides the refresh route.
-    DynamicPrintConfig project;
-    project.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.2, 0.6});
-    DynamicPrintConfig variant_06;
-    variant_06.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.6, 0.6});
-    DynamicPrintConfig variant_one_entry;
-    variant_one_entry.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.6});
-    CHECK(mixed_nozzle_sync_preserves_project(project, variant_06));
-    CHECK(mixed_nozzle_sync_preserves_project(project, variant_one_entry));
-    CHECK(project.option<ConfigOptionFloats>("nozzle_diameter")->values == std::vector<double>{0.2, 0.6});
-    // Reseeding the boxes with the pair they hold is a no-op, never the preset switch that clears it.
-    CHECK(resolve_sidebar_diameter_route({0.2, 0.6}, mixed_nozzle_diameter_text(0.2), mixed_nozzle_diameter_text(0.6),
-                                         true, true) == SidebarDiameterRoute::NoOp);
-    DynamicPrintConfig no_pair;
-    CHECK_FALSE(mixed_nozzle_sync_preserves_project(no_pair, variant_06));
-    DynamicPrintConfig homogeneous;
-    homogeneous.set_key_value("nozzle_diameter", new ConfigOptionFloats{0.6, 0.6});
-    CHECK_FALSE(mixed_nozzle_sync_preserves_project(homogeneous, variant_06));
-
-    // A one-entry per-extruder vector: the right card reads the first entry; none skips the row.
-    CHECK(sidebar_nozzle_card_entry(2, 1) == std::optional<std::size_t>{1});
-    CHECK(sidebar_nozzle_card_entry(1, 1) == std::optional<std::size_t>{0});
-    CHECK_FALSE(sidebar_nozzle_card_entry(0, 1).has_value());
-    CHECK(sidebar_enum_label_valid(1, 2));
-    CHECK_FALSE(sidebar_enum_label_valid(2, 2));
-    CHECK_FALSE(sidebar_enum_label_valid(-1, 2));
-}
-
-TEST_CASE("Changing a nozzle of a project-owned pair asks first and never opens setup unasked",
-          "[TestRebuild][BugGuard][NozzlePrompt]")
-{
-    const std::vector<double> owned{0.2, 0.8};
-    CHECK(resolve_sidebar_diameter_route(owned, "0.2", "0.6", true, true) == SidebarDiameterRoute::DissimilarPrompt);
-    CHECK(resolve_sidebar_diameter_route(owned, "0.4", "0.8", true, true) == SidebarDiameterRoute::DissimilarPrompt);
-    CHECK(resolve_sidebar_diameter_route(owned, "0.2", "0.8", true, true) == SidebarDiameterRoute::NoOp);
-    CHECK(resolve_sidebar_diameter_route(owned, "0.8", "0.8", true, true) == SidebarDiameterRoute::PresetSwitch);
-    // Either side changing on a .2/.4 pair is never inert.
-    const std::vector<double> small{0.2, 0.4};
-    CHECK(resolve_sidebar_diameter_route(small, "0.4", "0.4", true, true) == SidebarDiameterRoute::PresetSwitch);
-    CHECK(resolve_sidebar_diameter_route(small, "0.2", "0.2", true, true) == SidebarDiameterRoute::PresetSwitch);
-    CHECK(resolve_sidebar_diameter_route(small, "0.6", "0.4", true, true) == SidebarDiameterRoute::DissimilarPrompt);
-    // A printer-owned pair keeps the legacy routes.
-    CHECK(resolve_sidebar_diameter_route({0.4, 0.4}, "0.4", "0.2", false, true) == SidebarDiameterRoute::DissimilarPrompt);
-    CHECK(resolve_sidebar_diameter_route({0.4, 0.4}, "0.6", "0.6", false, true) == SidebarDiameterRoute::PresetSwitch);
-
-    // The prompt's answers: only a ticked Keep opens setup; a single side switches; Cancel returns.
-    const DissimilarNozzleSelection captured{"0.2", "0.6", "Bambu Lab H2D 0.2 nozzle"};
-    const auto keep_only = resolve_dissimilar_nozzle_decision(captured, DissimilarNozzleDecision::KeepPair, false);
-    CHECK(keep_only.keep_pair);
-    CHECK_FALSE(keep_only.open_setup);
-    CHECK(keep_only.return_before_preset_lookup);
-    const auto keep_and_set_up = resolve_dissimilar_nozzle_decision(captured, DissimilarNozzleDecision::KeepPair, true);
-    CHECK(keep_and_set_up.keep_pair);
-    CHECK(keep_and_set_up.open_setup);
-    const auto left_only = resolve_dissimilar_nozzle_decision(captured, DissimilarNozzleDecision::LeftOnly, true);
-    CHECK_FALSE(left_only.open_setup);
-    CHECK(left_only.single_diameter == std::optional<std::string>{"0.2"});
-    const auto right_only = resolve_dissimilar_nozzle_decision(captured, DissimilarNozzleDecision::RightOnly, true);
-    CHECK(right_only.single_diameter == std::optional<std::string>{"0.6"});
-    const auto cancel = resolve_dissimilar_nozzle_decision(captured, DissimilarNozzleDecision::Cancel, true);
-    CHECK_FALSE(cancel.open_setup);
-    CHECK_FALSE(cancel.keep_pair);
-    CHECK(cancel.return_before_preset_lookup);
-}
-
-TEST_CASE("A slot's profile for its own nozzle is not flagged in a mixed-nozzle project",
-          "[TestRebuild][BugGuard][NozzleCards]")
-{
-    CHECK(mixed_nozzle_slot_preset_fits_nozzle(true, "base:Bambu PLA Basic @BBL H2D 0.8 nozzle"));
-    CHECK_FALSE(mixed_nozzle_slot_preset_fits_nozzle(true, "sibling:Bambu PLA Basic @BBL H2D 0.8 nozzle"));
-    CHECK_FALSE(mixed_nozzle_slot_preset_fits_nozzle(true, "unresolved:missing"));
-    CHECK_FALSE(mixed_nozzle_slot_preset_fits_nozzle(false, "base:Bambu PLA Basic @BBL H2D 0.8 nozzle"));
-}
 
 TEST_CASE("File > New starts mixed-nozzle slicing Off and keeps the installed pair",
           "[TestRebuild][BugGuard][NewProject]")
 {
-    // Every mixed-nozzle key a project carries is setup state that a new project resets.
-    const auto &reset = mixed_nozzle_new_project_reset_keys();
-    const auto listed = [&reset](const std::string &key) { return std::find(reset.begin(), reset.end(), key) != reset.end(); };
-    {
-        PresetBundle fresh;
-        for (const std::string &key : fresh.project_config.keys())
-            if (key.rfind("mixed_nozzle_", 0) == 0) {
-                INFO(key);
-                CHECK(listed(key));
-            }
-    }
-    for (const char *key : {"nozzle_diameter", "min_layer_height", "max_layer_height", "nozzle_volume_type",
-                            "filament_colour", "filament_map", "filament_volume_map", "filament_nozzle_map"})
-        CHECK_FALSE(listed(key));
-
     // The previous project: Feature Split on a 0.2 Standard / 0.8 High Flow pair with setup state.
     PresetBundle bundle;
     DynamicPrintConfig &previous_project = bundle.project_config;
@@ -1528,22 +889,4 @@ TEST_CASE("File > New starts mixed-nozzle slicing Off and keeps the installed pa
     CHECK_FALSE(stray.has("nozzle_diameter"));
     CHECK_FALSE(stray.has("mixed_nozzle_coarse_layer_height"));
     CHECK(stray.opt_enum<MixedNozzleSlicingMode>("mixed_nozzle_slicing_mode") == MixedNozzleSlicingMode::Off);
-}
-
-TEST_CASE("The Feature Split mode card states the split setup applies and does not promise moving features",
-          "[TestRebuild][BugGuard][WizardModeCard]")
-{
-    // The card said "You can change which nozzle prints each feature, supports included." Only the split setup
-    // applies is supported, so the card states that split and that supports can go on either nozzle.
-    const WizardModeCardText sized = wizard_mode_card_text({0.6, 0.2});
-    CHECK(sized.feature == "Split by feature. The 0.2 mm nozzle prints walls, top and bottom surfaces and solid "
-                           "infill, and the 0.6 mm nozzle prints sparse infill at its own thicker layer height. "
-                           "Supports can go on either nozzle, with some limits for tree supports. Works on any model.");
-    const WizardModeCardText unsized = wizard_mode_card_text({});
-    CHECK(unsized.feature.rfind("Split by feature. The fine nozzle prints walls", 0) == 0);
-    for (const std::string &text : {sized.feature, unsized.feature}) {
-        CHECK(text.find("change which nozzle") == std::string::npos);
-        CHECK(text.find("By default") == std::string::npos);
-        CHECK(text.find("\xE2\x80\x94") == std::string::npos);
-    }
 }

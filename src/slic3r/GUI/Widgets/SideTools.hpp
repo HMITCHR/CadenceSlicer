@@ -2,9 +2,15 @@
 #define slic3r_GUI_SIDETOOLS_hpp_
 
 #include "slic3r/GUI/CadencePalette.hpp"
+#include <string>
+#include <wx/dc.h>
 #include <wx/dcgraph.h>
+#include <wx/event.h>
 #include <wx/gdicmn.h>
 #include <wx/dcclient.h>
+#include <wx/panel.h>
+#include <wx/string.h>
+#include <wx/timer.h>
 #include "Button.hpp"
 #include "Label.hpp"
 #include "HyperLink.hpp" // ORCA

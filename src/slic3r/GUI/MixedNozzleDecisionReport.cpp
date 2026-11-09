@@ -44,18 +44,23 @@ std::string format_duration(double seconds)
     return "~" + format_fixed("%.0f", seconds) + " s";
 }
 
-std::string format_seconds(double seconds) { return "~" + format_fixed("%.0f", seconds) + " s"; }
+// A whole number of seconds; a value that rounds to zero prints as 0, never -0.
+std::string format_seconds(double seconds)
+{
+    const double rounded = std::round(seconds);
+    return "~" + format_fixed("%.0f", rounded == 0. ? 0. : rounded) + " s";
+}
 
 // The number is the selector's per-band model plus its hand-off sums, not what a printer measures,
 // and whole-print effects are outside it. So the line says what it leaves out and names the
 // selector as its source.
 std::string format_saving_estimate(double seconds)
 {
-    std::string amount = format_duration(seconds);
+    std::string amount = format_duration(std::abs(seconds));
     // "~15 min" reads as "about 15 min" in a sentence.
     if (!amount.empty() && amount.front() == '~')
         amount.erase(amount.begin());
-    return "about " + amount + " less than all-fine (measured prints differ; the whole-print "
+    return "about " + amount + (seconds < 0. ? " more" : " less") + " than all-fine (measured prints differ; the whole-print "
            "effects are not in this number)";
 }
 
@@ -298,10 +303,20 @@ std::vector<std::string> format_decision_summary(const MixedNozzleDecisionSummar
         lines.push_back(materials);
 
     if (summary.typical_cost_seconds) {
-        std::string cost = "Switch + tower cost per band: " + format_seconds(*summary.typical_cost_seconds);
-        if (summary.typical_switch_seconds && summary.typical_tower_seconds)
-            cost += " (" + format_seconds(*summary.typical_switch_seconds) + " nozzle changes, " +
-                    format_seconds(*summary.typical_tower_seconds) + " tower purge)";
+        // Each term is coarse minus all-fine. The tower term is below zero where all-fine would still
+        // lay a plain tower level that the coarse switch's purge replaces, so it reads as a saving.
+        const auto saves = [](double seconds) { return std::round(seconds) < 0.; };
+        const double total = *summary.typical_cost_seconds;
+        std::string cost = saves(total) ? "Switch + tower per band: saves " + format_seconds(-total)
+                                        : "Switch + tower cost per band: " + format_seconds(total);
+        if (summary.typical_switch_seconds && summary.typical_tower_seconds) {
+            const double switches = *summary.typical_switch_seconds;
+            const double tower    = *summary.typical_tower_seconds;
+            cost += " (" + (saves(switches) ? "nozzle changes save " + format_seconds(-switches)
+                                            : format_seconds(switches) + " nozzle changes") +
+                    ", " + (saves(tower) ? "tower purge saves " + format_seconds(-tower)
+                                         : format_seconds(tower) + " tower purge") + ")";
+        }
         cost += ".";
         lines.push_back(cost);
     }

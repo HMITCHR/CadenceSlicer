@@ -28,7 +28,7 @@ void install_system_profiles(const boost::filesystem::path &data)
 {
     const boost::filesystem::path system = data / PRESET_SYSTEM_DIR;
     boost::filesystem::create_directories(system);
-    for (const std::string vendor : {std::string("BBL"), std::string(PresetBundle::ORCA_FILAMENT_LIBRARY)}) {
+    for (const std::string &vendor : {std::string("BBL"), std::string(PresetBundle::ORCA_FILAMENT_LIBRARY)}) {
         boost::filesystem::create_symlink(boost::filesystem::path(PROFILES_DIR) / (vendor + ".json"), system / (vendor + ".json"));
         boost::filesystem::create_directory_symlink(boost::filesystem::path(PROFILES_DIR) / vendor, system / vendor);
     }

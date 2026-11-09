@@ -49,8 +49,11 @@ extern Slic3r::ColorRGBA convert(const Color& c);
 // mapping from Slic3r::ColorRGBA to libvgcode::Color
 extern Color convert(const Slic3r::ColorRGBA& c);
 
-// mapping from encoded color to libvgcode::Color
-extern Color convert(const std::string& color_str);
+// ORCA: mapping from libvgcode::ColorWithAlpha to Slic3r::ColorRGBA
+extern Slic3r::ColorRGBA convert(const ColorWithAlpha& c);
+
+// ORCA: mapping from encoded filament colors to libvgcode::PaletteWithAlpha, keeping their opacity
+extern PaletteWithAlpha convert_filament_colors(const std::vector<std::string>& colors_str);
 
 // mapping from libvgcode::EGCodeExtrusionRole to Slic3r::ExtrusionRole
 extern Slic3r::ExtrusionRole convert(EGCodeExtrusionRole role);
@@ -72,7 +75,8 @@ extern Slic3r::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode& mode
 
 // mapping from Slic3r::GCodeProcessorResult to libvgcode::GCodeInputData
 extern GCodeInputData convert(const Slic3r::GCodeProcessorResult& result, const std::vector<std::string>& str_tool_colors,
-    const std::vector<std::string>& str_color_print_colors, const Viewer& viewer);
+    const std::vector<std::string>& str_color_print_colors, const Viewer& viewer,
+    const Slic3r::Transform3d* belt_xform = nullptr);
 
 // ORCA Mixed-Nozzle Preview: one-for-one projection of the final converted PathVertex vector into
 // PhysicalToolVertexFact form (fact i is vertex i). Copy only: no filtering, reordering,

@@ -395,6 +395,9 @@ struct WizardCadencePage {
     std::optional<WizardEstimate> baseline_estimate;
     // The one-nozzle slice is running now.
     bool baseline_slicing {false};
+    // The baseline keeps the colors (mixed_nozzle_color_baseline, app setting
+    // cadence_setup_baseline_keep_colors), so it is named "Same colors, no coarse nozzle".
+    bool colors_kept {false};
     // The rows are Feature Split rows, and the two nozzle sizes (fine, coarse), 0 when unresolved.
     // A Feature Split row with no nozzle change prints nothing on the coarse nozzle.
     bool feature_split {false};
@@ -701,6 +704,9 @@ std::string wizard_speed_block_reason(const WizardCadencePage &page, std::option
 // Empty only when ranking is not running.
 std::string wizard_speed_summary_line(const WizardCadencePage &page, double fine_height,
                                       std::optional<std::size_t> selected_row, bool explicit_pick);
+// The speed line without the coarse rows' refusal reason (wizard_speed_summary_line adds it).
+std::string wizard_speed_summary_body(const WizardCadencePage &page, double fine_height,
+                                      std::optional<std::size_t> selected_row, bool explicit_pick);
 // The row that is the project's existing coarse layer, when step 3 is at the existing fine layer.
 // Empty on a fresh setup or at another fine layer.
 std::optional<std::size_t> wizard_existing_row(const WizardCadencePage &page, double fine_height,
@@ -745,9 +751,9 @@ std::string wizard_nozzle_flow_line(const std::vector<double> &nozzle_diameters,
 
 // The materials the wizard opens with. Fine: the slot the plate's objects use when it is on the
 // fine nozzle, else the first slot there. Coarse: the first coarse-nozzle slot with the fine
-// material's type, else the first coarse-nozzle slot, else the first other slot (named in the
-// note). "On a nozzle" is the plate's filament map; the synced AMS list is not read. Any pair of
-// materials is accepted.
+// material's type, else the first coarse-nozzle slot. With none mapped to the coarse nozzle the
+// coarse material is left empty and the note asks for one. "On a nozzle" is the plate's filament
+// map; the synced AMS list is not read. Any pair of materials is accepted.
 struct WizardMaterialDefaults {
     std::optional<std::size_t> fine;
     std::optional<std::size_t> coarse;
@@ -762,6 +768,10 @@ WizardMaterialDefaults wizard_default_materials(const std::vector<double> &nozzl
                                                 const std::vector<std::size_t> &object_slots);
 // The note for an empty coarse nozzle, naming the slot setup puts there: the coarse material picked.
 std::string wizard_empty_nozzle_note(const std::string &empty_nozzle, std::size_t coarse_slot);
+// Setup asks before it opens when a printer that prints each material on its own tool (slot i on tool i) has
+// fewer tools than the plate has colors: it says how many of each and never merges colors on its own. Empty
+// when there is nothing to ask.
+std::string wizard_colors_tools_notice(std::size_t colors, std::size_t tools, bool one_material_per_tool);
 
 // Body Split asks per part whether it prints fine or coarse; its material follows from Materials. A
 // part on a third material keeps its slot while that slot is on its nozzle, and More options can
@@ -827,7 +837,8 @@ struct WizardRoleSlots {
 // What step 2's pickers show in Body Split, from the parts' own slots. A role with no part on a
 // slot keeps its picker's value unless that is the other role's slot. When both roles share one
 // slot, it stays with the role whose nozzle it is on (per `filament_map`), and the other role takes
-// the closest slot of the same type, one on its own nozzle first, else empty. `note` says what was
+// the closest slot of the same type, one on its own nozzle first, else empty. The coarse role takes
+// only a slot mapped to the coarse nozzle. `note` says what was
 // done; empty when the parts do not share a slot.
 struct WizardPickerDefaults {
     std::optional<std::size_t> fine;
@@ -863,9 +874,12 @@ std::string wizard_body_roles_block_reason(const std::vector<WizardBodyRoleRow> 
                                            const std::vector<WizardBodyRole> &roles);
 // The line under the Body Split parts about joining. Empty when no assembly is joined.
 std::string wizard_joining_summary(std::size_t joined_assemblies);
-// The mode step 1 opens on: Body Split when the project already is, or when the plate has a
-// multi-part or painted object; otherwise Feature Split.
-MixedNozzleSlicingMode wizard_default_mode(MixedNozzleSlicingMode configured, bool split_by_part);
+// The mode step 1 opens on: the project's own Feature Split or Body Split when it has one. A new
+// setup (mode Off) opens on Body Split when the plate has a multi-part or painted object, otherwise
+// Feature Split. body_paint_unusable: the plate's painted colors sit on tools Body Split cannot pair
+// (a tool changer with more than two color tools), so a new setup opens on Feature Split there.
+MixedNozzleSlicingMode wizard_default_mode(MixedNozzleSlicingMode configured, bool split_by_part,
+                                           bool body_paint_unusable = false);
 
 // One material's Review line: its nozzle, that nozzle's flow type and the material's speed limit
 // there. "2: PLA Basic on the right 0.8 mm High Flow, speed limit 40 mm³/s".
@@ -915,6 +929,8 @@ struct WizardReviewSummaryInput {
     std::vector<std::string> joined_assemblies;
     std::optional<WizardEstimate> estimate;
     std::optional<WizardEstimate> baseline;
+    // The baseline keeps the colors (see WizardCadencePage::colors_kept).
+    bool baseline_colors_kept {false};
     // Supports as Apply leaves them: the base and the interface, and the fine material's type for
     // the interface layer hint.
     bool supports {false};

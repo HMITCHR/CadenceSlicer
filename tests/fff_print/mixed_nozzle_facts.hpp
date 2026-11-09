@@ -22,9 +22,9 @@ struct EmittedRoleFact
     float width{ 0.0f };
     float mm3_per_mm{ 0.0f };
     size_t move_count{ 0 };
-    // Print Z of the bucket's first move, and the XY box every move of the bucket ends inside.
+    // Print Z of the bucket's first move, and the X range its moves end inside.
     float z{ 0.0f };
-    float min_x{ 0.0f }, min_y{ 0.0f }, max_x{ 0.0f }, max_y{ 0.0f };
+    float min_x{ 0.0f }, max_x{ 0.0f };
 };
 
 // One physical-tool change observed in the move stream, in emission order.
@@ -36,25 +36,20 @@ struct EmittedToolChange
 };
 
 // A parsed "; SRL_SUPPORT ..." record, emitted at most once per plan block. Tool indices are
-// 0-based physical extruder ids; heights are coordf_t values printed with eight decimal places.
+// 0-based physical extruder ids.
 struct EmittedPlanSupport
 {
     unsigned int base_tool{ 0 };
-    double       base_height{ 0. };
     unsigned int interface_tool{ 0 };
-    double       interface_height{ 0. };
 };
 
 // A parsed "; SRL_GRID ..." record from the emitted plan block.
 struct EmittedPlanGrid
 {
-    size_t       region{ 0 };
     unsigned int tool{ 0 };
-    double       nozzle{ 0. };
     double       cadence{ 0. };
     size_t       cells{ 0 };
     double       top_z{ 0. };
-    std::string  phase;
 };
 
 // What GCodeProcessor plus the SRL_PLAN block say about one emitted G-code stream.
@@ -64,9 +59,8 @@ struct EmittedFacts
     std::vector<EmittedToolChange> tool_changes;
     std::vector<EmittedPlanGrid>   plan_grids;
     std::optional<EmittedPlanSupport> support;
-    // The "; SRL_TOOLCHANGES total=<n> per_band=<n>" record, when the plan carries one.
+    // The total of the "; SRL_TOOLCHANGES total=<n> per_band=<n>" record, when the plan carries one.
     std::optional<int>             plan_toolchanges_total;
-    std::optional<int>             plan_toolchanges_per_band;
     size_t                         plan_start_markers{ 0 };
     size_t                         plan_end_markers{ 0 };
     bool                           plan_malformed{ false };
